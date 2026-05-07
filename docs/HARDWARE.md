@@ -113,6 +113,22 @@ sudo bash scripts/power-cap-sweep.sh \
   --bench-runs 3
 ```
 
+### Recommended sweep chain — when to run each mode
+
+For a single-rig anchor (cross-rig contribution): **one mode is fine** — pick the one that matches your dominant workload class.
+
+For full workload-class characterization on **your** rig: **run two modes** (~14 min total). The decode and prefill sweet spots can differ — same hardware, different compute/bandwidth ratio per workload class. We measured 290W decode vs 250W prefill on the same 3090 (40W gap); apnar's 5090 showed 400W for both decode and prefill (workload-independent on Blackwell). You won't know which pattern your rig follows without running both.
+
+| If you're optimizing for | Run this mode | Sweep wall (3090) |
+|---|---|---:|
+| Chat / IDE-agent / single-stream | `--load-mode decode-single` | ~8 min |
+| RAG / long-context / batch | `--load-mode prefill-heavy` | ~6 min |
+| Multi-tenant (3+ concurrent users) | `--load-mode decode-concurrent --concurrency auto` | ~8 min |
+
+**Pick a cap that's the min across the modes you care about** — e.g. if you care about both chat AND RAG on a 3090, `min(290W, 250W) = 250W` is the safer pick that stays efficient on either workload class. Costs ~5% TPS on the chat workload but keeps prefill at its sweet spot.
+
+**Plateau detection** (since 2026-05-07): the script now auto-detects boost-clock plateaus (3+ adjacent caps with identical draw + TPS within ±1%) and emits a `[plateau detected]` line plus a "Detected boost-clock plateau(s)" section in the summary file. If your rig shows a plateau, the caps inside it are functionally equivalent — pick the **lowest** cap in the plateau range to save power for free TPS.
+
 How `decode-single` is timed (the new default since 2026-05-07):
 - **Time-bounded streaming bench**: 10s narrative + 10s code per cap (configurable via `--target-cap-seconds`). Per-cap wall is constant ~23s regardless of cap or card class.
 - **Cross-card portable**: a 3090 sweep (190-390W, 21 caps) takes ~8 min; a 5090 sweep (300-600W, 31 caps) ~12 min; a 4090 sweep (230-600W, 38 caps) ~15 min — runtime scales linearly with cap count, not throttle severity.

@@ -105,6 +105,22 @@
 #   P2=sustained-load pinned, higher numbers=idle). Boost-state plateaus appear when
 #   adjacent caps share a P-state and draw the same wattage despite different cap settings.
 #
+# Plateau auto-detection:
+#   At end of sweep, the script scans for 3+ consecutive caps with identical draw
+#   (within ±2W) and TPS (within ±1%) — a firmware boost-clock plateau where caps
+#   in the run are functionally equivalent. Detected plateaus are logged via
+#   [plateau detected] lines and added as a "Detected boost-clock plateau(s)"
+#   section in the summary file. Pick the LOWEST cap in a plateau to save power
+#   for free; raising past the plateau end-cap is the only way to escape.
+#
+# Recommended sweep chain (full workload-class characterization on your rig):
+#   Run two modes — decode and prefill sweet spots can differ. ~14 min total.
+#     1. sudo bash scripts/power-cap-sweep.sh --cooling <class> --load-mode decode-single
+#     2. sudo bash scripts/power-cap-sweep.sh --cooling <class> --load-mode prefill-heavy
+#   For multi-tenant rigs, also:
+#     3. sudo bash scripts/power-cap-sweep.sh --cooling <class> --load-mode decode-concurrent --concurrency auto
+#   See docs/HARDWARE.md > Power > "Recommended sweep chain" for the full rationale.
+#
 # Requires sudo for `nvidia-smi -pl`. Auto-detects running container + URL +
 # MODEL via the same logic as bench.sh.
 #
@@ -1315,6 +1331,91 @@ PY
     >> "$RESULTS_FILE"
 done
 
+# Detect boost-clock plateaus from the captured data.
+# A plateau is 3+ consecutive caps where SM clock is identical, actual draw is
+# within ±2W, and TPS is within ±1%. This pattern signals firmware boost-state
+# locking — raising the cap doesn't push past until the firmware decides to
+# step to a new operating point. See learnings/qwen3.6-35b-a3b.md for examples.
+PLATEAU_LINES=$(python3 - "$RESULTS_FILE" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+rows = []
+row_re = re.compile(
+    r'^\|\s*(\d+)\s*'                         # cap
+    r'\|\s*([\d.?]+)\s*'                      # narr TPS
+    r'\|\s*([\d.?]+)\s*'                      # code TPS
+    r'\|\s*([\d.?]+)\s*'                      # actual_W
+    r'\|\s*(\d+|\?)\s*'                       # temp
+    r'\|\s*(\d+|\?)\s*'                       # sm_clk
+    r'\|\s*(\d+|\?)\s*'                       # mem_clk
+    r'\|\s*([\d.?]+)\s*'                      # pwr_throttle %
+    r'\|\s*([P\d?]+)\s*'                      # pstate
+    r'\|\s*([\d.?]+)\s*\|\s*$'                # tps/w
+)
+
+with open(path) as f:
+    for line in f:
+        m = row_re.match(line.strip())
+        if not m:
+            continue
+        try:
+            cap = int(m.group(1))
+            narr = float(m.group(2))
+            draw = float(m.group(4))
+            sm = int(m.group(6))
+            rows.append((cap, narr, draw, sm))
+        except ValueError:
+            continue
+
+# A plateau is a run where draw and TPS are functionally identical (within ±2W
+# and ±1% TPS) regardless of cap. SM clock often locks to a single value across
+# the plateau, but firmware can use slightly different SM setpoints (e.g. 1605
+# vs 1620 MHz) within the same operating-point envelope — so we report SM as a
+# range when it varies, single value when locked.
+plateaus = []
+i = 0
+while i < len(rows):
+    j = i + 1
+    base_draw = rows[i][2]
+    base_tps = rows[i][1]
+    sm_min = sm_max = rows[i][3]
+    while j < len(rows):
+        draw_match = abs(rows[j][2] - base_draw) <= 2.0
+        tps_match = abs(rows[j][1] - base_tps) / max(base_tps, 0.1) <= 0.01
+        if draw_match and tps_match:
+            sm_min = min(sm_min, rows[j][3])
+            sm_max = max(sm_max, rows[j][3])
+            j += 1
+        else:
+            break
+    if j - i >= 3:
+        sm_label = str(sm_min) if sm_min == sm_max else f"{sm_min}-{sm_max}"
+        plateaus.append((rows[i][0], rows[j-1][0], sm_label, base_draw, base_tps))
+        i = j
+    else:
+        i += 1
+
+for start, end, sm, draw, tps in plateaus:
+    # tab-separated so "1605-1620" stays as one field
+    print(f"{start}\t{end}\t{sm}\t{draw:.2f}\t{tps:.2f}")
+PY
+)
+
+if [ -n "$PLATEAU_LINES" ]; then
+  echo "================================================"
+  echo "Boost-clock plateau(s) detected"
+  echo "================================================"
+  while IFS=$'\t' read -r START END SM DRAW TPS; do
+    [ -z "$START" ] && continue
+    SPAN=$((END - START))
+    printf "[plateau detected] caps %sW–%sW (%dW span) → SM %s MHz, %sW draw, %s TPS — firmware boost-clock lock; raise cap past %sW to escape\n" \
+      "$START" "$END" "$SPAN" "$SM" "$DRAW" "$TPS" "$END"
+  done <<< "$PLATEAU_LINES"
+  echo
+fi
+
 # Reset
 if [ "$RESET" -eq 1 ]; then
   echo "[reset] restoring GPU $GPU_INDEX to stock TDP (${STOCK_TDP}W)"
@@ -1326,6 +1427,16 @@ fi
 # Append context to results file
 {
   echo ""
+  if [ -n "$PLATEAU_LINES" ]; then
+    echo "**Detected boost-clock plateau(s):**"
+    echo ""
+    while IFS=$'\t' read -r START END SM DRAW TPS; do
+      [ -z "$START" ] && continue
+      SPAN=$((END - START))
+      echo "- Caps **${START}W–${END}W** (${SPAN}W span) → SM **${SM} MHz**, **${DRAW}W** draw, **${TPS} TPS** — firmware boost-clock plateau. Caps in this range are functionally equivalent; raise past **${END}W** to step to the next firmware operating point."
+    done <<< "$PLATEAU_LINES"
+    echo ""
+  fi
   echo "**Reset:** $([ $RESET -eq 1 ] && echo "auto-reset to ${STOCK_TDP}W stock" || echo "left at last cap (--no-reset)")"
   echo ""
   echo "**Notes:**"

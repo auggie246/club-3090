@@ -18,6 +18,7 @@
 #   sudo bash scripts/power-cap-sweep.sh --cooling air            # tag as air-cooled
 #   sudo bash scripts/power-cap-sweep.sh --cooling aio            # tag as AIO/closed-loop
 #   sudo bash scripts/power-cap-sweep.sh --load-mode decode-concurrent --concurrency 8
+#   sudo bash scripts/power-cap-sweep.sh --load-mode decode-concurrent --concurrency 8 --bench-runs 3
 #   sudo bash scripts/power-cap-sweep.sh --load-mode prefill-heavy
 #   sudo bash scripts/power-cap-sweep.sh --no-reset               # leave at last cap (you reset manually)
 #
@@ -32,16 +33,16 @@
 #     this for realistic multi-request serving load, especially on larger cards
 #     where decode-single is under-loaded and produces flat power curves.
 #
-#     ⚠️ VARIANCE CAVEAT: decode-concurrent runs n=1 measurement per cap (one
-#     batch of N concurrent requests for narr, one for code). Aggregate TPS
-#     can vary 10-30% between back-to-back runs at the SAME cap because vLLM's
-#     continuous-batching window is timing-sensitive — whether N requests
-#     batch together vs queue sequentially depends on arrival jitter. Single
-#     caps may show TPS going the "wrong direction" between adjacent caps.
-#     For cross-rig anchor data, prefer one of: (a) bump --concurrency to 8
-#     or 16 so per-stream noise averages out; (b) run the sweep 2-3 times
-#     and median per cap; (c) read curve shape across the full 30-cap sweep
-#     instead of comparing adjacent caps.
+#     ⚠️ VARIANCE CAVEAT: decode-concurrent defaults to n=1 measured batch per
+#     cap (one batch of N concurrent requests for narr, one for code). Aggregate
+#     TPS can vary 10-30% between back-to-back runs at the SAME cap because
+#     vLLM's continuous-batching window is timing-sensitive — whether N
+#     requests batch together vs queue sequentially depends on arrival jitter.
+#     Single caps may show TPS going the "wrong direction" between adjacent
+#     caps. For cross-rig anchor data, prefer one of: (a) bump --concurrency to
+#     8 or 16 so per-stream noise averages out; (b) pass --bench-runs 3 to
+#     median repeated batches per cap; (c) read curve shape across the full
+#     30-cap sweep instead of comparing adjacent caps.
 #
 #   prefill-heavy:
 #     Sends one large prompt with a tiny decode tail and reports prompt prefill
@@ -100,6 +101,7 @@ COOLING="unspecified" # air|water|aio|unspecified — affects how to read the da
 STEP_SIZE=10          # increment in W between caps when --caps not specified (10W matches @laurimyllari's resolution)
 LOAD_MODE="decode-single"   # decode-single | decode-concurrent | prefill-heavy
 CONCURRENCY=4         # parallel streams when LOAD_MODE=decode-concurrent (matches typical compose --max-num-seqs)
+BENCH_RUNS=1          # repeated measured batches for decode-concurrent/prefill-heavy (median reported)
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -109,6 +111,7 @@ while [ $# -gt 0 ]; do
     --step-size)   STEP_SIZE="$2"; shift 2 ;;
     --load-mode)   LOAD_MODE="$2"; shift 2 ;;
     --concurrency) CONCURRENCY="$2"; shift 2 ;;
+    --bench-runs)  BENCH_RUNS="$2"; shift 2 ;;
     --no-reset)    RESET=0; shift ;;
     -h|--help)
       sed -n '1,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \?//'
@@ -124,6 +127,10 @@ case "$LOAD_MODE" in
 esac
 if ! [[ "$CONCURRENCY" =~ ^[1-9][0-9]*$ ]]; then
   echo "[error] --concurrency must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$BENCH_RUNS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[error] --bench-runs must be a positive integer" >&2
   exit 1
 fi
 
@@ -258,7 +265,7 @@ else
   echo "[setup] sweep caps: $NUM_CAPS caps (user-specified)"
   echo "[setup]            $CAPS W"
 fi
-echo "[setup] load mode: $LOAD_MODE$([ "$LOAD_MODE" = "decode-concurrent" ] && echo " (concurrency=$CONCURRENCY)")"
+echo "[setup] load mode: $LOAD_MODE$([ "$LOAD_MODE" = "decode-concurrent" ] && echo " (concurrency=$CONCURRENCY)")$([ "$LOAD_MODE" != "decode-single" ] && echo " (bench-runs=$BENCH_RUNS)")"
 echo "[setup] estimated runtime: ~${EST_MIN} min (${NUM_CAPS} caps × ~30s/cap)"
 echo "[setup] reset at end: $([ $RESET -eq 1 ] && echo yes || echo no)"
 echo
@@ -333,7 +340,7 @@ RESULTS_FILE=/tmp/power-cap-summary.md
   echo ""
   echo "**GPU:** $GPU_NAME &nbsp; **VRAM:** ${GPU_VRAM} MiB &nbsp; **Stock TDP:** ${STOCK_TDP}W &nbsp; **Cooling:** ${COOLING}"
   echo "**Model:** \`${MODEL}\` &nbsp; **Engine:** \`${CONTAINER}\` &nbsp; **Endpoint:** ${URL}"
-  echo "**Load mode:** \`${LOAD_MODE}\`$([ "$LOAD_MODE" = "decode-concurrent" ] && echo " (concurrency=${CONCURRENCY})")"
+  echo "**Load mode:** \`${LOAD_MODE}\`$([ "$LOAD_MODE" = "decode-concurrent" ] && echo " (concurrency=${CONCURRENCY})")$([ "$LOAD_MODE" != "decode-single" ] && echo " (bench-runs=${BENCH_RUNS})")"
   echo "**Date:** $(date -u +%Y-%m-%dT%H:%M:%S)Z"
   echo ""
   if [ "$COOLING" = "unspecified" ]; then
@@ -430,16 +437,19 @@ for CAP in "${CAP_ARRAY[@]}"; do
       # AGGREGATE TPS (sum across all streams) so the column is directly
       # comparable across caps but NOT directly comparable to decode-single
       # numbers (different metric).
-      echo "[bench] decode-concurrent @ ${CAP}W cap, N=${CONCURRENCY} (output: $LOG_FILE)"
+      echo "[bench] decode-concurrent @ ${CAP}W cap, N=${CONCURRENCY}, runs=${BENCH_RUNS} (output: $LOG_FILE)"
       : > "$LOG_FILE"
-      # Narrative: spawn N parallel curls, each generating 500 tokens.
-      # Track curl PIDs explicitly. Plain `wait` would also wait on the
-      # infinite power sampler and hang forever.
-      CURL_PIDS=()
-      START_NS_NARR=$(date +%s%N)
-      for i in $(seq 1 "$CONCURRENCY"); do
-        REQ_FILE="/tmp/power-cap-N${CAP}-narr-${i}.req.json"
-        python3 - "$REQ_FILE" "$MODEL" <<'PY'
+      NARR_TPS_VALUES=()
+      CODE_TPS_VALUES=()
+      for RUN_IDX in $(seq 1 "$BENCH_RUNS"); do
+        # Narrative: spawn N parallel curls, each generating 500 tokens.
+        # Track curl PIDs explicitly. Plain `wait` would also wait on the
+        # infinite power sampler and hang forever.
+        CURL_PIDS=()
+        START_NS_NARR=$(date +%s%N)
+        for i in $(seq 1 "$CONCURRENCY"); do
+          REQ_FILE="/tmp/power-cap-N${CAP}-r${RUN_IDX}-narr-${i}.req.json"
+          python3 - "$REQ_FILE" "$MODEL" <<'PY'
 import json
 import sys
 
@@ -456,50 +466,51 @@ body = {
 with open(path, "w", encoding="utf-8") as f:
     json.dump(body, f)
 PY
-        curl -sS -f --max-time 120 "${URL}/v1/chat/completions" \
-          -H 'Content-Type: application/json' \
-          -d "@${REQ_FILE}" \
-          -o "/tmp/power-cap-N${CAP}-narr-${i}.json" 2>>"$LOG_FILE" &
-        CURL_PIDS+=("$!")
-      done
-      CURL_FAILS=0
-      for pid in "${CURL_PIDS[@]}"; do
-        if ! wait "$pid"; then
-          CURL_FAILS=$((CURL_FAILS + 1))
+          curl -sS -f --max-time 120 "${URL}/v1/chat/completions" \
+            -H 'Content-Type: application/json' \
+            -d "@${REQ_FILE}" \
+            -o "/tmp/power-cap-N${CAP}-r${RUN_IDX}-narr-${i}.json" 2>>"$LOG_FILE" &
+          CURL_PIDS+=("$!")
+        done
+        CURL_FAILS=0
+        for pid in "${CURL_PIDS[@]}"; do
+          if ! wait "$pid"; then
+            CURL_FAILS=$((CURL_FAILS + 1))
+          fi
+        done
+        END_NS_NARR=$(date +%s%N)
+        if [ "$CURL_FAILS" -gt 0 ]; then
+          echo "[warn] narrative run ${RUN_IDX} concurrent curl failures: $CURL_FAILS / $CONCURRENCY" | tee -a "$LOG_FILE"
         fi
-      done
-      END_NS_NARR=$(date +%s%N)
-      if [ "$CURL_FAILS" -gt 0 ]; then
-        echo "[warn] narrative concurrent curl failures: $CURL_FAILS / $CONCURRENCY" | tee -a "$LOG_FILE"
-      fi
-      NARR_WALL_S=$(python3 - "$START_NS_NARR" "$END_NS_NARR" <<'PY'
+        NARR_WALL_S=$(python3 - "$START_NS_NARR" "$END_NS_NARR" <<'PY'
 import sys
 start, end = map(int, sys.argv[1:3])
 print((end - start) / 1e9)
 PY
 )
-      NARR_TOTAL_TOKENS=0
-      for i in $(seq 1 "$CONCURRENCY"); do
-        if [ -s "/tmp/power-cap-N${CAP}-narr-${i}.json" ]; then
-          T=$(python3 -c "import json; print(json.load(open('/tmp/power-cap-N${CAP}-narr-${i}.json')).get('usage',{}).get('completion_tokens',0))" 2>/dev/null || echo 0)
-          NARR_TOTAL_TOKENS=$((NARR_TOTAL_TOKENS + T))
-        fi
-      done
-      NARR_TPS=$(python3 - "$NARR_TOTAL_TOKENS" "$NARR_WALL_S" <<'PY'
+        NARR_TOTAL_TOKENS=0
+        for i in $(seq 1 "$CONCURRENCY"); do
+          if [ -s "/tmp/power-cap-N${CAP}-r${RUN_IDX}-narr-${i}.json" ]; then
+            T=$(python3 -c "import json; print(json.load(open('/tmp/power-cap-N${CAP}-r${RUN_IDX}-narr-${i}.json')).get('usage',{}).get('completion_tokens',0))" 2>/dev/null || echo 0)
+            NARR_TOTAL_TOKENS=$((NARR_TOTAL_TOKENS + T))
+          fi
+        done
+        NARR_RUN_TPS=$(python3 - "$NARR_TOTAL_TOKENS" "$NARR_WALL_S" <<'PY'
 import sys
 tokens = int(sys.argv[1])
 wall = float(sys.argv[2])
 print(f"{tokens / max(wall, 0.001):.2f}")
 PY
 )
-      echo "[narr] $CONCURRENCY streams × ~500 tok = $NARR_TOTAL_TOKENS tok in ${NARR_WALL_S}s → aggregate $NARR_TPS TPS" | tee -a "$LOG_FILE"
+        NARR_TPS_VALUES+=("$NARR_RUN_TPS")
+        echo "[narr r${RUN_IDX}/${BENCH_RUNS}] $CONCURRENCY streams × ~500 tok = $NARR_TOTAL_TOKENS tok in ${NARR_WALL_S}s → aggregate $NARR_RUN_TPS TPS" | tee -a "$LOG_FILE"
 
-      # Code: same shape, code prompt
-      CURL_PIDS=()
-      START_NS_CODE=$(date +%s%N)
-      for i in $(seq 1 "$CONCURRENCY"); do
-        REQ_FILE="/tmp/power-cap-N${CAP}-code-${i}.req.json"
-        python3 - "$REQ_FILE" "$MODEL" <<'PY'
+        # Code: same shape, code prompt
+        CURL_PIDS=()
+        START_NS_CODE=$(date +%s%N)
+        for i in $(seq 1 "$CONCURRENCY"); do
+          REQ_FILE="/tmp/power-cap-N${CAP}-r${RUN_IDX}-code-${i}.req.json"
+          python3 - "$REQ_FILE" "$MODEL" <<'PY'
 import json
 import sys
 
@@ -516,43 +527,61 @@ body = {
 with open(path, "w", encoding="utf-8") as f:
     json.dump(body, f)
 PY
-        curl -sS -f --max-time 120 "${URL}/v1/chat/completions" \
-          -H 'Content-Type: application/json' \
-          -d "@${REQ_FILE}" \
-          -o "/tmp/power-cap-N${CAP}-code-${i}.json" 2>>"$LOG_FILE" &
-        CURL_PIDS+=("$!")
-      done
-      CURL_FAILS=0
-      for pid in "${CURL_PIDS[@]}"; do
-        if ! wait "$pid"; then
-          CURL_FAILS=$((CURL_FAILS + 1))
+          curl -sS -f --max-time 120 "${URL}/v1/chat/completions" \
+            -H 'Content-Type: application/json' \
+            -d "@${REQ_FILE}" \
+            -o "/tmp/power-cap-N${CAP}-r${RUN_IDX}-code-${i}.json" 2>>"$LOG_FILE" &
+          CURL_PIDS+=("$!")
+        done
+        CURL_FAILS=0
+        for pid in "${CURL_PIDS[@]}"; do
+          if ! wait "$pid"; then
+            CURL_FAILS=$((CURL_FAILS + 1))
+          fi
+        done
+        END_NS_CODE=$(date +%s%N)
+        if [ "$CURL_FAILS" -gt 0 ]; then
+          echo "[warn] code run ${RUN_IDX} concurrent curl failures: $CURL_FAILS / $CONCURRENCY" | tee -a "$LOG_FILE"
         fi
-      done
-      END_NS_CODE=$(date +%s%N)
-      if [ "$CURL_FAILS" -gt 0 ]; then
-        echo "[warn] code concurrent curl failures: $CURL_FAILS / $CONCURRENCY" | tee -a "$LOG_FILE"
-      fi
-      CODE_WALL_S=$(python3 - "$START_NS_CODE" "$END_NS_CODE" <<'PY'
+        CODE_WALL_S=$(python3 - "$START_NS_CODE" "$END_NS_CODE" <<'PY'
 import sys
 start, end = map(int, sys.argv[1:3])
 print((end - start) / 1e9)
 PY
 )
-      CODE_TOTAL_TOKENS=0
-      for i in $(seq 1 "$CONCURRENCY"); do
-        if [ -s "/tmp/power-cap-N${CAP}-code-${i}.json" ]; then
-          T=$(python3 -c "import json; print(json.load(open('/tmp/power-cap-N${CAP}-code-${i}.json')).get('usage',{}).get('completion_tokens',0))" 2>/dev/null || echo 0)
-          CODE_TOTAL_TOKENS=$((CODE_TOTAL_TOKENS + T))
-        fi
-      done
-      CODE_TPS=$(python3 - "$CODE_TOTAL_TOKENS" "$CODE_WALL_S" <<'PY'
+        CODE_TOTAL_TOKENS=0
+        for i in $(seq 1 "$CONCURRENCY"); do
+          if [ -s "/tmp/power-cap-N${CAP}-r${RUN_IDX}-code-${i}.json" ]; then
+            T=$(python3 -c "import json; print(json.load(open('/tmp/power-cap-N${CAP}-r${RUN_IDX}-code-${i}.json')).get('usage',{}).get('completion_tokens',0))" 2>/dev/null || echo 0)
+            CODE_TOTAL_TOKENS=$((CODE_TOTAL_TOKENS + T))
+          fi
+        done
+        CODE_RUN_TPS=$(python3 - "$CODE_TOTAL_TOKENS" "$CODE_WALL_S" <<'PY'
 import sys
 tokens = int(sys.argv[1])
 wall = float(sys.argv[2])
 print(f"{tokens / max(wall, 0.001):.2f}")
 PY
 )
-      echo "[code] $CONCURRENCY streams × ~400 tok = $CODE_TOTAL_TOKENS tok in ${CODE_WALL_S}s → aggregate $CODE_TPS TPS" | tee -a "$LOG_FILE"
+        CODE_TPS_VALUES+=("$CODE_RUN_TPS")
+        echo "[code r${RUN_IDX}/${BENCH_RUNS}] $CONCURRENCY streams × ~400 tok = $CODE_TOTAL_TOKENS tok in ${CODE_WALL_S}s → aggregate $CODE_RUN_TPS TPS" | tee -a "$LOG_FILE"
+      done
+
+      NARR_TPS=$(python3 - "${NARR_TPS_VALUES[@]}" <<'PY'
+import statistics
+import sys
+vals = [float(x) for x in sys.argv[1:]]
+print(f"{statistics.median(vals):.2f}" if vals else "?")
+PY
+)
+      CODE_TPS=$(python3 - "${CODE_TPS_VALUES[@]}" <<'PY'
+import statistics
+import sys
+vals = [float(x) for x in sys.argv[1:]]
+print(f"{statistics.median(vals):.2f}" if vals else "?")
+PY
+)
+      echo "[summary] median aggregate TPS across ${BENCH_RUNS} run(s): narr=${NARR_TPS}, code=${CODE_TPS}" | tee -a "$LOG_FILE"
 
       kill $SAMPLER_PID 2>/dev/null || true
       wait $SAMPLER_PID 2>/dev/null || true
@@ -567,12 +596,14 @@ PY
       # since prefill TPS scales directly with tensor-core throughput.
       # Less commonly useful than decode-concurrent for "real workload"
       # framing, but produces a clean compute-only curve for diagnostic.
-      echo "[bench] prefill-heavy @ ${CAP}W cap (output: $LOG_FILE)"
+      echo "[bench] prefill-heavy @ ${CAP}W cap, runs=${BENCH_RUNS} (output: $LOG_FILE)"
       : > "$LOG_FILE"
-      REQ_FILE="/tmp/power-cap-N${CAP}-prefill.req.json"
-      # Generate request JSON in Python so the ~50K-token filler is escaped
-      # correctly and never crosses shell argument-size limits.
-      python3 - "$REQ_FILE" "$MODEL" <<'PY'
+      PREFILL_TPS_VALUES=()
+      for RUN_IDX in $(seq 1 "$BENCH_RUNS"); do
+        REQ_FILE="/tmp/power-cap-N${CAP}-r${RUN_IDX}-prefill.req.json"
+        # Generate request JSON in Python so the ~50K-token filler is escaped
+        # correctly and never crosses shell argument-size limits.
+        python3 - "$REQ_FILE" "$MODEL" <<'PY'
 import json
 import sys
 import time
@@ -589,31 +620,41 @@ body = {
 with open(path, "w", encoding="utf-8") as f:
     json.dump(body, f)
 PY
-      START_NS=$(date +%s%N)
-      if ! curl -sS -f --max-time 300 "${URL}/v1/chat/completions" \
-        -H 'Content-Type: application/json' \
-        -d "@${REQ_FILE}" \
-        -o "/tmp/power-cap-N${CAP}-prefill.json" 2>>"$LOG_FILE"; then
-        echo "[warn] prefill-heavy curl failed at ${CAP}W" | tee -a "$LOG_FILE"
-      fi
-      END_NS=$(date +%s%N)
-      WALL_S=$(python3 - "$START_NS" "$END_NS" <<'PY'
+        START_NS=$(date +%s%N)
+        if ! curl -sS -f --max-time 300 "${URL}/v1/chat/completions" \
+          -H 'Content-Type: application/json' \
+          -d "@${REQ_FILE}" \
+          -o "/tmp/power-cap-N${CAP}-r${RUN_IDX}-prefill.json" 2>>"$LOG_FILE"; then
+          echo "[warn] prefill-heavy run ${RUN_IDX} curl failed at ${CAP}W" | tee -a "$LOG_FILE"
+        fi
+        END_NS=$(date +%s%N)
+        WALL_S=$(python3 - "$START_NS" "$END_NS" <<'PY'
 import sys
 start, end = map(int, sys.argv[1:3])
 print((end - start) / 1e9)
 PY
 )
-      PROMPT_TOKENS=$(python3 -c "import json; print(json.load(open('/tmp/power-cap-N${CAP}-prefill.json')).get('usage',{}).get('prompt_tokens',0))" 2>/dev/null || echo 0)
-      # Prefill TPS = prompt_tokens / wall (excludes the small max_tokens decode tail)
-      NARR_TPS=$(python3 - "$PROMPT_TOKENS" "$WALL_S" <<'PY'
+        PROMPT_TOKENS=$(python3 -c "import json; print(json.load(open('/tmp/power-cap-N${CAP}-r${RUN_IDX}-prefill.json')).get('usage',{}).get('prompt_tokens',0))" 2>/dev/null || echo 0)
+        # Prefill TPS = prompt_tokens / wall (excludes the small max_tokens decode tail)
+        PREFILL_RUN_TPS=$(python3 - "$PROMPT_TOKENS" "$WALL_S" <<'PY'
 import sys
 tokens = int(sys.argv[1])
 wall = float(sys.argv[2])
 print(f"{tokens / max(wall, 0.001):.2f}")
 PY
 )
+        PREFILL_TPS_VALUES+=("$PREFILL_RUN_TPS")
+        echo "[prefill r${RUN_IDX}/${BENCH_RUNS}] $PROMPT_TOKENS tokens in ${WALL_S}s → $PREFILL_RUN_TPS prefill TPS" | tee -a "$LOG_FILE"
+      done
+      NARR_TPS=$(python3 - "${PREFILL_TPS_VALUES[@]}" <<'PY'
+import statistics
+import sys
+vals = [float(x) for x in sys.argv[1:]]
+print(f"{statistics.median(vals):.2f}" if vals else "?")
+PY
+)
       CODE_TPS="$NARR_TPS"   # use same column; prefill doesn't differentiate narr/code
-      echo "[prefill] $PROMPT_TOKENS tokens in ${WALL_S}s → $NARR_TPS prefill TPS" | tee -a "$LOG_FILE"
+      echo "[summary] median prefill TPS across ${BENCH_RUNS} run(s): ${NARR_TPS}" | tee -a "$LOG_FILE"
 
       kill $SAMPLER_PID 2>/dev/null || true
       wait $SAMPLER_PID 2>/dev/null || true
@@ -699,17 +740,17 @@ fi
       ;;
     decode-concurrent)
       echo "- Load mode: \`decode-concurrent\` — ${CONCURRENCY} parallel chat completions for narr, then ${CONCURRENCY} parallel chat completions for code."
-      echo "- TPS columns are **aggregate** throughput: total completion tokens across streams / batch wall time."
-      echo "- ⚠️ **Variance caveat**: each cap is a **single batch of ${CONCURRENCY} concurrent requests** (n=1)."
+      echo "- TPS columns are **median aggregate** throughput across ${BENCH_RUNS} measured batch(es): total completion tokens across streams / batch wall time."
+      echo "- ⚠️ **Variance caveat**: with \`--bench-runs 1\`, each cap is a **single batch of ${CONCURRENCY} concurrent requests**."
       echo "  Aggregate TPS can vary 10-30% between back-to-back runs at the same cap because vLLM's"
       echo "  continuous-batching window is timing-sensitive — adjacent caps may show TPS going the"
       echo "  \"wrong direction\" without that being a real signal. Read **curve shape across the full"
-      echo "  sweep**, not adjacent-cap deltas. For tighter cross-rig anchors, bump \`--concurrency\` to 8"
-      echo "  or 16 so per-stream noise averages out, or run the sweep 2-3× and median per cap."
+      echo "  sweep**, not adjacent-cap deltas. For tighter cross-rig anchors, use \`--bench-runs 3\`,"
+      echo "  and/or bump \`--concurrency\` to 8 or 16 so per-stream noise averages out."
       ;;
     prefill-heavy)
       echo "- Load mode: \`prefill-heavy\` — one large prompt with \`max_tokens=10\`; both TPS columns show prompt prefill TPS."
-      echo "- Prefill TPS = response \`usage.prompt_tokens\` / request wall time."
+      echo "- Prefill TPS = median of ${BENCH_RUNS} run(s), each computed as response \`usage.prompt_tokens\` / request wall time."
       ;;
   esac
   echo "- Actual power = **median** of 0.5s samples taken DURING the workload where util > 50% (i.e. under-load)."

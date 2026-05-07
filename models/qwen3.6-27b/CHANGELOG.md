@@ -2,6 +2,16 @@
 
 Dated history for Qwen3.6-27B configs in this repo. Combines the single-card and dual-card timelines (both were previously separate repos; consolidated here 2026-04-28).
 
+## 2026-05-07 — `llamacpp/default` adds `--reasoning-format none` (opencode unblock)
+
+@syangsao reported opencode hangs indefinitely against `llamacpp/default` despite the server returning 200 with content tokens generated successfully ([#97](https://github.com/noonghunna/club-3090/issues/97)). Diagnosis via curl SSE capture: every delta was in the `reasoning_content` field, never `content` — Qwen3.6's thinking mode emits `<think>` blocks that llama.cpp's peg-native parser routes to `reasoning_content` by default. opencode (and most simple OpenAI-compat clients) ignore `reasoning_content` and wait indefinitely for `content` deltas that never arrive.
+
+**Fix**: added `--reasoning-format ${REASONING_FORMAT:-none}` to `models/qwen3.6-27b/llama-cpp/compose/docker-compose.yml` and `docker-compose.concurrent.yml`. Default `none` collapses thinking into the content stream — opencode and other simple clients work out-of-box. Power users wanting `reasoning_content` separation set `REASONING_FORMAT=auto` in `.env` or shell.
+
+Cross-rig validated by @syangsao (1× 3090 water, 330W cap, b9014 image): Fix 2 path (`chat_template_kwargs.enable_thinking: false` in opencode config) confirmed unblocked. Fix 1 (server-side flag) is the same root-cause solution applied at the compose layer so every contributor doesn't hit this. Bench numbers from his unblocked session: 28.88 TPS decode / 741 TPS prompt at 45K accumulated context — within Q3_K_XL Qwen3.6 + DeltaNet hybrid expectations.
+
+Companion observation: DeltaNet hybrid prevents prefix-cache reuse across turns ("forcing full prompt re-processing due to lack of cache data ... SWA or hybrid/recurrent memory"). Each multi-turn opencode interaction does full prefill — known characteristic, not a regression.
+
 ## 2026-05-07 — NVLink + DFlash compose variants added (#92, #96)
 
 Two new community-contributed composes from @danbedford for 2× 3090 with NVLink bridge:

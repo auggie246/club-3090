@@ -51,6 +51,7 @@ services:
       -np ${PARALLEL:-4}
       --cont-batching
       --jinja
+      --reasoning-format ${REASONING_FORMAT:-none}
     deploy:
       resources:
         reservations:

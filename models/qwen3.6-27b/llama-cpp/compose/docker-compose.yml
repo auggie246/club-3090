@@ -42,8 +42,22 @@
 #   MMPROJ_FILE            path under /models  (default: qwen3.6-27b/mmproj-F16.gguf)
 #   CTX_SIZE               total KV pool       (default: 262144)
 #   KV_TYPE                K and V quant type  (default: q4_0)
+#   REASONING_FORMAT       reasoning channel routing (default: none — for opencode/IDE-agent compat)
+#                          Override to `auto` to get separate `reasoning_content` field
+#                          (Qwen3.6 thinking trace) — useful for clients that render
+#                          reasoning_content (most don't). Issue: club-3090#97.
 #   PORT                   host port           (default: 8020)
 #   CUDA_VISIBLE_DEVICES   which GPU to use    (default: 0)
+#
+# ─── opencode / IDE-agent compatibility (issue #97) ───
+# `--reasoning-format none` is the default because Qwen3.6's thinking mode
+# emits `<think>...</think>` blocks that llama.cpp's peg-native parser routes
+# to the OpenAI `reasoning_content` field by default. opencode (and most simple
+# OpenAI-compat clients) ignore `reasoning_content` and wait for `content`,
+# causing indefinite client hangs even though the server returns 200 cleanly.
+# `--reasoning-format none` collapses thinking into the content stream so all
+# clients work. Power users wanting reasoning_content separation: set
+# `REASONING_FORMAT=auto` in .env or shell.
 
 services:
   llama-cpp-qwen36-27b:
@@ -66,6 +80,7 @@ services:
       --cache-type-v ${KV_TYPE:-q4_0}
       -np 1
       --jinja
+      --reasoning-format ${REASONING_FORMAT:-none}
     deploy:
       resources:
         reservations:

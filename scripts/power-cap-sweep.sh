@@ -258,11 +258,21 @@ GPU_VRAM=$(nvidia-smi --query-gpu=memory.total          --format=csv,noheader,no
 
 SAMPLER_PID=""
 cleanup() {
+  # Avoid trap recursion if cleanup itself is interrupted
+  trap '' INT TERM EXIT
+
   if [ -n "${SAMPLER_PID:-}" ]; then
     kill "$SAMPLER_PID" 2>/dev/null || true
     wait "$SAMPLER_PID" 2>/dev/null || true
     SAMPLER_PID=""
   fi
+
+  # Kill any bench.sh / tee / curl children that might still be running.
+  # Without this, Ctrl+C or SIGTERM from a parent shell leaves orphaned
+  # subprocess writing to log files + holding the GPU cap setting.
+  # (SIGKILL bypasses this trap entirely — that's a kernel-level guarantee.)
+  pkill -TERM -P $$ 2>/dev/null || true
+
   if [ "${RESET:-1}" -eq 1 ] && [ -n "${STOCK_TDP:-}" ]; then
     nvidia-smi -pl "$STOCK_TDP" -i "$GPU_INDEX" >/dev/null 2>&1 || true
   fi
@@ -391,9 +401,19 @@ if [ -z "$CAPS" ]; then
   CAPS=$(python3 -c "
 min_l = int(float('${MIN_LIMIT%.*}'))
 max_l = int(float('${MAX_LIMIT%.*}'))
+stock = int(float('${STOCK_TDP%.*}'))
 step = max(1, int('${STEP_SIZE}'))
-# Round min UP to nearest step boundary, max DOWN — keeps caps clean multiples of step.
-start = ((min_l + step - 1) // step) * step
+# Smart floor: max(firmware-min, 50% of stock TDP). Below 50% of stock TDP,
+# the GPU is so throttled that bench takes 3-5× longer per cap and produces
+# uselessly low TPS. Skip that region by default. Override via --caps if you
+# explicitly want sub-50%-stock data.
+# Examples:
+#   3090  (firmware 100W, stock 370W) → floor max(100, 185) = 185W
+#   4090  (firmware 150W, stock 450W) → floor max(150, 225) = 225W
+#   5090  (firmware 250W, stock 600W) → floor max(250, 300) = 300W
+floor = max(min_l, int(stock * 0.5))
+# Round floor UP to nearest step boundary, max DOWN — keeps caps clean multiples of step.
+start = ((floor + step - 1) // step) * step
 end   = (max_l // step) * step
 caps = list(range(start, end + 1, step))
 # Always include the exact max_limit at the end if rounding clipped it (so we
@@ -407,8 +427,13 @@ else
   AUTO_DERIVED=0
 fi
 NUM_CAPS=$(echo "$CAPS" | tr ',' '\n' | wc -l | tr -d ' ')
-# ~30s/cap including settle + bench (1 warmup + 2 runs × 500+400 tokens).
+# Runtime estimate: ~30s/cap base for default bench shape (1 warm + 2 measured
+# of 500/400 tokens) at normal operating points. Real time scales with bench
+# shape (BENCH_RUNS_PER_CAP) and cap range (sub-50%-stock caps run 3-5× slower
+# due to GPU throttle). Estimate is conservative for the default shape; if you
+# customize via env vars or --caps below 50% stock, expect 1.5-3× longer.
 EST_MIN=$(( (NUM_CAPS * 30 + 59) / 60 ))
+EST_MAX=$(( EST_MIN * 3 ))
 HIGHEST_CAP=$(python3 - "$CAPS" <<'PY'
 import sys
 print(max(int(float(x.strip())) for x in sys.argv[1].split(",") if x.strip()))
@@ -550,8 +575,18 @@ else
 fi
 echo "[setup] load mode: $LOAD_MODE$([ "$LOAD_MODE" = "decode-concurrent" ] && echo " (concurrency=$CONCURRENCY)")$([ "$LOAD_MODE" != "decode-single" ] && echo " (bench-runs=$BENCH_RUNS)")"
 [ -n "$CALIBRATION_NOTE" ] && echo "[setup] calibration: $CALIBRATION_NOTE"
-echo "[setup] estimated runtime: ~${EST_MIN} min (${NUM_CAPS} caps × ~30s/cap)"
+echo "[setup] estimated runtime: ${EST_MIN}-${EST_MAX} min (${NUM_CAPS} caps; range varies with cap throttle + bench shape)"
 echo "[setup] reset at end: $([ $RESET -eq 1 ] && echo yes || echo no)"
+
+# Warn on configurations known to produce biased data
+if [ "${BENCH_WARMUPS:-1}" = "0" ]; then
+  echo "[warn] BENCH_WARMUPS=0: the FIRST cap of the sweep will have cold-cache bias"
+  echo "[warn]   (model weights not warm in any sense — narrative bench runs first,"
+  echo "[warn]    so first 250-500 narrative tokens absorb cold-start cost)."
+  echo "[warn]   Subsequent caps are fine (cache warm from previous cap)."
+  echo "[warn]   Recommend BENCH_WARMUPS=1 minimum unless you can discard first-cap data."
+fi
+
 echo
 
 if [ "$LOAD_MODE" = "decode-concurrent" ]; then

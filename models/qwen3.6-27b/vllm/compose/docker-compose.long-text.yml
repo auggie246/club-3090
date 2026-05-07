@@ -299,7 +299,9 @@ services:
         # patch_inputs_embeds_optional.py — backport of vllm#35975
         # (free ~64 MiB GPU + ~64 MiB pinned CPU on text-only models).
         # Drops when PR merges upstream.
-        exec vllm serve "$@"
+        # VLLM_ENFORCE_EAGER=1 in compose/.env disables CUDA graphs — use on
+        # hardware where Cliff 2 GDN activation spikes occur at runtime.
+        exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
       - --
     command:
       - --model

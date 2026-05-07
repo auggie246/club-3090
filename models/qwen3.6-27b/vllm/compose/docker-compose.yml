@@ -184,7 +184,9 @@ services:
         # Tool-parser deferred-commit fix for qwen3coder SSE-silence bug (issue #72).
         # Drops out when vllm-project/vllm lands the upstream fix.
         python3 /patches/qwen3coder_tool_parser_deferred_commit.py
-        exec vllm serve "$@"
+        # VLLM_ENFORCE_EAGER=1 in compose/.env disables CUDA graphs — use on
+        # hardware where Cliff 2 GDN activation spikes occur at runtime.
+        exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
       - --
     command:
       - --model

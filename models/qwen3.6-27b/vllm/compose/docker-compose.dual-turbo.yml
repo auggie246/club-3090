@@ -186,7 +186,9 @@ services:
         # NOTE: patch_workspace_lock_disable.py + patch_tolist_cudagraph.py
         # were previously invoked here; superseded by Genesis natives in
         # v7.72.2 (P78 + PN34). Mounts and invocations dropped 2026-05-05.
-        exec vllm serve "$@"
+        # VLLM_ENFORCE_EAGER=1 in compose/.env disables CUDA graphs — use on
+        # hardware where Cliff 2 GDN activation spikes occur at runtime.
+        exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
       - --
     command:
       - --model

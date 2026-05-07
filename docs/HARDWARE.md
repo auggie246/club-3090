@@ -122,6 +122,30 @@ Three flags matter for anchor data:
 
 **5090 compute-saturation note**: @apnar's data shows the 5090 caps at ~430W actual draw on Qwen3.6-27B even when allowed up to 575W — the workload is compute-saturated, not power-saturated. So 400W cap delivers ~equal TPS to 575W. **Confirmed cross-workload on Gemma 4 31B + MTP**: 21-cap sweep at 10W resolution shows actual draw plateaus at ~547W beyond 530W cap (no thermal throttle, GPU temp peaked 66°C — compute / memory bandwidth limit, not thermal). **Same 400W sweet spot** despite ~5× different absolute TPS class. Pattern: the 5090 + consumer-air-cooled platform appears to have a workload-independent ~400W efficiency knee on this rig class.
 
+### Interpreting "draw plateaued below cap" sweeps
+
+If your sweep ends with the high-cap rows showing **actual draw < cap by 5-15%** (e.g. 547W actual at 600W cap on a 5090 with `decode-concurrent N=4`), it usually means one of:
+
+| Pattern | Likely cause | What to try next |
+|---|---|---|
+| Draw plateau at high caps + GPU temp far below ~80°C | **Memory-bandwidth-bound decode** — the workload can't pull more power because HBM/GDDR throughput is the limit, not compute. Typical for decode-only workloads on Blackwell/Ada/Ampere. | `--load-mode prefill-heavy` (compute-bound; tests if compute can use the headroom) OR `--concurrency-stretch 4` (force more streams past plateau-detect's pick) |
+| Draw plateau + GPU temp ≥ 78°C | **Thermal throttle** kicking in. Software cap not the limit; cooling is. | Improve cooling (better airflow, undervolt, water if available); not a software fix |
+| Draw plateau across ALL caps (even low ones) + low GPU util | **Workload too small for card** (e.g. 7B model on 5090). Card is idling. | Use a bigger model OR `--concurrency 16+` to load it heavier |
+| Draw plateau at high caps even with prefill-heavy + N=8+ | **Firmware/voltage cap**. The card has a sustained-power limit below the spec'd TDP regardless of workload. | None — that's the genuine ceiling for this card |
+
+**Use `--concurrency-stretch N` to probe headroom**: if your sweep shows draw plateau and you want to know whether more concurrency would push power higher, run:
+
+```bash
+sudo bash scripts/power-cap-sweep.sh \
+  --cooling air|water|aio \
+  --load-mode decode-concurrent \
+  --concurrency auto \
+  --concurrency-stretch 4 \
+  --bench-runs 3
+```
+
+This adds 4 streams past whatever plateau-detect picked. Per-stream TPS will drop; aggregate TPS may dip a few %; actual draw may rise — telling you whether the original plateau was a workload limit (draw stays flat) or a concurrency-contention artifact (draw rises). Default 0 = current behavior (no stretch).
+
 **Discussion**: cross-rig power-cap data lives at [disc #86](https://github.com/noonghunna/club-3090/discussions/86). Drop your sweep there.
 
 ---

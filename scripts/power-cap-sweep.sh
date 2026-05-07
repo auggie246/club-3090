@@ -37,6 +37,13 @@
 #     the script probes increasing concurrency at the highest requested cap and
 #     selects the first N that reaches --load-target, or the best non-failing N.
 #
+#     Pass --concurrency-stretch N (with --concurrency auto) to add N more streams
+#     to whatever plateau-detect picked. Useful when your sweep shows draw plateau
+#     below cap (e.g. 547W actual at 600W cap on a 5090) — bumping concurrency past
+#     the auto-recommended pick can probe whether the card has compute headroom
+#     unused by the plateau-safe N. Per-stream TPS will drop; aggregate TPS may
+#     dip slightly; actual draw may rise. See docs/HARDWARE.md for interpretation.
+#
 #     ⚠️ VARIANCE CAVEAT: decode-concurrent defaults to n=1 measured batch per
 #     cap (one batch of N concurrent requests for narr, one for code). Aggregate
 #     TPS can vary 10-30% between back-to-back runs at the SAME cap because
@@ -108,6 +115,7 @@ CONCURRENCY=4         # parallel streams, or "auto", when LOAD_MODE=decode-concu
 BENCH_RUNS=1          # repeated measured batches for decode-concurrent/prefill-heavy (median reported)
 MAX_CONCURRENCY_PROBE=16
 LOAD_TARGET=0.92      # target actual-power/cap ratio for --concurrency auto
+CONCURRENCY_STRETCH=0 # add N to auto-detected concurrency (probe headroom past plateau pick)
 CALIBRATION_NOTE=""
 
 while [ $# -gt 0 ]; do
@@ -121,6 +129,7 @@ while [ $# -gt 0 ]; do
     --bench-runs)  BENCH_RUNS="$2"; shift 2 ;;
     --max-concurrency-probe) MAX_CONCURRENCY_PROBE="$2"; shift 2 ;;
     --load-target) LOAD_TARGET="$2"; shift 2 ;;
+    --concurrency-stretch) CONCURRENCY_STRETCH="$2"; shift 2 ;;
     --no-reset)    RESET=0; shift ;;
     -h|--help)
       sed -n '1,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \?//'
@@ -151,6 +160,14 @@ if ! [[ "$MAX_CONCURRENCY_PROBE" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if [ "$CONCURRENCY_AUTO" -eq 1 ] && [ "$MAX_CONCURRENCY_PROBE" -lt 4 ]; then
   echo "[error] --max-concurrency-probe must be at least 4 when --concurrency auto is used" >&2
+  exit 1
+fi
+if ! [[ "$CONCURRENCY_STRETCH" =~ ^[0-9]+$ ]]; then
+  echo "[error] --concurrency-stretch must be a non-negative integer" >&2
+  exit 1
+fi
+if [ "$CONCURRENCY_STRETCH" -gt 0 ] && [ "$CONCURRENCY_AUTO" -ne 1 ]; then
+  echo "[error] --concurrency-stretch only applies with --concurrency auto" >&2
   exit 1
 fi
 if ! python3 - "$LOAD_TARGET" <<'PY' >/dev/null 2>&1
@@ -506,7 +523,16 @@ PY
       echo "[calibrate] reached --max-concurrency-probe=${MAX_CONCURRENCY_PROBE}; selecting N=${SELECTED_N}."
     fi
   fi
-  CALIBRATION_NOTE="auto-selected concurrency=${SELECTED_N} at ${HIGHEST_CAP}W cap (target=${LOAD_TARGET}, max-probe=${MAX_CONCURRENCY_PROBE})"
+  if [ "$CONCURRENCY_STRETCH" -gt 0 ]; then
+    STRETCHED_N=$((SELECTED_N + CONCURRENCY_STRETCH))
+    echo "[calibrate] --concurrency-stretch ${CONCURRENCY_STRETCH}: bumping N from ${SELECTED_N} to ${STRETCHED_N} to probe headroom past plateau pick."
+    echo "[calibrate]   This intentionally pushes above what plateau-detect chose. Expect lower per-stream TPS but possibly higher actual draw at the same cap."
+    echo "[calibrate]   Useful when sweep shows draw plateau below cap (e.g. 547W actual at 600W cap on a 5090). See docs/HARDWARE.md for interpretation."
+    SELECTED_N="$STRETCHED_N"
+    CALIBRATION_NOTE="auto-selected concurrency=${SELECTED_N} (plateau-pick + stretch ${CONCURRENCY_STRETCH}) at ${HIGHEST_CAP}W cap (target=${LOAD_TARGET}, max-probe=${MAX_CONCURRENCY_PROBE})"
+  else
+    CALIBRATION_NOTE="auto-selected concurrency=${SELECTED_N} at ${HIGHEST_CAP}W cap (target=${LOAD_TARGET}, max-probe=${MAX_CONCURRENCY_PROBE})"
+  fi
   CONCURRENCY="$SELECTED_N"
   rm -rf "$CAL_DIR"
   echo

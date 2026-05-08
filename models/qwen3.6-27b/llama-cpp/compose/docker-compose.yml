@@ -90,7 +90,7 @@ services:
           EXTRA_ARGS+=("--chat-template-kwargs" '{"enable_thinking":false}')
           echo "[entrypoint] DISABLE_THINKING=1 — chat template will produce empty <think></think>"
         fi
-        exec llama-server "$$@" "$${EXTRA_ARGS[@]}"
+        exec /app/llama-server "$$@" "$${EXTRA_ARGS[@]}"
       - --
     command:
       - --host

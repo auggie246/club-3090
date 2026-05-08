@@ -1,6 +1,10 @@
 # ===========================================================================
 # Gemma-4-31B-it (Intel AutoRound INT4) + Google MTP "assistant" drafter
-# 2× RTX 3090 TP=2 + per-token-head fp8_e5m2 KV + ~120K ctx target.
+# 2× RTX 3090 TP=2 + per-token-head INT8 KV + ~120K ctx target.
+#
+# (Filename retained as -fp8 for git history; default KV_DTYPE is
+# int8_per_token_head because that's what runs on Ampere sm_86. fp8 PTH
+# variants require Ada/Blackwell — see hardware compatibility table below.)
 #
 # Status: COMMUNITY-CONTRIBUTED, EXPERIMENTAL.
 #   Post-rebase of vLLM PR #40391 by @lisp19 (Gemma 4 KV cache page-size
@@ -11,26 +15,47 @@
 #
 # Companion to gemma-mtp.yml:
 #   gemma-mtp.yml         — bf16 KV, 32K ctx (safe default, no overlays)
-#   gemma-mtp-fp8.yml     — fp8 KV, ~120K ctx target (this file, vendored PRs)
+#   gemma-mtp-fp8.yml     — per-token-head KV (INT8 default on Ampere; ~120K ctx)
 #   gemma-mtp-tp1.yml     — TP=1 single-card (boot OOM on Ampere)
+#
+# Hardware × per-token-head dtype compatibility:
+#
+#   |               | INT8 PTH | FP8 e4m3 PTH | FP8 e5m2 PTH | NVFP4 |
+#   | sm_90 Hopper  |    ✅     |      ✅       |      ✅       |   ✅   |
+#   | sm_89 Ada     |    ✅     |      ✅       |      ✅       |   ✅   |
+#   | sm_120 Black. |    ✅     |      ✅       |      ✅       |   ✅   |
+#   | sm_86 Ampere  |    ✅     |      ❌       |      ❌       |   ❌   |
+#
+#   Ampere blocker for fp8 PTH: Triton kernel uses `fp8e4nv` which sm_86
+#   doesn't implement (Ampere only supports `fp8e4b15` and `fp8e5`).
+#   ValueError: "type fp8e4nv not supported in this architecture"
+#   → fires from `_initialize_kv_caches` boot path. Confirmed 2026-05-08.
+#
+#   INT8 PTH dispatches to standard PyTorch torch.int8 ops (not Triton fp8
+#   kernel) so it runs on every consumer GPU including Ampere. Same KV
+#   memory savings as FP8 (1 byte/element); slightly different precision
+#   characteristics (better near-zero, narrower dynamic range than e5m2).
+#
+#   For Ada/Blackwell users: override KV_DTYPE=fp8_per_token_head if you
+#   want to benchmark FP8 vs INT8 PTH precision on your hardware.
 #
 # Why this exists (the upstream-blocker chain, summarized):
 #
-#   On Ampere, fp8_e5m2 KV is upstream-blocked for Gemma 4 because the
-#   model has interleaved attention with two head_dims:
+#   Gemma 4 has interleaved attention with two head_dims:
 #     - sliding/local layers: head_dim=256
 #     - global/full layers:   head_dim=512
-#   Per-token-head fp8 adds 8B scale meta per token → page sizes 520:1032 →
-#   vLLM's unify_kv_cache_spec_page_size() rejects (no clean LCM). That
-#   forces gemma-mtp.yml to bf16 KV + 32K ctx (KV pool exhausted at higher).
+#   ANY per-token-head KV format adds scale metadata per token, breaking
+#   vLLM's `unify_kv_cache_spec_page_size()` because the resulting page
+#   sizes don't share a clean ratio. PR #40391 pre-pads the global layers
+#   to a 1040-byte factor and routes standard attention through a new
+#   `get_padded_attention_kv_cache_shape` helper to unblock this family.
 #
-#   PR #40391 fixes this by pre-padding the global layers' page size to a
-#   1040-byte factor and routing standard attention through a new
-#   get_padded_attention_kv_cache_shape helper. Once merged, fp8 KV unlocks
-#   ~4× more context (32K → ~120K) on Ampere.
+#   Without PR #40391, gemma-mtp.yml is forced to bf16 KV + 32K ctx ceiling
+#   (KV pool exhausted at higher). With PR #40391 + INT8 PTH KV, ctx
+#   ceiling lifts to ~120K (4×) at the same TP=2 mem-util budget.
 #
-# Bench targets (TBD post-validation):
-#   narrative ~109 wall TPS (parity with bf16 path; KV format only affects
+# Bench targets (TBD post-validation on this rig):
+#   narrative ~109 wall TPS (parity with bf16 path; KV format affects
 #                            ctx ceiling, not per-token TPS materially)
 #   code      ~142 wall TPS
 #   Max ctx   ~120K (4× lift vs gemma-mtp.yml's 32K)
@@ -112,12 +137,17 @@ services:
       - "2"
       - --disable-custom-all-reduce
       # ---- KV format ----
-      # fp8_e5m2 unblocked by PR #40391 overlay above.
-      # If validation reveals fp8_e5m2 still trips an Ampere-specific assert,
-      # try setting KV_DTYPE=fp8 (vLLM auto-picks the supported subtype) or
-      # fall back to gemma-mtp.yml (bf16, 32K ctx).
+      # Default `int8_per_token_head` runs on every consumer GPU including
+      # sm_86 Ampere (uses standard PyTorch torch.int8 ops, not the Triton
+      # fp8e4nv kernel that sm_86 doesn't implement).
+      # Ada/Blackwell users can override KV_DTYPE=fp8_per_token_head to A/B
+      # against fp8 PTH precision.
+      # NOT `fp8_e5m2` (legacy tensor-wide fp8, rejected by query_quant
+      # allowlist on Gemma 4 even with PR #40391 — that's a separate query
+      # quantization compatibility check). NOT `fp8_e4m3` either (Triton
+      # fp8e4nv kernel not supported on sm_86 Ampere).
       - --kv-cache-dtype
-      - "${KV_DTYPE:-fp8_e5m2}"
+      - "${KV_DTYPE:-int8_per_token_head}"
       # ---- max-model-len ceiling (TP=2, fp8 KV after PR #40391) ----
       # Theoretical: ~120K (4× lift vs bf16 KV's 32K because per-token KV is
       # ~half size with fp8). Conservative initial test: 96K with mem-util 0.95.

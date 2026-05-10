@@ -34,7 +34,7 @@ body = """
 
 ## Pinning to this release
 
-This is a snapshot of the rolling stack — not a versioned API. To pin to this exact state:
+**Versioning:** SemVer in `0.x` — treat any minor bump as potentially breaking until `1.0`. Past CalVer tags (`v2026.05.09`, `v2026.05.10`) are preserved for history; SemVer takes over from `v0.3.0` onward.
 
 ```bash
 git checkout {{ version }}

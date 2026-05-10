@@ -2,7 +2,54 @@
 
 Changes that span the entire stack — engine version pins, script behavior, repo structure. Per-model dated history lives in `models/<name>/CHANGELOG.md`.
 
+## Versioning
+
+club-3090 ships docker composes, system scripts, and patch bundles that downstream rigs run as-is — it's effectively software, not just rolling recipes. **SemVer** in `0.x` from `v0.3.0` onward; treat any minor bump as potentially breaking until `1.0`.
+
+Past CalVer tags (preserved for history):
+
+| CalVer tag | SemVer equivalent | Date |
+|---|---|---|
+| `v2026.05.09` | (≈ v0.1.0) | 2026-05-09 — first tagged release |
+| `v2026.05.10` | (≈ v0.2.0) | 2026-05-10 — stack reorg + Gemma 4 INT8 PTH unblock |
+
+CHANGELOG entries below 2026-05-10 use date-prose headings (pre-SemVer convention). New entries from `v0.3.0` use `## v0.X.Y (YYYY-MM-DD) — title`.
+
+## v0.3.0 (2026-05-10) — Qwen thinking-off default, MODEL_DIR UX overhaul, docs cleanup, aider-polyglot bench rows
+
+Eight commits since `v2026.05.10`. Headline: Qwen 3.6 27B now defaults `enable_thinking=false` server-side via `--default-chat-template-kwargs` across all 21 vLLM Qwen composes (closes the recurring "Qwen looks much slower than Gemma" agentic-bench skew). MODEL_DIR docs no longer bake the dev-rig path. New `--include-commit` flag on `power-cap-sweep.sh`.
+
+**Compose change — Qwen 3.6 27B thinking OFF by default** ([534d29f](https://github.com/noonghunna/club-3090/commit/534d29f), [29d17ed](https://github.com/noonghunna/club-3090/commit/29d17ed)):
+- All 17 vLLM Qwen 27B composes (single + dual + multi4 + nvlink variants + carnice + qwopus) gain `--default-chat-template-kwargs '{"enable_thinking": false}'` after `--reasoning-parser qwen3`. Server-side default — no per-request kwarg needed.
+- llama.cpp single composes: `DISABLE_THINKING` default flipped 0 → 1; `concurrent.yml` gains `--chat-template-kwargs ${CHAT_TEMPLATE_KWARGS:-{"enable_thinking":false}}`.
+- `bounded-thinking.yml` intentionally keeps thinking ON (its whole purpose is constrained CoT).
+- Per-request override still works for users who want thinking on: `chat_template_kwargs: {enable_thinking: true}` in OpenAI request body.
+- Empirical impact: aider-polyglot-30 bench went from 0/30 (1500s timeout, hidden CoT eats budget) → 20/30 (66.7%) on the same hardware once thinking defaulted off.
+- Note: 29d17ed used the wrong flag name (`--chat-template-kwargs`); 534d29f corrected to `--default-chat-template-kwargs` after vLLM nightly source confirmed the actual CLI option (referenced in upstream PR #37739).
+
+**MODEL_DIR UX overhaul** (closes club-3090#116 — RobH589's "downloads landing in root of drive" report):
+- `cf7f195` — fixed 4 stale refs missed in the 2026-05-10 reorg push (preflight.sh hf-download hint, README.md example, compose header Q5_K_XL→Q3_K_XL stale comment).
+- `fbf3431` — replaced the dev-rig path `/mnt/models/huggingface/...` with `$MODEL_DIR/...` placeholders across `models/qwen3.6-27b/llama-cpp/README.md`, `docs/engines/LLAMA_CPP.md`, the compose header, and the `preflight.sh` hint. Cross-rig users no longer see our path baked into instructions.
+- `cc3a717` — recipe scripts (`single-card-default.sh`, `single-card-max-ctx.sh`) default `MODEL_PATH` to `${MODEL_DIR:-$HOME/models}/qwen3.6-27b-gguf/...`.
+- `3909c2d` — `setup.sh` now **prompts interactively** when `MODEL_DIR` isn't set and stdin is a TTY: pick `<repo>/models-cache`, `$HOME/models`, or custom path; optionally persist to `.env` (gitignored). CI / scripted runs (no TTY) get the silent fallback unchanged.
+
+**`power-cap-sweep.sh` — `--include-commit` flag** ([7d91ac7](https://github.com/noonghunna/club-3090/commit/7d91ac7), closes [#112](https://github.com/noonghunna/club-3090/issues/112)):
+- Off by default. When set, stamps the club-3090 git short SHA in the report header next to the date. Useful for cross-rig sweep correlation per @laurimyllari's request.
+- Suppresses the field entirely (no "n/a") when run from a non-clone — closes the curl-pipe-from-docs UX hole.
+
+**BENCHMARKS.md — Aider Polyglot 30 quality bench** ([e08988e](https://github.com/noonghunna/club-3090/commit/e08988e)):
+- New "Quality benches — Aider Polyglot 30" section with cross-model rows: Qwen 3.6 27B `dual.yml` 20/30 (66.7%) vs Gemma 4 31B `dual.yml` 17/30 (56.7%).
+- Documents the thinking-on/thinking-off Qwen failure mode + per-language breakdown.
+- Run via [`benchlocal-cli`](https://github.com/noonghunna/benchlocal-cli)'s `aider-polyglot-30` pack.
+
+**cliff.toml + CHANGELOG meta**: switched from CalVer rolling-stack framing to SemVer software framing. Past CalVer tags preserved for history.
+
+---
+
 ## 2026-05-10 — Stack reorg: services consolidation, gpu-mode under git, ComfyUI in services/, pin tracker 🧹
+
+(This entry covers `v2026.05.10` — see SemVer mapping above.)
+
 
 The rig had grown organically across three home dirs (`/opt/ai/compose/`, `/opt/ai/github/`, `/home/wasif/`), three repos (single-3090, dual-3090, club-3090), and ad-hoc paths under `/opt/ai/vllm-src/`, `/opt/ai/vendor/`, `/home/wasif/lucebox-hub/`, `/home/wasif/llama.cpp*`. Disk-out on `/` (97% used) forced a clean-up; rather than just prune, we consolidated the layout while we were at it.
 

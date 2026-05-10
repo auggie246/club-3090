@@ -4,15 +4,15 @@
 #
 # Prereqs:
 #   - llama.cpp built with -DGGML_CUDA=ON at /opt/llama.cpp
-#   - Q4_K_M GGUF at /mnt/models/gguf/qwen3.6-27b/Qwen3.6-27B-Q4_K_M.gguf
-#     (download via: hf download unsloth/Qwen3.6-27B-GGUF Qwen3.6-27B-Q4_K_M.gguf --local-dir /mnt/models/gguf/qwen3.6-27b/)
+#   - Q4_K_M GGUF at /mnt/models/huggingface/qwen3.6-27b-gguf/Qwen3.6-27B-Q4_K_M.gguf
+#     (download via: hf download unsloth/Qwen3.6-27B-GGUF Qwen3.6-27B-Q4_K_M.gguf --local-dir /mnt/models/huggingface/qwen3.6-27b-gguf/)
 #
 # Override defaults via env: LLAMA_DIR, MODEL_PATH, PORT, CTX
 
 set -euo pipefail
 
 LLAMA_DIR="${LLAMA_DIR:-/opt/llama.cpp}"
-MODEL_PATH="${MODEL_PATH:-/mnt/models/gguf/qwen3.6-27b/Qwen3.6-27B-Q4_K_M.gguf}"
+MODEL_PATH="${MODEL_PATH:-/mnt/models/huggingface/qwen3.6-27b-gguf/Qwen3.6-27B-Q4_K_M.gguf}"
 PORT="${PORT:-8020}"
 CTX="${CTX:-65536}"
 

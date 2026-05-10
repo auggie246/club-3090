@@ -17,7 +17,7 @@ Vendoring keeps this self-contained inside club-3090 so the compose works withou
 ## Provenance
 
 - Upstream branch: `jianc99/dflash-gemma4-fix` (original PR head)
-- Local rebase: `/opt/ai/github/jianc99-vllm-dflash-gemma4/` branch `dflash-rebased` — 6 PR commits cherry-picked onto upstream/main `5d0fd87038b`
+- Local rebase: `/opt/ai/engines/vllm/refs/jianc99-dflash-gemma4/` branch `dflash-rebased` — 6 PR commits cherry-picked onto upstream/main `5d0fd87038b`
 - File set: 12 modified files (config, model, attention, scheduler, kv cache, spec decode, worker)
 - Tracked: [PR #41703](https://github.com/vllm-project/vllm/pull/41703) + [docs/UPSTREAM.md](../../../../docs/UPSTREAM.md)
 

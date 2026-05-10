@@ -2,6 +2,112 @@
 
 Changes that span the entire stack — engine version pins, script behavior, repo structure. Per-model dated history lives in `models/<name>/CHANGELOG.md`.
 
+## 2026-05-10 — Stack reorg: services consolidation, gpu-mode under git, ComfyUI in services/, pin tracker 🧹
+
+The rig had grown organically across three home dirs (`/opt/ai/compose/`, `/opt/ai/github/`, `/home/wasif/`), three repos (single-3090, dual-3090, club-3090), and ad-hoc paths under `/opt/ai/vllm-src/`, `/opt/ai/vendor/`, `/home/wasif/lucebox-hub/`, `/home/wasif/llama.cpp*`. Disk-out on `/` (97% used) forced a clean-up; rather than just prune, we consolidated the layout while we were at it.
+
+**What landed in this repo:**
+
+- **`services/` is now the canonical home for supporting services.** Five services migrated in from `/opt/ai/compose/`: `ollama/`, `openwebui/`, `litellm/`, `qdrant/`, `searxng/`. Same `docker-compose.yml` files, no functional change. `services/litellm/config.yaml` rewritten — added explicit routes for the current primaries (`qwen3.6-27b-autoround` → :8010, `gemma-4-31b-autoround` → :8030) and removed the `* → ollama/*` wildcard.
+- **`services/comfyui/`** also migrated in (was at `/opt/ai/compose/comfyui/`). Wired into `gpu-mode` properly with full mutex against vLLM/SGLang.
+- **`scripts/gpu-mode.sh`** moved into the repo (was a loose `/opt/ai/gpu-mode.sh` outside any git tree). Symlinked at `/usr/local/bin/gpu-mode`. New since the move:
+  - 5 Gemma 4 31B modes: `gemma`, `gemma-dflash`, `gemma-int8`, `gemma-dflash-int8`, `gemma-awq`
+  - 1 ComfyUI mode (mutex with all LLM serving)
+  - 2 maintenance subcommands: `prune` (safe — image prune only), `prune-all` (+ build cache, keep-storage 5GB)
+  - `gpu-mode status` now shows Docker disk usage, `/var/lib/docker` size, `/tmp` size — surfaces growth without needing to remember `docker system df`
+  - `--env-file <repo>/.env` is now passed through `compose_at()` so `MODEL_DIR` resolves correctly regardless of which compose dir we cd into. Fixes the recurring "MODEL_DIR not set, defaulting to ../../../../../models-cache" warnings.
+  - `stderr` no longer swallowed by `compose_at()` (real errors now surface)
+  - Cross-model VRAM mutex: every Qwen mode `stop_all_gemma` + `stop_comfyui` and vice-versa
+  - Ollama dropped from `SERVICES=()` array (no longer auto-started in chat mode); defensive `stop_service ollama` retained in every mode for cleanup
+- **`scripts/maintenance/`** new dir for stack-hygiene tools (separates from operational scripts):
+  - `list-image-pins.sh` — engine-agnostic pin auditor. Scans every compose for its `image:` line, groups by `<repo>:<tag>`, flags pin-drift (multiple tags pinned for the same repo), ranks composes by patch surface (highest = most expensive to migrate when the engine bumps).
+- **`docs/UPSTREAM.md` "Pinned images" section** — table of every pinned image, why each pin exists, retirement candidate criteria. Live snapshot via `scripts/maintenance/list-image-pins.sh`. First entries: 3 distinct vLLM nightlies (Qwen 27B baseline, Gemma 4 base/AWQ/INT8, Gemma 4 DFlash) + 1 llama.cpp:server-cuda.
+- **`docs/NIGHTLY_BUMP_RUNBOOK.md`** new — 7-step procedure for bumping pinned engine images (scope → branch → patch survival → boot → verify-full + verify-stress → bench delta → land → retirement). Engine-specific notes for vLLM (nightly hash format, volatile internals like `gpu_model_runner.py`), llama.cpp (capture digest if reproducibility matters), SGLang (variant tag conventions).
+- **Path updates from the engine + model reorg.** All references to:
+  - `/opt/ai/vllm-src/` → `/opt/ai/engines/vllm/primary/` (in `setup.sh`, `INTERNALS.md`, several compose+patch READMEs, `docs/{HARDWARE,FAQ,DUAL_CARD,UPSTREAM}.md`, `models/qwen3.6-27b/CHANGELOG.md`)
+  - `/mnt/models/gguf/qwen3.6-27b/` → `/mnt/models/huggingface/qwen3.6-27b-gguf/` (in `models/qwen3.6-27b/llama-cpp/{compose/single/*.yml, recipes/*.sh, README.md}`, `docs/engines/LLAMA_CPP.md`)
+  - `/home/wasif/lucebox-hub/` → `/opt/ai/engines/llama.cpp/refs/luce-dflash/` (in `vllm-gemma4-dflash/README.md`)
+
+**Why now:** the disk-out on `/` (down to ~9.5 GB free, 97% used) made it impossible to pull a fresh nightly during ongoing work. Pruning got us back to 60% used; the reorg turned that recovery into a layout we can keep clean. End state: `/` at 42% (139G→117G used), `/mnt/models` at 80% (758G→741G used). The bigger win is structural — every artifact has one canonical home now, and the directory naming makes the format/role obvious.
+
+**External impact:** none for cross-rig users. All paths inside `setup.sh` and the composes are either inside this repo or under `/mnt/models/` (which `setup.sh` controls via `$MODEL_DIR`). The reorg of the dev rig itself (engines, scripts, /home/wasif) is rig-local and not visible from outside.
+
+## 2026-05-09 — Compose convention formalization + cliff CI + Discord launch
+
+Continuation of the cross-rig contributor flow built earlier in the week. The compose tree had grown organically and was overdue a unification pass on naming, profile shape, and status semantics. Plus the first community-facing surface (Discord) and the release-notes pipeline.
+
+**Compose convention:**
+- **Topology promoted to a directory level** (`acdc7ffb`): the previous flat `compose/<variant>.yml` layout becomes `compose/<topology>/<variant>.yml`. Directories: `single/`, `dual/`, `multi4/` (renamed from `dual4/` to align with `MULTI_CARD.md` framing — `d33e6f8`).
+- **Profile schema** rolled out across all composes (`fca643d`, `4d7356a`): every compose header now declares Model / Topology / Drafter / KV / Vision / Max ctx / Genesis / Status / Quality / Best for as a structured at-a-glance block. `AGENTS.md` (`62e636c`) codifies the schema + naming rules + experimental-compose conventions.
+- **Status enum + Caveats field formalized** (`e1137d6`): every compose now declares `Status: ✅ Production / 🧪 Experimental / ⚠️ Workaround / 🔄 Deprecated` plus a Caveats field. 100% coverage achieved.
+- **Quality lines** added on Qwen3.6-27B + Gemma 4 31B duals (`26ff0e5`, `9dea0eb`) — `--full` sandboxed (8-pack) measurements visible in compose headers.
+- **`compose: parametrize VLLM_ENFORCE_EAGER, KV_CACHE_DTYPE, P40/P82/PN54 across all variants`** (`af9fb0c`, [#110](https://github.com/noonghunna/club-3090/pull/110) by @easel) — env-override knobs for the most common cross-rig tuning levers.
+
+**Community + ops:**
+- **Discord invite** added to README + FAQ + issue template (`c18257f`).
+- **`encourage-soak`** template dropdown + script ergonomics + report reminder + Notes convention (`c298b60`).
+- **Community projects section** in README pointing at `VykosX/club-3090-server` (`cd48764`).
+
+**Release notes pipeline:**
+- Initially added Release Drafter for CalVer release notes (`c49db50`); replaced same day with **`git-cliff` for commit-based release notes** (`7002e6b`). `cliff.toml` defines 10 categories (Cliffs/gotchas, Features, New models, Bug fixes, Benchmarks, Documentation, Pin bumps, Scripts/tooling, Maintenance, Other) with conventional-commits parsing + per-PR author attribution. CI workflow (`.github/workflows/release.yml`) runs on `v[0-9]+.[0-9]+.[0-9]+` tag push and publishes a GitHub Release. **Tag-and-push is what triggers it** — `git tag v0.1.0 && git push --tags` produces the first proper release-page notes.
+
+**Other:**
+- BIND_HOST opt-in + localhost script fixes (`73c3184`, [#109](https://github.com/noonghunna/club-3090/pull/109) by @easel) — composes default to `127.0.0.1` binding; `BIND_HOST=0.0.0.0` env var opens up to the LAN explicitly.
+- BENCHMARKS.md row added: `@ygafarov` Strix-Halo + oculink-eGPU x4-PCIe single-3090 (`a589058`, [#113](https://github.com/noonghunna/club-3090/issues/113)).
+- `quality-test.sh` aligned with benchlocal-cli v0.5 (`1be02d2`, `7020d96` adds `--sandboxed-only` passthrough).
+
+## 2026-05-08 — Gemma 4 31B INT8-PTH KV unblocks 262K context on Ampere
+
+Two regressions caught + reframed Phase 2 around what Ampere actually supports.
+
+- **PR #41745 (Gemma 4 MTP "assistant" drafter) merged upstream** (`595be8f`). Dropped the local `vllm-gemma4-mtp` overlay tree (`aa99173`); the canonical `gemma-mtp` compose now uses the post-merge nightly directly. Validated.
+- **`gemma-mtp-fp8.yml` → `gemma-mtp-int8.yml`** (`160e8fc`). Reframed Phase 2 around **INT8 PTH KV** (per-token-head, vendored from rebased PR #40391 stacked with tool-parser fixes #42006 + #41991, commit `f93d312`). Reason: Ampere has no native FP8 tensor cores; the FP8-KV nomenclature was misleading us toward configs that fall back to BF16 anyway. INT8 PTH delivers what FP8-KV was supposed to: smaller KV pool, more context.
+- **Phase 2 INT8 PTH validation results shipped** (`1e1886a`): **262K Gemma 4 unblocked** on dual 3090 TP=2 + INT8 PTH KV. verify-stress 91K passes; bench at extended ctx documented.
+- Compose-level: `power-cap-sweep` learned to clamp prefill calibration to the model context window (`32f924c`), and to sum `delta.reasoning_content` alongside `delta.content` for reasoning-model bench accuracy (`71e5954`).
+
+## 2026-05-07 — Power-cap-sweep + HARDWARE.md cross-rig data campaign 📊
+
+Heavy contributor week. The power-cap-sweep tool went from "useful" to "the canonical instrument for cross-rig efficiency-knee data" — multiple iterations from Codex review rounds, plateau auto-detection, multi-mode chain.
+
+**`scripts/power-cap-sweep.sh` evolution** (Codex collab + cross-rig portability fixes):
+- Added 2026-05-07 (`83d5d97`, [#83](https://github.com/noonghunna/club-3090/pull/83)). Same-day iterations: load-mode flag + concurrent/prefill modes (`f387622`), `--bench-runs N` for variance mitigation (`f99fad3`), `--concurrency auto` for workload-calibrated sweeps (`f811457`), time-bounded streaming bench redesign (`7877c04`, `1ede998`), 4 cross-card portability fixes (`652103f`), env-overridable bench shape for decode-single mode (`c638c30`), SM/mem clock + throttle% + pstate sampling (`ab2796d`), plateau auto-detection (`29e7de5`, `fd11ae6`), `--concurrency-stretch N` flag for probing past plateau pick (`3991ecc`).
+- **Canonical command codified** (`886b619`) — every cross-rig anchor uses the same flags so numbers are comparable across submissions.
+- **Made CONTAINER optional** for host engine builds (`2bb3cf7`, [#85](https://github.com/noonghunna/club-3090/pull/85), [#87](https://github.com/noonghunna/club-3090/issues/87)) — host-llama.cpp contributors no longer need a container to participate.
+- **`verify-full + soak-test decoupled from docker/vLLM assumptions`** (`a8606e3`, [#85](https://github.com/noonghunna/club-3090/pull/85), [#87](https://github.com/noonghunna/club-3090/issues/87)) — host-build contributor flow now end-to-end.
+- **`verify-stress` engine-aware diagnostic hints** (`4f01abb`, closes [#87](https://github.com/noonghunna/club-3090/issues/87)).
+
+**HARDWARE.md power-cap charts campaign:**
+- Embedded power-cap efficiency charts for **3090 + Qwen3.6 + llama.cpp** (`42afdbb`), **4090 + Qwen3.6 + llama.cpp** (`e70258c`), **5090 + Gemma 4** (`8b1d51a`).
+- **3090 air-cooled vs water-cooled correction** (`1f94478`) — earlier doc misclassified our cooling.
+- **5090 prefill-heavy sweep from `@apnar`** (`d5ef8c8`, disc [#67](https://github.com/noonghunna/club-3090/discussions/67)) — proves per-workload power ceiling differs (decode vs prefill saturate at different caps).
+- **`a7a1d59`: 230W vs 290W vs 330W sweet-spot story reconciled** — single doc covering all three commonly-cited 3090 numbers + the workloads each is the answer for.
+- **Plateau evidence + multi-mode chain docs** (`9f77be7`, `fd11ae6`).
+- **5090 clock-lock chart + Blackwell freq-cap section** (`119a5fa`).
+
+**Cross-rig benchmark rows added:**
+- `@apnar` 5090 Gemma 4 MTP + DFlash (`98b0601`, disc [#67](https://github.com/noonghunna/club-3090/discussions/67))
+- `@apnar` 5090 + Gemma 4 + MTP cross-rig anchor (`bef5701`)
+- `@lamentofhighborne` 1× 3090 llama.cpp MTP (`68dbfaf`, [#85](https://github.com/noonghunna/club-3090/pull/85))
+- `@aaronlockhartdev` patched-P2P driver row (`4eea837`, [#91](https://github.com/noonghunna/club-3090/issues/91), disc [#70](https://github.com/noonghunna/club-3090/discussions/70))
+- Three more cross-rig rows from 2026-05-07 reports (`76aacdc`)
+- `@danbedford` NVLink + DFlash variants (`0d199a1` [#92](https://github.com/noonghunna/club-3090/pull/92), `b893d60`)
+
+**Engine landscape docs:**
+- **`docs/INFERENCE_ENGINES.md` feature matrix** (`dfceccb`): vLLM / llama.cpp / SGLang / ktransformers / **ik_llama.cpp** (added later as 5th column, `0959206`). 12 corrupted table separators fixed in follow-up (`8f5b924`). More honest vLLM GGUF status (`2d9aa14`).
+- **opencode unblock** (`af00ab7`, [#97](https://github.com/noonghunna/club-3090/issues/97)): llama.cpp `--reasoning-format none` is now default for compatibility with IDE agents.
+
+**Tool / sidecar:**
+- `qwen3coder tool-parser deferred-commit sidecar` (`2e00b6d`, [#72](https://github.com/noonghunna/club-3090/issues/72) by @troymroberts) — closes the same root-cause class as alexpolo1 #104.
+
+**Compose:**
+- `dual-nvlink-dflash-noviz` variant added (`63ab224`, NVLink + DFlash N=5 + 200K + no vision; `--max-model-len` default tuned to 188000 in `89c6862`).
+- `setup.sh`: Gemma 4 31B model support added (`dd3bccc`, [#89](https://github.com/noonghunna/club-3090/issues/89)).
+- `setup.sh`: auto-create `.env` for WSL2 boot-crash workaround (`4861ee7`, [#60](https://github.com/noonghunna/club-3090/issues/60)).
+
+**Reports + ops:**
+- `report.sh`: capture recently-exited containers' boot logs (`cd980f6`, [#60](https://github.com/noonghunna/club-3090/issues/60)).
+- `report.sh`: engine-aware Active container probes (vllm + llamacpp) (`6fa66d2`).
+
 ## 2026-05-06 — `PYTORCH_CUDA_ALLOC_CONF` exposed as override knob (boot-crash workaround)
 
 A single-card RTX 3090 Ti rig on WSL2 (driver 596.36) hit `RuntimeError: CUDA driver error: device not ready` from `gptq_marlin_repack` immediately after weight load on the v7.72.2-uplift nightly pin. Bisect (default → minimal-no-Genesis → minimal + `CUDA_LAUNCH_BLOCKING=1`) ruled out Genesis, spec-decode, TQ3 KV, async-residual error, and TDR (registry already extended + Windows rebooted). Setting `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` resolves the crash. Same env-var workaround as JusefPol's NVLink boot-crash report (PR #31), already hardcoded in the `dual-nvlink*.yml` composes.

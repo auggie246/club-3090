@@ -148,7 +148,7 @@ else:
     output = marlin_gemm(weight)         # original fast path
 ```
 
-Status: PR is **OPEN, MERGEABLE**, labeled `bug`, sitting in maintainer queue. When it lands, drop the `/opt/ai/vllm-src/` mount from the dual compose. Until then, the volume-mount path lets users get the fix without forking themselves.
+Status: PR is **OPEN, MERGEABLE**, labeled `bug`, sitting in maintainer queue. When it lands, drop the `/opt/ai/engines/vllm/primary/` mount from the dual compose. Until then, the volume-mount path lets users get the fix without forking themselves.
 
 ---
 
@@ -203,7 +203,7 @@ For Sandermage's documented numbers on his A5000 setup, see his [MODELS.md](http
 | [vllm#40914](https://github.com/vllm-project/vllm/pull/40914) | **OPEN** | Sandermage's upstream synthetic-args trick for spec-decode K+1 verify. Would close P67 design gap. |
 | [PR #40798](https://github.com/vllm-project/vllm/pull/40798) | Hypothesized fix that didn't pan out | Workspace-manager refactor. Probe 8 backported it; bug persisted. Useful negative result documented on the PR thread. |
 
-When PR #40361 lands, we drop the `/opt/ai/vllm-src/` mount from dual composes. When PR #40914 lands, the dual-Turbo variant's TPS regression vs fp8 narrows substantially.
+When PR #40361 lands, we drop the `/opt/ai/engines/vllm/primary/` mount from dual composes. When PR #40914 lands, the dual-Turbo variant's TPS regression vs fp8 narrows substantially.
 
 ---
 

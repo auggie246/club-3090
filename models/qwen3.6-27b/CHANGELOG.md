@@ -450,7 +450,7 @@ Required workaround: vllm#40334 (DFlash `combine_hidden_states` dtype mismatch) 
 
 Filed [vllm#40361](https://github.com/vllm-project/vllm/pull/40361) — fixes a crash in vLLM's Marlin INT4 kernel where output features < 64 cause `GPTQ_MARLIN_MIN_THREAD_N (64) > out_features` on TP=2.
 
-Status: **OPEN, MERGEABLE**, awaiting maintainer review. Until it lands, dual-card composes volume-mount our [patched fork](https://github.com/noonghunna/vllm) at `/opt/ai/vllm-src/`.
+Status: **OPEN, MERGEABLE**, awaiting maintainer review. Until it lands, dual-card composes volume-mount our [patched fork](https://github.com/noonghunna/vllm) at `/opt/ai/engines/vllm/primary/`.
 
 ## 2026-04-08 — Initial dual-card release
 

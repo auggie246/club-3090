@@ -374,7 +374,7 @@ echo ""
 # Note: vllm#40361 Marlin pad-sub-tile-n patched files are vendored in-repo
 # at models/qwen3.6-27b/vllm/patches/vllm-marlin-pad/. Dual-card composes
 # mount them via repo-relative paths — no host filesystem dependency, no
-# clone needed. (Previous design required cloning a fork to /opt/ai/vllm-src/;
+# clone needed. (Previous design required cloning a fork to /opt/ai/engines/vllm/primary/;
 # refactored 2026-05-03 to vendor the two files in-repo, fixing #37.)
 
 # Per-model "next steps" — different composes / served-model-name / port between models.

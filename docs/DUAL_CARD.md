@@ -124,14 +124,14 @@ Without it, vLLM falls back silently to baseline bf16 decode (~25 TPS, not 125).
 
 ### Marlin pad-sub-tile-n mount dependency
 
-The dual variants currently mount `/opt/ai/vllm-src/vllm/model_executor/kernels/linear/mixed_precision/marlin.py` (and one neighbor) read-only into the container. This is our patched fork of [vllm#40361](https://github.com/vllm-project/vllm/pull/40361) — required for AutoRound W4A16 at TP=2 where output-dim shards fall below 64. **You need to clone vLLM source to `/opt/ai/vllm-src/`** for these composes to boot. When the upstream PR lands, we'll drop the mount.
+The dual variants currently mount `/opt/ai/engines/vllm/primary/vllm/model_executor/kernels/linear/mixed_precision/marlin.py` (and one neighbor) read-only into the container. This is our patched fork of [vllm#40361](https://github.com/vllm-project/vllm/pull/40361) — required for AutoRound W4A16 at TP=2 where output-dim shards fall below 64. **You need to clone vLLM source to `/opt/ai/engines/vllm/primary/`** for these composes to boot. When the upstream PR lands, we'll drop the mount.
 
-If you don't have `/opt/ai/vllm-src/`:
+If you don't have `/opt/ai/engines/vllm/primary/`:
 
 ```bash
 sudo mkdir -p /opt/ai && sudo chown $USER /opt/ai
-git clone https://github.com/vllm-project/vllm.git /opt/ai/vllm-src
-cd /opt/ai/vllm-src && git checkout main
+git clone https://github.com/vllm-project/vllm.git /opt/ai/engines/vllm/primary
+cd /opt/ai/engines/vllm/primary && git checkout main
 ```
 
 ### PCIe allreduce overhead (no NVLink)
@@ -161,7 +161,7 @@ If you're solo-using on dual, you're paying for hardware that mostly sits idle o
 ```bash
 # 1. Setup (downloads model, clones Genesis + vllm-src, ~20 min cold)
 bash scripts/setup.sh qwen3.6-27b
-git clone https://github.com/vllm-project/vllm.git /opt/ai/vllm-src    # required for dual variants
+git clone https://github.com/vllm-project/vllm.git /opt/ai/engines/vllm/primary    # required for dual variants
 
 # 2. Pick + boot via wizard (asks GPU count + workload)
 bash scripts/launch.sh

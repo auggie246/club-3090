@@ -55,8 +55,8 @@ services:
     command: >-
       --host 0.0.0.0
       --port 8080
-      -m /models/${GGUF_FILE:-qwen3.6-27b/unsloth-q3kxl/Qwen3.6-27B-UD-Q3_K_XL.gguf}
-      --mmproj /models/${MMPROJ_FILE:-qwen3.6-27b/mmproj-F16.gguf}
+      -m /models/${GGUF_FILE:-qwen3.6-27b-gguf/unsloth-q3kxl/Qwen3.6-27B-UD-Q3_K_XL.gguf}
+      --mmproj /models/${MMPROJ_FILE:-qwen3.6-27b-gguf/mmproj-F16.gguf}
       -c ${CTX_SIZE:-192000}
       -ngl 99
       -fa on

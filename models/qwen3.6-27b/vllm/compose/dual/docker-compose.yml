@@ -30,7 +30,7 @@
 # Dependencies:
 #   - 2× RTX 3090 (Ampere SM 8.6), PCIe-only (no NVLink — works fine)
 #   - vLLM PR #40361 (Marlin pad-sub-tile-n) — patched files volume-mounted
-#     from /opt/ai/vllm-src/. PR is open upstream; drop the mount when it
+#     from /opt/ai/engines/vllm/primary/. PR is open upstream; drop the mount when it
 #     lands. See ../../patches/README.md for the git-clone command.
 #
 # All dual-card variants in this dir:

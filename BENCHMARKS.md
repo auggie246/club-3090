@@ -244,3 +244,24 @@ Cross-rig data on Google's official Gemma 4 MTP "assistant" drafter (released 20
 None close the **-13% narr / -11% code gap to 3dluvr's anchor**. Remaining gap likely rig-specific (3dluvr's EPYC 7J13 / different PCIe topology / 275W cap / etc) rather than tunable via flags. Cross-rig productionizable settings: stick with default `--dtype bfloat16`, default cudagraph, default scheduling. Custom override `cudagraph_capture_sizes [9]` worth it ONLY if you serve >95% n=8-MTP-single-stream code traffic (e.g. dedicated coding-agent endpoint) where the +2.5% code lift exceeds the -3% narrative loss. |
 | `dual.yml`-shape forced TP=1 | @apnar (1× **RTX 5090** 32 GB, air-cooled, 600 W) | bf16 | 32K | **159.67 / 215.10** (decode 160.71 / 217.30) | 27.5 GB | 2026-05-07 | **First single-5090 Gemma 4 MTP data point.** First non-OOM single-card Gemma 4 result on the matrix — the 32 GB Blackwell envelope clears the 24 GB Ampere boot OOM. CV 1.9%/1.8%, peak 426 W. **+46% narr / +51% code over @noonghunna's 2× 3090 TP=2 baseline (109/142)** — single-card 5090 beats dual-3090 on Gemma 4. [Disc #67](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042). |
 | `dual-dflash.yml`-shape forced TP=1 (mem-util 0.96, max-model-len 12000) | @apnar (1× **RTX 5090** 32 GB, air-cooled, 600 W) | bf16 | **12K** | **150.40 / 261.06** (decode 151.16 / 264.62) | 28.8 GB | 2026-05-07 | **First single-5090 Gemma 4 DFlash data point.** Trade vs MTP row above: ~6% narr loss, **+21% code lift** (215→261). 1st-warmup TTFT outlier (73 s) suggests cudagraph warmup taking longer on first request; subsequent warmups stable at <40 ms. CV 3.6%/2.8%, peak 440 W. **Required mem-util 0.96 + max-model-len 12K** to fit BF16 weights + DFlash N=5 drafter on 32 GB — DFlash drafter footprint pushes out ctx ceiling vs MTP's 32K. [Disc #67](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042). |
+
+
+---
+
+## Quality benches — Aider Polyglot 30
+
+Pass rate on a curated 30-exercise subset of [aider-polyglot-benchmark](https://github.com/Aider-AI/polyglot-benchmark) (5 per language across cpp/go/java/javascript/python/rust, mix of easy/medium/hard). Tests **edit-format reliability** AND **algorithmic correctness** — does the model emit diffs aider can apply, AND do the resulting tests pass.
+
+Run via [`benchlocal-cli`](https://github.com/noonghunna/benchlocal-cli) `aider-polyglot-30` pack. Different from the TPS rows above — this is a quality / agentic-coding signal, not a throughput measurement.
+
+| Model | Compose | Rig | Pass / Total | % | Wall (real) | Wall (sum-dur) | Tokens (P+C) | Date | Notes |
+|---|---|---|---:|---:|---:|---:|---:|---|---|
+| **Qwen 3.6 27B** (AutoRound INT4) | `dual.yml` (TP=2) | @noonghunna (2× 3090 PCIe, 230W cap) | **20 / 30** | **66.7%** | 19.0 min | 34.0 min | 436K + 111K = 547K | 2026-05-10 | **`enable_thinking=false`** (server-side `--default-chat-template-kwargs '{"enable_thinking": false}'` + per-request `extra_body` belt). With thinking ON: 0/30 (1500s timeout exceeded before any exercise completed — Qwen burns the token budget on hidden CoT). Per-language: cpp 3/5 · go 4/5 · **java 4/5** · js 4/5 · python 2/5 · rust 3/5. `threads=2`. |
+| **Gemma 4 31B** (Intel AutoRound INT4) | `dual.yml` (TP=2) | @noonghunna (2× 3090 PCIe, 230W cap) | 17 / 30 | 56.7% | 19.2 min | 19.2 min | 380K + 72K = 452K | 2026-05-10 | Default thinking off (Gemma 4's chat template requires explicit `enable_thinking=true` to enable). Per-language: cpp 2/5 · **go 4/5** · java 1/5 · **js 4/5** · python 3/5 · rust 3/5. `threads=2`. |
+
+**Notable**:
+- Qwen 3.6 27B beats Gemma 4 31B by **+10 pp** despite 4 GB fewer parameters. Java is the biggest swing (4/5 vs 1/5 — `affine-cipher` specifically tripped Gemma).
+- Gemma is meaningfully faster wall-clock (sum-of-exercise-durations 19 vs 34 min), suggesting Qwen produces longer per-turn answers but they convert to passes more reliably.
+- Qwen with thinking ON is unusable for this kind of bench on club-3090 hardware: hits the 1500s subprocess timeout cap (now bumped to 2700s) before completing any exercises — the hidden CoT eats the per-exercise token budget. **Set `enable_thinking=false` for any agentic / multi-turn workload.**
+
+**To re-run cross-rig**: `bash scripts/quality-test.sh --pack aider-polyglot-30 --enable-sandboxed-packs` against your endpoint. See [docs/QUALITY_TEST.md](docs/QUALITY_TEST.md) for the harness setup.

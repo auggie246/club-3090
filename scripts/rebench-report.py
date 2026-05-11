@@ -262,26 +262,62 @@ def parse_soak(log: str) -> dict:
 # --- section: aider-polyglot ------------------------------------------------
 
 def parse_aider(blob: dict | None) -> dict:
+    """upstream_per_exercise can be either:
+    - dict keyed by '<lang>/<exercise>' (current shape from aider's benchmark.py)
+    - list of {language, passed} dicts (older or alt shape)
+    Handle both.
+    """
     if not blob:
         return {}
     for p in blob.get("packs", []):
         if p.get("pack_id") != "aider-polyglot-30":
             continue
         s = (p.get("scenarios") or [{}])[0]
-        per_ex = s.get("verifier_trace", {}).get("upstream_per_exercise") or \
-                 s.get("verifier_trace", {}).get("per_exercise") or []
-        per_lang = defaultdict(lambda: [0, 0])
-        for e in per_ex:
-            lang = (e.get("language") or "?").lower()
-            per_lang[lang][1] += 1
-            if e.get("passed") or e.get("status") == "pass":
-                per_lang[lang][0] += 1
+        latency_s = s.get("latency_seconds")
+        trace = s.get("verifier_trace", {})
+        # Schema v3 nests the trace under .trace; older versions are flat.
+        inner = trace.get("trace", trace) or {}
+        per_ex = inner.get("upstream_per_exercise") or inner.get("per_exercise") or {}
+
+        per_lang: dict = defaultdict(lambda: [0, 0])
+        passed_total = 0
+        total = 0
+
+        if isinstance(per_ex, dict):
+            # current shape: keyed by "<lang>/<exercise>"
+            for path, entry in per_ex.items():
+                lang = path.split("/", 1)[0].lower() if "/" in path else "?"
+                per_lang[lang][1] += 1
+                total += 1
+                if entry.get("passed") is True or entry.get("tests_passed") is True \
+                        or entry.get("status") == "pass":
+                    per_lang[lang][0] += 1
+                    passed_total += 1
+        elif isinstance(per_ex, list):
+            for entry in per_ex:
+                lang = (entry.get("language") or "?").lower()
+                per_lang[lang][1] += 1
+                total += 1
+                if entry.get("passed") is True or entry.get("status") == "pass":
+                    per_lang[lang][0] += 1
+                    passed_total += 1
+
+        # Prefer the top-level fields if they're set; fall back to our tally.
+        passed_count = s.get("passed_count") if s.get("passed_count") is not None else passed_total
+        total_count = s.get("total_count") if s.get("total_count") is not None else total
+        pass_rate = s.get("pass_rate")
+        if pass_rate is None and total_count:
+            pass_rate = passed_count / total_count
+
         return {
-            "pass_rate": s.get("pass_rate"),
-            "passed_count": s.get("passed_count"),
-            "total_count": s.get("total_count"),
-            "wall_seconds": s.get("latency_seconds"),
+            "pass_rate": pass_rate,
+            "passed_count": passed_count,
+            "total_count": total_count,
+            "wall_seconds": latency_s,
             "per_language": dict(per_lang),
+            "aider_commit": inner.get("aider_pinned_commit", ""),
+            "polyglot_commit": inner.get("polyglot_pinned_commit", ""),
+            "edit_format": inner.get("edit_format", ""),
         }
     return {}
 

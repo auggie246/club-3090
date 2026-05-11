@@ -132,6 +132,22 @@ echo "==============================================================="
 date +"  started:     %Y-%m-%dT%H:%M:%SZ" -u
 echo
 
+# --- capture container snapshot (one-shot, used by rebench-report.py) ------
+# Picks the first vllm-*/llama-cpp-* container — same heuristic preflight uses.
+CONTAINER_NAME=$(docker ps --format '{{.Names}}' 2>/dev/null \
+  | grep -E '^(vllm-|llama-cpp-)' | head -1 || true)
+if [[ -n "$CONTAINER_NAME" ]]; then
+  docker inspect "$CONTAINER_NAME" > "$OUT_DIR/container-config.json" 2>/dev/null || true
+  # Boot log: capture lines that the report parser needs (KV pool size,
+  # max concurrency, model load footprint, MTP detection). Trimmed to keep
+  # the file small; full container log is still available via `docker logs`.
+  docker logs "$CONTAINER_NAME" 2>&1 \
+    | grep -E "GPU KV cache size|Maximum concurrency|Available KV cache memory|Model loading took|Detected MTP|kv_cache_dtype|num_speculative_tokens" \
+    > "$OUT_DIR/vllm-boot.log" 2>/dev/null || true
+fi
+nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu \
+  --format=csv,noheader > "$OUT_DIR/gpu-state-start.log" 2>/dev/null || true
+
 # --- helpers ----------------------------------------------------------------
 have_artifact() { [[ -s "$1" ]]; }
 
@@ -200,6 +216,20 @@ URL="$URL" MODEL="$MODEL" \
     bash "$ROOT_DIR/scripts/quality-test.sh" --pack aider-polyglot-30
 snapshot_quality_json "$OUT_DIR/aider-polyglot.json"
 
+# --- final GPU state snapshot ----------------------------------------------
+nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu \
+  --format=csv,noheader > "$OUT_DIR/gpu-state-end.log" 2>/dev/null || true
+
+# --- synthesize REPORT.md ---------------------------------------------------
+echo
+echo "[report] synthesizing REPORT.md…"
+if command -v python3 >/dev/null 2>&1 && [[ -f "$ROOT_DIR/scripts/rebench-report.py" ]]; then
+  python3 "$ROOT_DIR/scripts/rebench-report.py" "$OUT_DIR" || \
+    echo "[report] ⚠ rebench-report.py failed — raw artifacts still available." >&2
+else
+  echo "[report] ⚠ python3 or rebench-report.py missing — skipping REPORT.md." >&2
+fi
+
 # --- summary ----------------------------------------------------------------
 echo
 echo "==============================================================="
@@ -207,6 +237,9 @@ echo " rebench complete"
 echo "==============================================================="
 date +"  finished:    %Y-%m-%dT%H:%M:%SZ" -u
 echo "  artifacts:   $OUT_DIR"
+if [[ -f "$OUT_DIR/REPORT.md" ]]; then
+  echo "  report:      $OUT_DIR/REPORT.md"
+fi
 echo
 echo "Headline pulls (grep through the logs):"
 echo "  TPS:           grep -E 'mean=|decode_TPS' $OUT_DIR/bench.log"

@@ -113,8 +113,11 @@ declare -A VARIANTS=(
   [llamacpp/concurrent]="llamacpp|models/qwen3.6-27b/llama-cpp/compose|single/concurrent.yml"
 )
 
-# Container name patterns we'll bring down — covers all current composes.
-RUNNING_PATTERN="^(vllm-qwen36-27b|llama-cpp-qwen36-27b|vllm-qwen36-27b-bounded-thinking|vllm-qwen36-27b-long-text-no-mtp|vllm-gemma-4-31b)"
+# Container name patterns we'll bring down — covers all current composes
+# AND any vllm/llama-cpp container we don't formally know about (catches
+# locally-built variants and one-off `docker run` instances that would
+# otherwise pin GPU memory invisibly to switch.sh).
+RUNNING_PATTERN="^(vllm-|llama-cpp-)"
 
 usage() {
   sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
@@ -149,6 +152,66 @@ down_running() {
       docker stop "$c" >/dev/null
     fi
   done
+}
+
+gpu_preflight() {
+  # Catch the "switch.sh said no club-3090 container running but GPU is
+  # still pinned at 22 GiB and the new container OOMs at boot" failure
+  # mode. down_running() only catches docker containers we manage; this
+  # function catches anything else (out-of-band vllm/ollama/training
+  # processes, exited containers that didn't release GPU memory cleanly,
+  # etc.). Skip with FORCE=1 if you know what you're doing.
+  if [[ "${FORCE:-0}" == "1" ]]; then
+    echo "[switch] FORCE=1 — skipping GPU pre-flight"
+    return
+  fi
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    return
+  fi
+  # Free MiB per GPU. Tolerate small overhead (driver, X server) — abort
+  # if any GPU has <80% of its total memory free.
+  local mem_query
+  mem_query=$(nvidia-smi --query-gpu=index,memory.free,memory.total --format=csv,noheader,nounits 2>/dev/null) || return
+  local bad=0
+  while IFS=',' read -r idx free total; do
+    free=$(echo "$free" | tr -d ' ')
+    total=$(echo "$total" | tr -d ' ')
+    idx=$(echo "$idx" | tr -d ' ')
+    [[ -z "$free" || -z "$total" ]] && continue
+    # Require ≥80% free. Compose default gpu-memory-utilization is 0.92.
+    local need=$(( total * 80 / 100 ))
+    if [[ "$free" -lt "$need" ]]; then
+      if [[ "$bad" -eq 0 ]]; then
+        echo "[switch] ERROR: GPU memory pre-flight failed." >&2
+        echo "[switch]        Something is still pinning GPU memory after down_running()." >&2
+        echo "[switch]        Per-GPU state (free / total MiB; need ≥80% free):" >&2
+      fi
+      echo "[switch]          GPU $idx: $free / $total MiB free  (need ≥ $need)" >&2
+      bad=1
+    fi
+  done <<< "$mem_query"
+
+  if [[ "$bad" -eq 1 ]]; then
+    echo "[switch]" >&2
+    echo "[switch]        Holding processes:" >&2
+    local apps
+    apps=$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null || true)
+    if [[ -n "$apps" ]]; then
+      while IFS= read -r line; do
+        echo "[switch]          $line" >&2
+      done <<< "$apps"
+    else
+      echo "[switch]          (nvidia-smi shows no compute apps — likely a zombie process or driver state)" >&2
+    fi
+    echo "[switch]" >&2
+    echo "[switch]        Common fixes:" >&2
+    echo "[switch]          docker ps -a | grep -E 'vllm|llama'       # find stopped containers" >&2
+    echo "[switch]          docker rm \$(docker ps -aq --filter status=exited)" >&2
+    echo "[switch]          fuser -v /dev/nvidia*                     # find host process holding the device" >&2
+    echo "[switch]" >&2
+    echo "[switch]        Override (skip this check):  FORCE=1 bash scripts/switch.sh ${VARIANT}" >&2
+    exit 1
+  fi
 }
 
 up_variant() {
@@ -273,6 +336,7 @@ done
 
 resolve_ready_url "${VARIANT}"
 down_running
+gpu_preflight
 up_variant "${VARIANT}"
 [[ $WAIT -eq 1 ]] && wait_ready
 echo "[switch] done. Try:  curl -s ${READY_URL%/v1/models}/v1/models | jq ."

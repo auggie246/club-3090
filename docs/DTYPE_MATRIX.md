@@ -1,6 +1,22 @@
 # Hardware dtype & quant capability matrix
 
-What each NVIDIA GPU class accelerates *natively* in hardware vs *emulates* in software. Use this as the input when picking KV-cache dtype, weight quant, and kernel path for a compose targeting a specific rig.
+*Last verified: 2026-05-12. Kernel landscape moves fast — when in doubt, cross-check against the [vLLM nightly](https://docs.vllm.ai/), [Intel IPEX-LLM](https://github.com/intel-analytics/ipex-llm), [ROCm](https://rocm.docs.amd.com/), and the vendor arch docs cited at the bottom.*
+
+What each GPU class accelerates *natively* in hardware vs *emulates* in software, across **NVIDIA, Intel, and AMD**. Use this as the input when picking KV-cache dtype, weight quant, and kernel path for a compose targeting a specific rig.
+
+This stack ships **vLLM-CUDA-first** composes (NVIDIA), with **llama.cpp as the cross-vendor fallback** that runs on AMD (ROCm) and Intel (SYCL) too. The non-NVIDIA sections below are forward-looking — they tell you what's *hardware-supported* on those archs, with notes on which inference stack actually uses each path today.
+
+## Table of contents
+
+- [NVIDIA](#nvidia)
+- [Intel](#intel)
+- [AMD](#amd)
+- [Cross-vendor routing](#cross-vendor-routing)
+- [Per-arch recommendations for club-3090 composes](#per-arch-recommendations-for-club-3090-composes) (NVIDIA-focused — the primary target)
+
+---
+
+# NVIDIA
 
 > **TL;DR:**
 > - **3090/A100 (Ampere)** → AutoRound/AWQ/GPTQ INT4 weights + BF16/INT8 compute + TQ3 KV. fp8 works but is software-emulated (no speedup vs fp16).
@@ -32,11 +48,11 @@ What each NVIDIA GPU class accelerates *natively* in hardware vs *emulates* in s
 
 **The big inflection points:**
 
-- **Turing (sm_75)** — first to add **INT8/INT4 Tensor Cores**. T4 was the data-center workhorse for INT8 inference for years.
-- **Ampere (sm_80/86)** — adds **BF16** and **TF32** TCs. Doubles INT8 throughput vs Turing. **No native FP8** (despite what some marketing suggested) — FP8 on Ampere is software-only and runs at ≤ fp16 speed.
-- **Ada (sm_89)** — first consumer arch with **native FP8 Tensor Cores** (E4M3 + E5M2). The 4090 / L40 get a real FP8 path, though peak FP8 throughput is lower than Hopper's transformer engine.
-- **Hopper (sm_90)** — first **transformer engine** with FP8 weights + FP8 KV both on-die. The fast path for FP8 inference. H100 also adds TMA (Tensor Memory Accelerator).
-- **Blackwell (sm_10x DC / sm_120 consumer)** — adds **NVFP4 / FP4 / MXFP4** (4-bit float on TCs), **MXFP8**, and **FP6**. The first arch where 4-bit *compute* (not just storage) is a hardware feature. Genesis treats sm_10x and sm_120 as one family with the same FP8/FP4 hardware capabilities; performance per watt differs.
+- **Turing (sm_75)** — first to add **INT8/INT4 Tensor Cores**. T4 was the data-center workhorse for INT8 inference for years. INT4 throughput on Turing is modest; the real volume push came one gen later.
+- **Ampere (sm_80/86)** — adds **BF16** and **TF32** TCs. **Roughly 2× the INT8/INT4 throughput of Turing** + new **2:4 structured sparsity** path that doubles peak again on supported kernels. **No native FP8** (despite what some marketing suggested) — FP8 on Ampere is software-only and runs at ≤ fp16 speed. *(Note: TF32 here is a training/mixed-precision convenience format — it's rarely the active path during LLM inference, which generally runs in FP16/BF16/INT8/FP8 instead.)*
+- **Ada (sm_89)** — first consumer arch with **native FP8 Tensor Cores** (E4M3 + E5M2). The 4090 / L40 get a real FP8 path. Peak FP8 TFLOPS is lower than Hopper's and — crucially — Ada **lacks Hopper's full transformer-engine integration** (faster on-die format conversion between FP8↔FP16, smarter mixed-precision accumulation, native FP8 KV). So Ada's FP8 is a real inference path but with a thinner kernel ecosystem than H100. Expect ~half the FP8 TFLOPS/clock of Hopper at comparable TC count.
+- **Hopper (sm_90)** — first **transformer engine** with FP8 weights + FP8 KV both on-die, plus block-scaling support for higher-accuracy FP8 paths. The fast path for FP8 inference. H100 also adds TMA (Tensor Memory Accelerator).
+- **Blackwell (sm_10x DC / sm_120 consumer)** — adds **NVFP4 / FP4 / MXFP4** (4-bit float on TCs), **MXFP8**, and **FP6**. The first arch where 4-bit *compute* (not just storage) is a hardware feature. Genesis treats sm_10x and sm_120 as one family with the same FP8/FP4 hardware capabilities; performance per watt differs. *(Current vLLM nightlies on Blackwell still prefer FP8 paths in practice — NVFP4 kernels are landing but NVFP4-quantized weight artifacts for 27-31B models are scarce as of 2026-05. Expect FP8 → NVFP4 to be the next migration.)*
 
 ---
 
@@ -93,6 +109,158 @@ KV cache is a separate concern from weights — vLLM ships several KV-quant sche
 | TurboQuant k8v4 | 8-bit K + 4-bit V mixed | ✗ | ✓ | Asymmetric — K matters more for attention precision. BF16-equivalent quality per the TQ paper. |
 
 **Ada / Hopper / Blackwell get a real win on FP8 KV** because the Tensor Cores can multiply FP8 directly without an upcast. On Ampere, FP8 KV is just smaller storage — the matmul still happens in FP16, so you save VRAM but not compute time. That's why the 3090's fp8 KV gives lower per-stream TPS than INT8 PTH (which *can* multiply in INT8 on the Tensor Core directly).
+
+**Emerging KV recipes** (worth watching, not yet defaults):
+- **Block-scaled FP8 KV** — per-block scales like MXFP8 but applied to KV cache rather than weights. Recovers accuracy at long-context where flat FP8 can lose precision in deep layers. Lands on Hopper / Blackwell first.
+- **NVFP4 KV** — Blackwell-native, ~4× smaller than FP16 KV at NVFP4 weight accuracy levels. Kernels still maturing in vLLM nightlies.
+- **TensorRT-LLM W4A8 / W4A4** — Hopper/Blackwell weight+activation quant recipes that pair INT4/NVFP4 weights with FP8/FP4 activations. Out of scope for the vLLM-first composes here but worth knowing if you cross-shop.
+
+---
+
+# Intel
+
+Intel's Tensor-Core equivalent is **XMX (Xe Matrix Extensions)** on Xe-architecture GPUs. The lineage from old to new:
+
+- **Xe-HPG (Arc A-series — Alchemist, 2023)** — first consumer XMX. INT8/INT4/FP16/BF16 supported. No FP8.
+- **Xe-HPC / Ponte Vecchio (Flex Series, Max 1100/1550, datacenter)** — high-density XMX. INT8/INT4/FP16/BF16. No FP8 in original silicon.
+- **Xe2 (Arc B-series — Battlemage, Lunar Lake iGPU, 2025)** — XMX gen-2. Adds **INT2** support, ~2× INT8 throughput vs Alchemist, partial FP8 emerging. MXFP4 / microscaling formats landing via OpenVINO.
+
+## Intel XMX feature matrix
+
+| Format | Xe-HPG (Arc A) | Xe-HPC (Flex/Max DC) | Xe2 (Arc B / Lunar Lake iGPU) |
+|---|:--:|:--:|:--:|
+| FP32 (vector) | ✓ | ✓ | ✓ |
+| FP16 (XMX) | ✓ | ✓ | ✓ |
+| BF16 (XMX) | ✓ | ✓ | ✓ |
+| INT8 (XMX) | ✓ | ✓ | ✓ (~2× HPG throughput) |
+| INT4 (XMX) | ✓ | ✓ | ✓ |
+| INT2 (XMX) | ✗ | ✗ | ✓ |
+| FP8 E4M3 / E5M2 | ✗ | ✗ | 🟡 partial (emerging) |
+| MXFP4 / microscaling | ✗ | ✗ | 🟡 emerging via OpenVINO |
+| FP4 / NVFP4 | ✗ | ✗ | ✗ |
+
+## What this means for LLM serving on Intel
+
+| GPU class | Best path today | Stack |
+|---|---|---|
+| Arc A-series (A770 16 GB / A580 / A380) | GPTQ/AWQ INT4 + FP16 compute | llama.cpp via SYCL backend; IPEX-LLM for transformer-style serving; OpenVINO for batch-low-latency |
+| Arc B-series (Battlemage B580 / B570) | Same as A + INT4/INT8 throughput uplift; FP8 paths landing | Same stacks, Xe2-tuned kernels |
+| Max Series / Flex (data center) | INT8 with sparsity; some BF16 / FP16 mixed | OpenVINO + oneAPI |
+
+**Key strengths**: cost-effective low-bit inference (INT4/INT8). Arc A770 16 GB has been a popular budget cross-vendor option for small LLMs via llama.cpp.
+
+**Key weaknesses**: ecosystem maturity. FP8 kernels are still landing; vLLM has a SYCL backend but it's significantly less mature than the CUDA path; advanced quants like NVFP4 / MXFP4 are mostly research at this point.
+
+**For club-3090 composes**: Intel users today go through **llama.cpp** (`ghcr.io/ggml-org/llama.cpp:server-intel` image or build with SYCL). The KV-quant menu shrinks to llama.cpp's offerings (`q4_0`, `q5_0`, `q8_0`); spec-decode menu shrinks to llama.cpp's MTP PR and ngram.
+
+---
+
+# AMD
+
+AMD splits matrix acceleration across two distinct architecture lines:
+
+- **RDNA (Radeon consumer)** — uses **WMMA** (Wave Matrix Multiply-Accumulate) instructions
+- **CDNA (Instinct datacenter)** — uses **MFMA** (Matrix Fused Multiply-Add) — much denser; the actual AMD AI silicon
+
+The two are *not* the same hardware path and have very different LLM-serving characteristics.
+
+## RDNA (Radeon consumer) — WMMA
+
+| Format | RDNA 2 (RX 6000) | RDNA 3 (RX 7000) | RDNA 4 (RX 9000) |
+|---|:--:|:--:|:--:|
+| FP32 (vector) | ✓ | ✓ | ✓ |
+| FP16 (WMMA) | — | ✓ | ✓ |
+| BF16 (WMMA) | — | ✓ | ✓ |
+| INT8 (WMMA) | — | ✓ | ✓ |
+| INT4 (WMMA) | — | ✓ | ✓ |
+| FP8 E4M3 / E5M2 (WMMA) | — | 🟡 limited | ✓ native |
+| 2:4 structured sparsity | — | — | ✓ |
+
+**RDNA 3 (RX 7900 XTX / 7900 XT / 7800 XT / 7700 XT)** — first WMMA generation. FP16/BF16/INT8/INT4 work; FP8 path is limited and depends on kernel availability.
+
+**RDNA 4 (RX 9000 series, 2025+)** — WMMA gen-3. Adds **native FP8** (E4M3 + E5M2), **2:4 structured sparsity** (effectively doubling peak TFLOPS on supported kernels), and improved INT4/INT8 throughput. The first consumer Radeon arch that's seriously competitive for LLM inference.
+
+## CDNA (Instinct datacenter) — MFMA
+
+| Format | CDNA 2 (MI250/MI210) | CDNA 3 (MI300X/MI300A) | CDNA 4 (MI350/MI400) |
+|---|:--:|:--:|:--:|
+| FP16 (MFMA) | ✓ | ✓ | ✓ |
+| BF16 (MFMA) | ✓ | ✓ | ✓ |
+| INT8 (MFMA) | ✓ | ✓ | ✓ |
+| INT4 (MFMA) | ✓ | ✓ | ✓ |
+| FP8 E4M3 / E5M2 (MFMA) | ✗ | ✓ | ✓ |
+| FP6 (MFMA) | ✗ | ✗ | ✓ |
+| FP4 / MXFP4 / NVFP4-style (MFMA) | ✗ | ✗ | ✓ |
+| MXFP8 (MFMA) | ✗ | ✗ | ✓ |
+| 2:4 structured sparsity | ✗ | ✓ | ✓ |
+
+**CDNA 3 (MI300X)** — AMD's Hopper competitor. 192 GB HBM3 per card, FP8 MFMA. Massive memory + competitive FP8 throughput; the option to look at if you want to escape NVIDIA's data-center pricing.
+
+**CDNA 4 (MI350 / MI400)** — AMD's Blackwell competitor. Adds FP6 / FP4 / MXFP* native paths. NVFP4 isn't supported per se (it's NVIDIA-proprietary), but AMD targets equivalent block-scaled FP4 formats.
+
+## What this means for LLM serving on AMD
+
+| GPU class | Best path today | Stack |
+|---|---|---|
+| RDNA 3 (RX 7900 XTX 24 GB) | GPTQ/AWQ INT4 + FP16 compute via ROCm | llama.cpp ROCm image (`ghcr.io/ggml-org/llama.cpp:server-rocm`); vLLM ROCm (improving) |
+| RDNA 4 (RX 9000) | Add FP8 paths + 2:4 sparsity | Same stacks, RDNA4-tuned kernels landing in 2025-26 |
+| CDNA 3 (MI300X) | **FP8 weights + FP8 KV** | vLLM ROCm fork; AMD's Composable Kernel; production-grade |
+| CDNA 4 (MI350+) | FP4 / MXFP4 / FP6 paths emerging | vLLM ROCm + AMD ML libs |
+
+**Key strengths**: huge HBM on Instinct (192 GB on MI300X — a single card holds models that need TP=4 on H100s); RDNA 4 brings consumer FP8 to AMD for the first time.
+
+**Key weaknesses**: software fragmentation between ROCm (datacenter-quality) and consumer Radeon drivers; fewer production-grade quant kernels than NVIDIA's ecosystem; vLLM's ROCm backend is real but trails CUDA in feature parity (no DFlash on AMD, fewer KV-quant formats, etc.).
+
+**For club-3090 composes**: AMD users today go through **llama.cpp** for consumer Radeon (`ghcr.io/ggml-org/llama.cpp:server-rocm`), or **vLLM ROCm** for Instinct rigs. If you have an MI300X, the relevant comparisons are against H100, not against this stack's 3090 baseline.
+
+---
+
+# Cross-vendor routing
+
+When future composes want to detect the host GPU and pick an optimal path, here's the rough decision tree:
+
+```
+1. Detect vendor + arch
+   - NVIDIA: torch.cuda.get_device_capability() → (major, minor)
+   - Intel:  torch.xpu.is_available() + sycl device query
+   - AMD:    torch.cuda.is_available() (HIP appears as CUDA) + rocm_smi
+   - Apple:  torch.backends.mps.is_available() (out of scope for these composes)
+
+2. Map to capability tier
+   - NVIDIA sm_120 / sm_10x   → Blackwell tier (FP4 / NVFP4 / MXFP* available)
+   - NVIDIA sm_90              → Hopper tier (FP8 + transformer engine)
+   - NVIDIA sm_89              → Ada tier (FP8 native, thinner kernel set)
+   - NVIDIA sm_80 / sm_86      → Ampere tier (BF16/INT8, FP8 emulated)
+   - AMD CDNA 4                → MI350+ tier (FP4/FP6/MXFP*)
+   - AMD CDNA 3                → MI300X tier (FP8 + huge HBM)
+   - AMD RDNA 4                → RX 9000 tier (FP8 consumer)
+   - AMD RDNA 3                → RX 7000 tier (INT8/INT4 only)
+   - Intel Xe2                 → Battlemage tier (INT2/INT4/INT8 + emerging FP8)
+   - Intel Xe-HPG              → Alchemist tier (INT4/INT8/FP16)
+
+3. Pick KV + weight quant per tier
+   - Blackwell  → NVFP4 weights (when artifact exists) or FP8 weights + FP8 KV
+   - Hopper     → FP8 weights + FP8 KV
+   - Ada        → AutoRound INT4 weights + FP8 KV
+   - Ampere     → AutoRound INT4 weights + TQ3 / INT8 PTH / fp8 KV
+   - CDNA 4     → MXFP4 / FP8 weights + FP8 KV
+   - CDNA 3     → FP8 weights + FP8 KV
+   - RDNA 4     → AWQ/GPTQ INT4 + FP8 KV
+   - RDNA 3     → AWQ/GPTQ INT4 + FP16 KV (no FP8)
+   - Xe2        → AWQ/GPTQ INT4 + FP16 KV (FP8 in progress)
+   - Xe-HPG     → AWQ/GPTQ INT4 + FP16 KV
+
+4. Pick engine
+   - vLLM-CUDA      for NVIDIA Ampere+
+   - vLLM-ROCm      for AMD Instinct (CDNA)
+   - llama.cpp-ROCm for AMD consumer (RDNA)
+   - llama.cpp-SYCL for Intel
+   - llama.cpp-CPU  fallback (anywhere)
+```
+
+This stack codifies the NVIDIA half of that tree today via `scripts/switch.sh` + the `models/<model>/<engine>/compose/` tree. Cross-vendor routing is a future-direction item — happy to entertain PRs that add `compose/intel/` or `compose/amd/` paths once we have benchmark numbers from those rigs to ground them in.
+
+**Ecosystem maturity caveat (mid-2026)**: NVIDIA's stack (vLLM + Marlin + Genesis + TensorRT-LLM + cuDNN) has 2-3 years more polish than AMD ROCm or Intel oneAPI. Expect day-zero kernel coverage on NVIDIA for new model architectures, and 1-3 month lag on AMD/Intel for the same models to reach equivalent throughput. For mission-critical inference, NVIDIA stays the default; for cost-sensitive or vendor-diversification scenarios, the Instinct (MI300X+) and Battlemage paths are increasingly viable.
 
 ---
 
@@ -158,7 +326,7 @@ For the same info outside Python, `nvidia-smi --query-gpu=compute_cap --format=c
 
 For inference workloads, NVFP4 is usually preferred when both are available. MXFP4 wins on cross-vendor portability.
 
-**MXFP* (microscaling) family.** The OCP microscaling standard adds **per-32-element block scales** (E8M0 = 8-bit power-of-two scale) on top of FP4 / FP6 / FP8 element formats: **MXFP4 / MXFP6 / MXFP8**. Native on Blackwell Tensor Cores; emulation possible on older arches but slow. The block-scale trick lets you keep low-bit element storage while recovering most of the dynamic range you'd lose with plain low-bit floats. Expect MXFP8 to be the new "FP8 with better accuracy" default once kernel paths mature.
+**MXFP* (microscaling) family.** The OCP microscaling standard adds **per-32-element block scales** (E8M0 = 8-bit power-of-two scale) on top of FP4 / FP6 / FP8 element formats: **MXFP4 / MXFP6 / MXFP8**. Native on Blackwell Tensor Cores; emulation possible on older arches but slow. The block-scale trick lets you keep low-bit element storage while recovering most of the dynamic range you'd lose with plain low-bit floats — so MXFP* formats typically score **measurably better on perplexity / downstream accuracy than plain low-bit floats at the same bit width**, which is exactly why Blackwell hardware leans into them. Expect MXFP8 to be the new "FP8 with better accuracy" default once kernel paths mature.
 
 **FP6 on Blackwell.** Blackwell adds native FP6 Tensor Cores — same theoretical throughput as FP8, smaller storage. Useful middle-ground between FP8 (highest accuracy at low precision) and FP4 (highest density). Kernel ecosystem is still maturing; not yet a common production choice for LLM serving as of 2026-05.
 
@@ -170,12 +338,31 @@ For inference workloads, NVFP4 is usually preferred when both are available. MXF
 
 ## References
 
-- **NVIDIA architecture docs**:
-  - [CUDA Compute Capabilities](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#compute-capabilities) — official mapping of sm_XY to features
-  - [Ampere whitepaper](https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.pdf) — first BF16/TF32/INT8 TC mainstream
-  - [Hopper whitepaper](https://www.nvidia.com/en-us/data-center/h100/) — transformer engine, FP8
-  - [Blackwell announcement](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/) — FP4/NVFP4
-- **vLLM kernel/dtype matrices** — vLLM source `vllm/model_executor/layers/quantization/` is the source of truth for which schemes have working kernels per arch
-- **Genesis guards** — `models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/guards.py` in this repo encodes the runtime per-arch feature detection used here
-- **Marlin** — [IST-DASLab/marlin](https://github.com/IST-DASLab/marlin) — INT4 weight × FP16 compute kernel; the dominant Ampere INT4 path
+**NVIDIA**:
+- [CUDA Compute Capabilities](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#compute-capabilities) — official mapping of sm_XY to features
+- [Ampere whitepaper](https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.pdf) — first BF16/TF32/INT8 TC mainstream
+- [Hopper whitepaper](https://www.nvidia.com/en-us/data-center/h100/) — transformer engine, FP8
+- [Blackwell announcement](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/) — FP4/NVFP4
+- [Marlin](https://github.com/IST-DASLab/marlin) — INT4 weight × FP16 compute kernel; the dominant Ampere INT4 path
+
+**Intel**:
+- [oneAPI docs](https://www.intel.com/content/www/us/en/developer/tools/oneapi/overview.html) — SYCL/DPC++ programming model
+- [XMX (Xe Matrix Extensions) overview](https://www.intel.com/content/www/us/en/developer/articles/technical/xe-matrix-extensions.html) — the matrix-compute path on Xe GPUs
+- [IPEX-LLM](https://github.com/intel-analytics/ipex-llm) — Intel's LLM-on-Xe runtime
+- [OpenVINO](https://docs.openvino.ai/) — Intel's broader inference toolkit with INT4/INT8 quant support
+
+**AMD**:
+- [ROCm docs](https://rocm.docs.amd.com/) — primary entry point for AMD GPU compute
+- [WMMA on RDNA](https://gpuopen.com/learn/wmma_on_rdna3/) — consumer-Radeon matrix instructions
+- [MFMA / Matrix Cores on CDNA](https://rocm.docs.amd.com/projects/rocBLAS/en/latest/) — datacenter Instinct matrix path
+- [Composable Kernel](https://github.com/ROCm/composable_kernel) — AMD's high-perf kernel framework
+- [vLLM ROCm fork](https://github.com/ROCm/vllm) — ROCm-specific vLLM patches
+
+**Cross-vendor**:
+- [vLLM kernel/dtype matrices](https://docs.vllm.ai/) — vLLM source `vllm/model_executor/layers/quantization/` is the source of truth for which schemes have working kernels per arch
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — most portable inference engine; CUDA, ROCm, SYCL, Metal, CPU backends
+- [OCP Microscaling Formats v1.0](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf) — community standard for MXFP4/6/8
+
+**This repo**:
+- **Genesis guards** — `models/qwen3.6-27b/vllm/patches/genesis/vllm/_genesis/guards.py` encodes the runtime per-arch feature detection
 - **club-3090 cross-rig data** — [BENCHMARKS.md](../BENCHMARKS.md) measures these matrices in practice (3090 / 4090 / 5090 / V100 / A5000 / mixed-arch eGPU)

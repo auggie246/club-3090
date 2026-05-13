@@ -16,6 +16,16 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.5.3 — 2026-05-13
+
+
+### ✨ Features
+
+- feat(scripts): add submit-bench flow ([ef77032](https://github.com/noonghunna/club-3090/commit/ef770322f43724f612a80393f547e5da218b5bf7))
+
+
+
+[Pin: `git checkout v0.5.3`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.5.2...v0.5.3)
 ## v0.5.2 — 2026-05-13
 
 

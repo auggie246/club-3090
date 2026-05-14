@@ -47,7 +47,7 @@
 services:
   llama-cpp-qwen36-27b-concurrent:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
-    container_name: llama-cpp-qwen36-27b-concurrent
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-qwen36-27b-concurrent}"
     restart: unless-stopped
     ports:
       - "${ESTATE_PORT:-${PORT:-8020}}:8080"

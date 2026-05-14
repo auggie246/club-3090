@@ -75,7 +75,7 @@
 services:
   vllm-qwen36-27b-dual-dflash:
     image: vllm/vllm-openai:nightly-1acd67a795ebccdf9b9db7697ae9082058301657
-    container_name: vllm-qwen36-27b-dual-dflash
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-dual-dflash}"
     restart: "no"
     ports:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8012}}:8000"

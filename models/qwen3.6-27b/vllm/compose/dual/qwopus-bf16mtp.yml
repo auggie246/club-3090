@@ -41,7 +41,7 @@
 services:
   vllm-qwopus-bf16mtp:
     image: vllm/vllm-openai:nightly-1acd67a795ebccdf9b9db7697ae9082058301657
-    container_name: vllm-qwopus-bf16mtp
+    container_name: "${ESTATE_CONTAINER:-vllm-qwopus-bf16mtp}"
     restart: "no"
     ports:
       - "${ESTATE_PORT:-${PORT:-8071}}:8000"

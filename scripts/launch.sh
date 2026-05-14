@@ -9,6 +9,10 @@
 # Usage:
 #   bash scripts/launch.sh                              # interactive model/GPU wizard
 #   bash scripts/launch.sh --variant <name>             # skip wizard, boot directly
+#   bash scripts/launch.sh --estate                     # multi-model estate wizard
+#   bash scripts/launch.sh --estate-file <path>          # boot an existing estate plan
+#   bash scripts/launch.sh --validate-estate <path>      # validate estate.yml, no boot
+#   bash scripts/launch.sh --down-estate <path>          # stop estate instances
 #   bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
 #   bash scripts/launch.sh --engine vllm --cards 1      # deprecated; prefer --gpus
 #   bash scripts/launch.sh --workload long-ctx-single    # profile-aware filter
@@ -38,6 +42,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SWITCH="${SWITCH:-${ROOT_DIR}/scripts/switch.sh}"
 VERIFY="${VERIFY:-${ROOT_DIR}/scripts/verify-full.sh}"
 LAUNCH_PROFILE="${LAUNCH_PROFILE:-${ROOT_DIR}/scripts/lib/profiles/launch_compat.py}"
+ESTATE_HELPER="${ESTATE_HELPER:-${ROOT_DIR}/scripts/lib/profiles/estate_cli.py}"
 if [[ -z "${MODEL_DIR:-}" && -f "${ROOT_DIR}/.env" ]]; then
   set -a
   # shellcheck source=/dev/null
@@ -54,6 +59,13 @@ WORKLOAD_ID=""
 DRAFTER_ID="__unset__"
 WEIGHTS_VARIANT=""
 STABLE_ONLY=0
+ESTATE_MODE=0
+ESTATE_APPEND=0
+ESTATE_REPLACE=""
+ESTATE_FILE=""
+VALIDATE_ESTATE=""
+DOWN_ESTATE=""
+ONLY_NAMES=""
 CARDS=""
 VARIANT=""
 MODEL_NAME=""
@@ -67,6 +79,14 @@ SKIP_PROJECTION=0
 VERBOSE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --single) ESTATE_MODE=0; shift ;;
+    --estate) ESTATE_MODE=1; shift ;;
+    --append) ESTATE_APPEND=1; ESTATE_MODE=1; shift ;;
+    --replace) ESTATE_REPLACE="$2"; ESTATE_MODE=1; shift 2 ;;
+    --estate-file) ESTATE_FILE="$2"; shift 2 ;;
+    --validate-estate) VALIDATE_ESTATE="$2"; shift 2 ;;
+    --down-estate) DOWN_ESTATE="$2"; shift 2 ;;
+    --only) ONLY_NAMES="$2"; shift 2 ;;
     --engine)  ENGINE="$2"; shift 2 ;;
     --workload) WORKLOAD_ID="$2"; shift 2 ;;
     --drafter) DRAFTER_ID="$2"; shift 2 ;;
@@ -89,6 +109,17 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
+
+if [[ -n "$VALIDATE_ESTATE" ]]; then
+  python3 "$ESTATE_HELPER" validate --file "$VALIDATE_ESTATE"
+  exit $?
+fi
+if [[ -n "$DOWN_ESTATE" ]]; then
+  _estate_down_cmd=(python3 "$ESTATE_HELPER" down --file "$DOWN_ESTATE")
+  [[ -n "$ONLY_NAMES" ]] && _estate_down_cmd+=(--only "$ONLY_NAMES")
+  "${_estate_down_cmd[@]}"
+  exit $?
+fi
 
 # --- pre-flight ---
 if [[ $SKIP_PREFLIGHT -eq 0 ]]; then
@@ -870,6 +901,20 @@ validate_selected_variant() {
 
   "${cmd[@]}"
 }
+
+if [[ "$ESTATE_MODE" -eq 1 || -n "$ESTATE_FILE" ]]; then
+  if [[ "$ESTATE_MODE" -eq 1 ]]; then
+    _estate_cmd=(python3 "$ESTATE_HELPER" wizard)
+    [[ -n "$ESTATE_FILE" ]] && _estate_cmd+=(--file "$ESTATE_FILE")
+    [[ "$ESTATE_APPEND" -eq 1 ]] && _estate_cmd+=(--append)
+    [[ -n "$ESTATE_REPLACE" ]] && _estate_cmd+=(--replace "$ESTATE_REPLACE")
+  else
+    _estate_cmd=(python3 "$ESTATE_HELPER" boot --file "$ESTATE_FILE")
+    [[ -n "$ONLY_NAMES" ]] && _estate_cmd+=(--only "$ONLY_NAMES")
+  fi
+  "${_estate_cmd[@]}"
+  exit $?
+fi
 
 # --- wizard ---
 if [[ -z "$VARIANT" ]]; then

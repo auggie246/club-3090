@@ -71,7 +71,7 @@ services:
     # so head-to-head TPS deltas reflect model intrinsics, not vLLM-version
     # drift between Qwen and Gemma legs.
     image: vllm/vllm-openai:nightly-1acd67a795ebccdf9b9db7697ae9082058301657
-    container_name: vllm-qwen36-27b-dual-int8-tq3
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-dual-int8-tq3}"
     restart: "no"
     ports:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8013}}:8000"

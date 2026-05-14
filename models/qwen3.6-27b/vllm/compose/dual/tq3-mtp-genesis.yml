@@ -77,7 +77,7 @@ services:
     # until Sander tags v7.73.x with a refreshed allowlist for the
     # post-#41434 main, then re-evaluate.
     image: vllm/vllm-openai:nightly-01d4d1ad375dc5854779c593eee093bcebb0cada
-    container_name: vllm-qwen36-27b-dual-tq3-mtp-genesis
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-dual-tq3-mtp-genesis}"
     restart: "no"
     ports:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8015}}:8000"

@@ -6,7 +6,7 @@ services:
     extends:
       file: dflash.yml
       service: vllm-qwen36-27b-dual-dflash
-    container_name: vllm-qwen36-27b-dual-nvlink-dflash
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-dual-nvlink-dflash}"
     environment:
       - NVLINK_MODE=force_on
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}

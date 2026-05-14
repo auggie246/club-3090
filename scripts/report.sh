@@ -377,6 +377,14 @@ section "Stack version"
 } | redact
 
 # ---------------------------------------------------------------------------
+# Profile state
+# ---------------------------------------------------------------------------
+
+if [[ -x scripts/lib/profiles/estate_cli.py || -f scripts/lib/profiles/estate_cli.py ]]; then
+  python3 scripts/lib/profiles/estate_cli.py report-state 2>&1 | redact || true
+fi
+
+# ---------------------------------------------------------------------------
 # Active container
 # ---------------------------------------------------------------------------
 

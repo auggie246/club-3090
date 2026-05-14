@@ -151,6 +151,25 @@ if [[ "$selected_count" != "1" ]]; then
   exit 1
 fi
 
+out="$(MODEL_DIR="${TMP_DIR}/models" CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6' \
+  SWITCH="${TMP_DIR}/switch-mock" bash "${ROOT_DIR}/scripts/launch.sh" \
+  --no-preflight --no-verify --model qwen3.6-27b --gpus 0 --workload fast-chat --no-projection 2>&1)"
+assert_contains "$out" "[launch] selected variant: vllm/minimal"
+assert_contains "$out" "SWITCHED vllm/minimal CUDA=0 NVD=0 TP=1 PP=1"
+
+out="$(MODEL_DIR="${TMP_DIR}/models" CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6' \
+  SWITCH="${TMP_DIR}/switch-mock" bash "${ROOT_DIR}/scripts/launch.sh" \
+  --no-preflight --no-verify --model qwen3.6-27b --gpus 0 --drafter off --no-projection 2>&1)"
+assert_contains "$out" "[launch] selected variant: vllm/long-text-no-mtp"
+assert_contains "$out" "SWITCHED vllm/long-text-no-mtp CUDA=0 NVD=0 TP=1 PP=1"
+
+mkdir -p "${TMP_DIR}/models/qwen3.6-27b-gguf"
+out="$(MODEL_DIR="${TMP_DIR}/models" CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6' \
+  SWITCH="${TMP_DIR}/switch-mock" bash "${ROOT_DIR}/scripts/launch.sh" \
+  --no-preflight --no-verify --model qwen3.6-27b --gpus 0 --stable --no-projection 2>&1)"
+assert_contains "$out" "[launch] selected variant: llamacpp/default"
+assert_contains "$out" "SWITCHED llamacpp/default CUDA=0 NVD=0 TP=1 PP=1"
+
 if out="$(MODEL_DIR="${TMP_DIR}/models" CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6' \
   SWITCH="${TMP_DIR}/switch-mock" bash "${ROOT_DIR}/scripts/launch.sh" \
   --no-preflight --no-verify --model gemma-4-31b --gpus 0 --no-projection 2>&1)"; then

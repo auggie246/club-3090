@@ -11,6 +11,8 @@
 #   bash scripts/launch.sh --variant <name>             # skip wizard, boot directly
 #   bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
 #   bash scripts/launch.sh --engine vllm --cards 1      # deprecated; prefer --gpus
+#   bash scripts/launch.sh --workload long-ctx-single    # profile-aware filter
+#   bash scripts/launch.sh --stable                      # stable engine profiles only
 #   bash scripts/launch.sh --tp 2 --pp 1                # override vLLM parallelism
 #   bash scripts/launch.sh --no-projection              # skip kv-calc budget projection
 #   bash scripts/launch.sh --no-verify                  # skip post-launch verify-full
@@ -35,6 +37,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SWITCH="${SWITCH:-${ROOT_DIR}/scripts/switch.sh}"
 VERIFY="${VERIFY:-${ROOT_DIR}/scripts/verify-full.sh}"
+LAUNCH_PROFILE="${LAUNCH_PROFILE:-${ROOT_DIR}/scripts/lib/profiles/launch_compat.py}"
 if [[ -z "${MODEL_DIR:-}" && -f "${ROOT_DIR}/.env" ]]; then
   set -a
   # shellcheck source=/dev/null
@@ -47,6 +50,10 @@ source "${ROOT_DIR}/scripts/preflight.sh"
 
 # --- arg parsing ---
 ENGINE=""
+WORKLOAD_ID=""
+DRAFTER_ID="__unset__"
+WEIGHTS_VARIANT=""
+STABLE_ONLY=0
 CARDS=""
 VARIANT=""
 MODEL_NAME=""
@@ -57,9 +64,14 @@ PARALLELISM="auto"
 SKIP_VERIFY=0
 SKIP_PREFLIGHT=0
 SKIP_PROJECTION=0
+VERBOSE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --engine)  ENGINE="$2"; shift 2 ;;
+    --workload) WORKLOAD_ID="$2"; shift 2 ;;
+    --drafter) DRAFTER_ID="$2"; shift 2 ;;
+    --weights-variant) WEIGHTS_VARIANT="$2"; shift 2 ;;
+    --stable)  STABLE_ONLY=1; shift ;;
     --cards)   CARDS="$2"; shift 2 ;;
     --variant) VARIANT="$2"; shift 2 ;;
     --model)   MODEL_NAME="$2"; shift 2 ;;
@@ -70,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --no-projection) SKIP_PROJECTION=1; shift ;;
     --no-verify) SKIP_VERIFY=1; shift ;;
     --no-preflight) SKIP_PREFLIGHT=1; shift ;;
+    --verbose) VERBOSE=1; shift ;;
     -h|--help)
       sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -548,6 +561,36 @@ choose_gpus() {
   echo "[launch] selected GPU(s): ${SELECTED_GPU_CSV} (${SELECTED_VRAM_SUMMARY})" >&2
 }
 
+selected_gpu_profile_spec() {
+  local parts=() i
+  for i in "${!CARD_INDICES[@]}"; do
+    parts+=("${CARD_INDICES[$i]}|${CARD_NAMES[$i]}|${CARD_MEM_MIB[$i]}|${CARD_SM[$i]}")
+  done
+  local joined
+  joined="$(IFS=';'; echo "${parts[*]}")"
+  printf '%s' "$joined"
+}
+
+launch_nvlink_active() {
+  if [[ "${#CARD_INDICES[@]}" -ne 2 ]]; then
+    printf '0'
+    return
+  fi
+  if [[ "${NVLINK_MODE:-auto}" == "force_on" ]]; then
+    printf '1'
+    return
+  fi
+  if [[ "${NVLINK_MODE:-auto}" == "force_off" ]]; then
+    printf '0'
+    return
+  fi
+  (
+    # shellcheck source=detect_nvlink.sh
+    source "${ROOT_DIR}/scripts/detect_nvlink.sh" >/dev/null 2>&1 || true
+    printf '%s' "${_NVLINK_ENABLED:-0}"
+  )
+}
+
 valid_tp_values() {
   case "$1" in
     qwen3.6-27b) echo "1 2 4" ;;
@@ -637,8 +680,15 @@ variant_min_vram_gb() {
 }
 
 variant_engine_available() {
-  local variant="$1" engine="${LAUNCH_VARIANT_ENGINE[$variant]:-vllm}"
+  local variant="$1" engine
+  engine="${LAUNCH_VARIANT_ENGINE[$variant]:-vllm}"
   [[ -z "$ENGINE" || "$ENGINE" == "$engine" ]] || return 1
+  model_has_engine "$MODEL_NAME" "$engine"
+}
+
+variant_engine_installed() {
+  local variant="$1" engine
+  engine="${LAUNCH_VARIANT_ENGINE[$variant]:-vllm}"
   model_has_engine "$MODEL_NAME" "$engine"
 }
 
@@ -654,6 +704,43 @@ variant_survives_filter() {
   (( min_gpu <= ${#CARD_INDICES[@]} )) || return 1
   (( min_vram == 0 || min_vram <= MIN_VRAM_GB )) || return 1
   return 0
+}
+
+profile_filter_candidates() {
+  local variant_csv candidate_text line use_runtime=0 nvlink_flag=()
+  variant_csv="$(IFS=','; echo "${LAUNCH_VARIANT_ORDER[*]}")"
+  [[ -n "$TP_OVERRIDE" || -n "$PP_OVERRIDE" ]] && use_runtime=1
+  [[ "$(launch_nvlink_active)" == "1" ]] && nvlink_flag=(--nvlink-active)
+
+  local cmd=(
+    python3 "$LAUNCH_PROFILE" filter-candidates
+    --variants "$variant_csv"
+    --model "$MODEL_NAME"
+    --gpu-spec "$(selected_gpu_profile_spec)"
+    --tp "$TP_VALUE"
+    --pp "$PP_VALUE"
+    --drafter "$DRAFTER_ID"
+  )
+  [[ -n "$ENGINE" ]] && cmd+=(--engine "$ENGINE")
+  [[ -n "$WORKLOAD_ID" ]] && cmd+=(--workload "$WORKLOAD_ID")
+  [[ -n "$WEIGHTS_VARIANT" ]] && cmd+=(--weights-variant "$WEIGHTS_VARIANT")
+  [[ "$STABLE_ONLY" -eq 1 ]] && cmd+=(--stable)
+  [[ "$use_runtime" -eq 1 ]] && cmd+=(--use-runtime-parallelism)
+  [[ "$VERBOSE" -eq 1 ]] && cmd+=(--verbose)
+  cmd+=("${nvlink_flag[@]}")
+
+  if ! candidate_text="$("${cmd[@]}")"; then
+    echo "$candidate_text" >&2
+    exit 2
+  fi
+
+  CANDIDATE_VARIANTS=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if variant_engine_installed "$line"; then
+      CANDIDATE_VARIANTS+=("$line")
+    fi
+  done <<< "$candidate_text"
 }
 
 suggest_default_variant() {
@@ -758,6 +845,32 @@ kv_projection() {
   fi
 }
 
+validate_selected_variant() {
+  [[ "${#CARD_INDICES[@]}" -gt 0 ]] || return 0
+  [[ -n "$TP_VALUE" && -n "$PP_VALUE" ]] || return 0
+  [[ -x "$LAUNCH_PROFILE" || -f "$LAUNCH_PROFILE" ]] || {
+    echo "[launch] ERROR: profile launch helper missing: ${LAUNCH_PROFILE}" >&2
+    exit 2
+  }
+
+  local project_flag="--project-vram" nvlink_flag=()
+  [[ "$SKIP_PROJECTION" -eq 1 ]] && project_flag="--no-project-vram"
+  [[ "$(launch_nvlink_active)" == "1" ]] && nvlink_flag=(--nvlink-active)
+
+  local cmd=(
+    python3 "$LAUNCH_PROFILE" validate-variant
+    --variant "$VARIANT"
+    --gpu-spec "$(selected_gpu_profile_spec)"
+    --tp "$TP_VALUE"
+    --pp "$PP_VALUE"
+    "$project_flag"
+  )
+  [[ "$VERBOSE" -eq 1 ]] && cmd+=(--verbose)
+  cmd+=("${nvlink_flag[@]}")
+
+  "${cmd[@]}"
+}
+
 # --- wizard ---
 if [[ -z "$VARIANT" ]]; then
   echo "" >&2
@@ -770,12 +883,7 @@ if [[ -z "$VARIANT" ]]; then
     gemma_single_24gb_guidance
   fi
 
-  CANDIDATE_VARIANTS=()
-  for candidate in "${LAUNCH_VARIANT_ORDER[@]}"; do
-    if variant_survives_filter "$candidate"; then
-      CANDIDATE_VARIANTS+=("$candidate")
-    fi
-  done
+  profile_filter_candidates
   [[ "${#CANDIDATE_VARIANTS[@]}" -gt 0 ]] || no_fit_guidance
 
   VARIANT="$(suggest_default_variant)"
@@ -790,6 +898,7 @@ if [[ -z "$VARIANT" ]]; then
     echo "[launch] WARN: PP + vLLM drafter/spec-decode paths are experimental on this stack." >&2
   fi
   kv_projection "$VARIANT"
+  validate_selected_variant
 
   other_variants=()
   for candidate in "${CANDIDATE_VARIANTS[@]}"; do

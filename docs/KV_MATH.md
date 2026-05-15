@@ -262,7 +262,7 @@ In the Qwen3-Next hybrid architecture, **only the 16 full_attention layers contr
 Applying the general formula:
 
 ```
-per_token_bytes = 16 (growing layers) × 4 (kv_heads) × 256 (head_dim) × k_v_tensors (2, no K=V tie) × bpe
+per_token_bytes = 16 (growing layers) × 4 (kv_heads) × 256 (head_dim) × k_v_tensors=2 × bpe
                 = 32,768 × bpe bytes
 ```
 
@@ -378,7 +378,7 @@ Like the dense Qwen 3.6 27B, DeltaNet `linear_attn` in-projection layers stay at
 Applying the general formula:
 
 ```
-per_token_bytes = 10 (growing layers) × 2 (kv_heads) × 256 (head_dim) × k_v_tensors (2, no K=V tie) × bpe
+per_token_bytes = 10 (growing layers) × 2 (kv_heads) × 256 (head_dim) × k_v_tensors=2 × bpe
                 = 10,240 × bpe bytes
 ```
 
@@ -477,7 +477,7 @@ Two shipped quants on this stack: AutoRound INT4 (default) and AWQ-4bit (Tier 2 
 Each stores K and V at `global_head_dim=512`, with K==V tying meaning a single store per element:
 
 ```
-per_token_bytes_growing = 10 (growing layers) × 16 (kv_heads) × 512 (global_head_dim) × k_v_tensors (1, K=V tied) × bpe
+per_token_bytes_growing = 10 (growing layers) × 16 (kv_heads) × 512 (global_head_dim) × k_v_tensors=1 × bpe
                         = 81,920 × bpe bytes
 ```
 
@@ -579,7 +579,7 @@ MoE expert weights all live in VRAM (sparse-activation at FLOPs level, not at me
 The asymmetric KV head count dramatically reduces per-token growing KV vs Gemma 4 31B:
 
 ```
-per_token_bytes_growing = num_full_attn_layers × num_global_kv_heads × global_head_dim × k_v_tensors (1, K=V tied) × bpe
+per_token_bytes_growing = num_full_attn_layers × num_global_kv_heads × global_head_dim × k_v_tensors=1 × bpe
                         = 5 × 2 × 512 × 1 × bpe
                         = 5,120 × bpe bytes
 ```

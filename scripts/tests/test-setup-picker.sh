@@ -143,6 +143,7 @@ out="$(MODEL_DIR="${TMP_DIR}/models" CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6,1:
   SWITCH="${TMP_DIR}/switch-mock" bash "${ROOT_DIR}/scripts/launch.sh" \
   --no-preflight --no-verify --model qwen3.6-27b --gpus 0,1 --no-projection 2>&1)"
 assert_contains "$out" "[launch] Tensor parallel TP=2"
+assert_not_contains "$out" "Topology:"
 assert_contains "$out" "SWITCHED vllm/dual CUDA=0,1 NVD=0,1 TP=2 PP=1"
 selected_count="$(grep -c "\[launch\] selected variant:" <<< "$out" || true)"
 if [[ "$selected_count" != "1" ]]; then
@@ -178,6 +179,24 @@ if out="$(MODEL_DIR="${TMP_DIR}/models" CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6
   exit 1
 fi
 assert_contains "$out" "Gemma 4 31B does not fit on a single 24 GB card today"
+
+out="$(CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6,1:RTX_3090:24576:8.6' \
+  bash "${ROOT_DIR}/scripts/launch.sh" --topology 2>&1)"
+assert_contains "$out" "Topology class: homogeneous"
+assert_not_contains "$out" "Compute mismatch detected"
+
+out="$(CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6,1:RTX_4090:24576:8.9' \
+  bash "${ROOT_DIR}/scripts/launch.sh" --topology 2>&1)"
+assert_contains "$out" "Topology class: vram_matched_compute_mismatched"
+assert_contains "$out" "Compute mismatch detected"
+assert_contains "$out" "Estate planner"
+
+out="$(MODEL_DIR="${TMP_DIR}/models" CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6,1:RTX_4090:24576:8.9' \
+  SWITCH="${TMP_DIR}/switch-mock" bash "${ROOT_DIR}/scripts/launch.sh" \
+  --no-preflight --no-verify --model qwen3.6-27b --gpus 0,1 --no-projection 2>&1)"
+assert_contains "$out" "Topology: vram_matched_compute_mismatched"
+assert_contains "$out" "Compute mismatch detected"
+assert_contains "$out" "SWITCHED vllm/dual CUDA=0,1 NVD=0,1 TP=2 PP=1"
 
 if out="$(MODEL_DIR="${TMP_DIR}/models" CLUB3090_FAKE_GPUS='0:RTX_3090:24576:8.6,1:RTX_3090:24576:8.6,2:RTX_3090:24576:8.6,3:RTX_3090:24576:8.6,4:RTX_3090:24576:8.6,5:RTX_3090:24576:8.6' \
   SWITCH="${TMP_DIR}/switch-mock" bash "${ROOT_DIR}/scripts/launch.sh" \

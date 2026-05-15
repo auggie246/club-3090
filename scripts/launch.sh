@@ -13,6 +13,7 @@
 #   bash scripts/launch.sh --estate-file <path>          # boot an existing estate plan
 #   bash scripts/launch.sh --validate-estate <path>      # validate estate.yml, no boot
 #   bash scripts/launch.sh --down-estate <path>          # stop estate instances
+#   bash scripts/launch.sh --topology                    # print GPU topology advisory, no boot
 #   bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
 #   bash scripts/launch.sh --engine vllm --cards 1      # deprecated; prefer --gpus
 #   bash scripts/launch.sh --workload long-ctx-single    # profile-aware filter
@@ -66,6 +67,7 @@ ESTATE_FILE=""
 VALIDATE_ESTATE=""
 DOWN_ESTATE=""
 ONLY_NAMES=""
+TOPOLOGY_ONLY=0
 CARDS=""
 VARIANT=""
 MODEL_NAME=""
@@ -87,6 +89,7 @@ while [[ $# -gt 0 ]]; do
     --validate-estate) VALIDATE_ESTATE="$2"; shift 2 ;;
     --down-estate) DOWN_ESTATE="$2"; shift 2 ;;
     --only) ONLY_NAMES="$2"; shift 2 ;;
+    --topology) TOPOLOGY_ONLY=1; SKIP_PREFLIGHT=1; shift ;;
     --engine)  ENGINE="$2"; shift 2 ;;
     --workload) WORKLOAD_ID="$2"; shift 2 ;;
     --drafter) DRAFTER_ID="$2"; shift 2 ;;
@@ -602,6 +605,77 @@ selected_gpu_profile_spec() {
   printf '%s' "$joined"
 }
 
+select_topology_gpus() {
+  GPU_LINES="$(compose_hw_detect_gpus 2>/dev/null || true)"
+  [[ -n "$GPU_LINES" ]] || return 1
+  CARD_INDICES=()
+  CARD_NAMES=()
+  CARD_MEM_MIB=()
+  CARD_SM=()
+
+  if [[ -n "$GPU_ARG" && "$GPU_ARG" != "all" ]]; then
+    IFS=',' read -ra _launch_topology_tokens <<< "$GPU_ARG"
+    local idx
+    for idx in "${_launch_topology_tokens[@]}"; do
+      idx="$(_compose_meta_trim "$idx")"
+      [[ -z "$idx" ]] && continue
+      gpu_exists "$idx" || { echo "[launch] ERROR: requested GPU ${idx}, but it was not detected." >&2; exit 1; }
+      append_selected_gpu "$idx"
+    done
+  elif [[ -n "$CARDS" ]]; then
+    [[ "$CARDS" =~ ^[0-9]+$ && "$CARDS" -ge 1 ]] || { echo "[launch] ERROR: --cards expects a positive integer." >&2; exit 1; }
+    local idx name mem_mib sm selected=0
+    while IFS=$'\t' read -r idx name mem_mib sm; do
+      [[ -z "$idx" ]] && continue
+      append_selected_gpu "$idx"
+      selected=$((selected + 1))
+      (( selected >= CARDS )) && break
+    done <<< "$GPU_LINES"
+    (( selected == CARDS )) || { echo "[launch] ERROR: --cards ${CARDS} requested, but only ${selected} GPU(s) were detected." >&2; exit 1; }
+  else
+    local idx name mem_mib sm
+    while IFS=$'\t' read -r idx name mem_mib sm; do
+      [[ -z "$idx" ]] && continue
+      append_selected_gpu "$idx"
+    done <<< "$GPU_LINES"
+  fi
+
+  [[ "${#CARD_INDICES[@]}" -gt 0 ]] || return 1
+  SELECTED_GPU_CSV="$(IFS=','; echo "${CARD_INDICES[*]}")"
+  summarize_selected_vram >/dev/null
+  return 0
+}
+
+print_topology_advisory() {
+  local output
+  output="$(python3 "$LAUNCH_PROFILE" topology --gpu-spec "$(selected_gpu_profile_spec)" --format wizard 2>&1)" || {
+    echo "$output" >&2
+    exit 2
+  }
+  if [[ -n "$output" ]]; then
+    echo "$output" >&2
+  fi
+}
+
+print_topology_and_exit() {
+  local output
+  if ! select_topology_gpus; then
+    echo "Detected hardware:"
+    echo "  no NVIDIA GPUs detected"
+    echo ""
+    echo "Topology class: unavailable"
+    echo ""
+    echo "For details, see docs/MULTI_CARD.md."
+    exit 0
+  fi
+  output="$(python3 "$LAUNCH_PROFILE" topology --gpu-spec "$(selected_gpu_profile_spec)" --format standalone 2>&1)" || {
+    echo "$output" >&2
+    exit 0
+  }
+  echo "$output"
+  exit 0
+}
+
 launch_nvlink_active() {
   if [[ "${#CARD_INDICES[@]}" -ne 2 ]]; then
     printf '0'
@@ -932,6 +1006,10 @@ if [[ "$ESTATE_MODE" -eq 1 || -n "$ESTATE_FILE" ]]; then
   exit $?
 fi
 
+if [[ "$TOPOLOGY_ONLY" -eq 1 ]]; then
+  print_topology_and_exit
+fi
+
 # --- wizard ---
 if [[ -z "$VARIANT" ]]; then
   echo "" >&2
@@ -939,6 +1017,7 @@ if [[ -z "$VARIANT" ]]; then
   echo "(Use --variant <name> next time to skip the wizard.)" >&2
   choose_model
   choose_gpus
+  print_topology_advisory
   pick_parallelism
   if [[ "$MODEL_NAME" == "gemma-4-31b" && "${#CARD_INDICES[@]}" -eq 1 && "$MIN_VRAM_GB" -lt 32 ]]; then
     gemma_single_24gb_guidance

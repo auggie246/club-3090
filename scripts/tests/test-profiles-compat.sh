@@ -49,6 +49,77 @@ assert r.recommended_kv_format == "turboquant_3bit_nc"
 assert r.diagnostics["constraints_skipped"] == ["C12"]
 PY
 
+run_test "topology: single card classified" <<'PY'
+from scripts.lib.profiles.compat import load_profiles, classify_hardware_topology, TopologyClass
+p = load_profiles()
+r = classify_hardware_topology([p.hardware["rtx-3090"]])
+assert r == TopologyClass.SINGLE_CARD
+PY
+
+run_test "topology: 2x3090 classified homogeneous" <<'PY'
+from scripts.lib.profiles.compat import load_profiles, classify_hardware_topology, TopologyClass
+p = load_profiles()
+r = classify_hardware_topology([p.hardware["rtx-3090"], p.hardware["rtx-3090"]])
+assert r == TopologyClass.HOMOGENEOUS
+PY
+
+run_test "topology: 3090+4090 classified compute-mismatched" <<'PY'
+from scripts.lib.profiles.compat import load_profiles, classify_hardware_topology, TopologyClass
+p = load_profiles()
+r = classify_hardware_topology([p.hardware["rtx-3090"], p.hardware["rtx-4090"]])
+assert r == TopologyClass.VRAM_MATCHED_COMPUTE_MISMATCHED
+PY
+
+run_test "topology: 3090+3060 classified VRAM-mismatched" <<'PY'
+from scripts.lib.profiles.compat import load_profiles, classify_hardware_topology, TopologyClass
+p = load_profiles()
+r = classify_hardware_topology([p.hardware["rtx-3090"], p.hardware["rtx-3060-12gb"]])
+assert r == TopologyClass.VRAM_MISMATCHED
+PY
+
+run_test "topology: VRAM cluster wins over mixed compute" <<'PY'
+from scripts.lib.profiles.compat import load_profiles, classify_hardware_topology, TopologyClass
+p = load_profiles()
+r = classify_hardware_topology([p.hardware["rtx-3090"], p.hardware["rtx-3060-12gb"], p.hardware["rtx-4090"]])
+assert r == TopologyClass.VRAM_MISMATCHED
+PY
+
+run_test "C16 topology advisory emits note for compute mismatch" <<'PY'
+from scripts.lib.profiles.compat import load_profiles, fits, TopologyClass
+p = load_profiles()
+r = fits(
+    hardware=[p.hardware["rtx-3090"], p.hardware["rtx-4090"]],
+    model=p.models["qwen3.6-27b"],
+    workload=p.workloads["long-ctx-single"],
+    engine=p.engines["vllm-nightly-mtp"],
+    drafter=p.drafters["qwen-mtp-builtin"],
+    tp=2,
+    pp=1,
+    project_vram=False,
+)
+assert r.topology_class == TopologyClass.VRAM_MATCHED_COMPUTE_MISMATCHED
+assert "C16" in r.diagnostics["constraints_passed"]
+assert any("C16" in n and "vram_matched_compute_mismatched" in n for n in r.notes), r.notes
+PY
+
+run_test "C16 topology advisory is silent for homogeneous GPUs" <<'PY'
+from scripts.lib.profiles.compat import load_profiles, fits, TopologyClass
+p = load_profiles()
+r = fits(
+    hardware=[p.hardware["rtx-3090"], p.hardware["rtx-3090"]],
+    model=p.models["qwen3.6-27b"],
+    workload=p.workloads["long-ctx-single"],
+    engine=p.engines["vllm-nightly-mtp"],
+    drafter=p.drafters["qwen-mtp-builtin"],
+    tp=2,
+    pp=1,
+    project_vram=False,
+)
+assert r.topology_class == TopologyClass.HOMOGENEOUS
+assert "C16" in r.diagnostics["constraints_passed"]
+assert not any("C16" in n for n in r.notes), r.notes
+PY
+
 run_test "C1 card count: world size mismatch rejected" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, fits
 p = load_profiles()
@@ -236,7 +307,7 @@ from scripts.lib.profiles.compat import load_profiles, fits
 p = load_profiles()
 r = fits([p.hardware["rtx-3090"]], p.models["qwen3.6-27b"], p.workloads["long-ctx-single"], p.engines["vllm-nightly-mtp"], tp=1, project_vram=False)
 d = r.diagnostics
-assert d["constraints_evaluated"] == [f"C{i}" for i in range(1, 16)]
+assert d["constraints_evaluated"] == [f"C{i}" for i in range(1, 17)]
 assert "constraints_passed" in d and "constraints_failed" in d and "constraints_skipped" in d
 assert isinstance(d["elapsed_ms"], float)
 PY

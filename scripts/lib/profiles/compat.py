@@ -12,6 +12,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,7 +27,7 @@ from .compose_registry import COMPOSE_REGISTRY
 SUPPORTED_SCHEMA_VERSIONS = {1}
 PROFILE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = Path(__file__).resolve().parents[3]
-CONSTRAINT_IDS = [f"C{i}" for i in range(1, 16)]
+CONSTRAINT_IDS = [f"C{i}" for i in range(1, 17)]
 ESTATE_CONSTRAINT_IDS = [f"E{i}" for i in range(1, 5)]
 
 
@@ -40,6 +41,37 @@ class UnsupportedSchemaVersionError(ProfileError):
 
 class CrossReferenceError(ProfileError):
     """Raised when a profile references a missing profile id."""
+
+
+class TopologyClass(str, Enum):
+    SINGLE_CARD = "single_card"
+    HOMOGENEOUS = "homogeneous"
+    VRAM_MATCHED_COMPUTE_MISMATCHED = "vram_matched_compute_mismatched"
+    VRAM_MISMATCHED = "vram_mismatched"
+    HETEROGENEOUS_MIXED = "heterogeneous_mixed"
+
+
+TOPOLOGY_ADVISORY = {
+    TopologyClass.SINGLE_CARD: None,
+    TopologyClass.HOMOGENEOUS: None,
+    TopologyClass.VRAM_MATCHED_COMPUTE_MISMATCHED: (
+        "Compute mismatch detected (VRAM matched). TP=N works fine but the faster card "
+        "waits at every NCCL allreduce — effective throughput caps at slower card's speed "
+        "(~30% of faster card idle at allreduce). Full per-card VRAM capacity preserved. "
+        "Alternative: estate planner (--estate) to run different models per card at full speed."
+    ),
+    TopologyClass.VRAM_MISMATCHED: (
+        "VRAM mismatch detected. TP=N would cap to smaller card's usable model size. "
+        "Recommended paths: (a) llama.cpp `--tensor-split` for weighted layer split, "
+        "(b) PP=N (manual flag flip — `--pipeline-parallel-size N` on a vllm/dual compose; "
+        "no shipping PP compose), (c) estate planner (--estate) to run different models per card."
+    ),
+    TopologyClass.HETEROGENEOUS_MIXED: (
+        "Heterogeneous hardware detected (multiple VRAM and compute tiers). Manual selection "
+        "recommended. Consider the estate planner (--estate) to put different models on "
+        "different card subsets, or run a single model on the largest matched subset."
+    ),
+}
 
 
 def _logger() -> logging.Logger:
@@ -90,6 +122,30 @@ class HardwareProfile:
     power_cap_w_prefill: Optional[int] = None
     power_cap_w_max: Optional[int] = None
     notes: Optional[str] = None
+
+
+def classify_hardware_topology(hardware: list[HardwareProfile]) -> TopologyClass:
+    """Classify selected GPUs for TP-vs-PP/estate advisory output."""
+    if not hardware:
+        raise ProfileError("classify_hardware_topology requires at least one HardwareProfile")
+    if len(hardware) == 1:
+        return TopologyClass.SINGLE_CARD
+
+    vrams = sorted(hw.vram_gb for hw in hardware)
+    sms = {hw.sm for hw in hardware}
+
+    vram_clusters = 1
+    for i in range(1, len(vrams)):
+        if vrams[i] - vrams[i - 1] > 1.0:
+            vram_clusters += 1
+
+    if vram_clusters == 1 and len(sms) == 1:
+        return TopologyClass.HOMOGENEOUS
+    if vram_clusters == 1 and len(sms) > 1:
+        return TopologyClass.VRAM_MATCHED_COMPUTE_MISMATCHED
+    if vram_clusters > 1:
+        return TopologyClass.VRAM_MISMATCHED
+    return TopologyClass.HETEROGENEOUS_MIXED
 
 
 @dataclass(frozen=True)
@@ -203,6 +259,7 @@ class FitsResult:
     world_size: Optional[int] = None
     bottleneck_vram_gb: Optional[float] = None
     homogeneous: Optional[bool] = None
+    topology_class: Optional[TopologyClass] = None
     kv_projection: Optional[dict[str, Any]] = None
     compose_name: Optional[str] = None
     weights_variant: Optional[str] = None
@@ -686,6 +743,7 @@ def fits(
     effective_max_num_seqs = max_num_seqs if max_num_seqs is not None else int(workload.defaults.get("max_num_seqs", 1))
     effective_weights = resolve_weights_variant(model, engine, weights_variant)
     homogeneous = len({hw.id for hw in hardware}) <= 1
+    topology_class = classify_hardware_topology(hardware) if hardware else None
     bottleneck = min((hw.vram_gb for hw in hardware), default=None)
     effective_cudagraph = _cudagraph_mode(hardware)
 
@@ -830,6 +888,14 @@ def fits(
                 else:
                     ok("C12")
 
+    if topology_class is None:
+        skip("C16", "Topology advisory not run; no hardware profiles provided.")
+    else:
+        ok("C16")
+        advisory = TOPOLOGY_ADVISORY.get(topology_class)
+        if advisory:
+            notes.append(f"C16 topology={topology_class.value}: {advisory}")
+
     diagnostics = {
         "constraints_evaluated": list(CONSTRAINT_IDS),
         "constraints_passed": passed,
@@ -850,6 +916,7 @@ def fits(
         world_size=world_size,
         bottleneck_vram_gb=bottleneck,
         homogeneous=homogeneous,
+        topology_class=topology_class,
         kv_projection=kv_projection,
         weights_variant=effective_weights,
         diagnostics=diagnostics,

@@ -42,6 +42,57 @@ isn't your topology.
 
 ---
 
+## Topology classification
+
+The launcher classifies your selected hardware and emits strategy guidance
+when the cards are not matched. You can run the classifier without booting
+anything:
+
+```bash
+bash scripts/launch.sh --topology
+```
+
+Use `--gpus 0,1` or `--cards 2` with `--topology` if you only want advice
+for a subset.
+
+| Class | What it means | Example | Recommended |
+|---|---|---|---|
+| `single_card` | 1 GPU detected | 1x RTX 3090 | Use the largest single-card compose that fits (`vllm/default`, `vllm/long-text`, `llamacpp/default`). |
+| `homogeneous` | All cards have matched VRAM and matched SM | 2x RTX 3090 | TP=N is the optimal default; use the shipped `vllm/dual*` or `vllm/dual4*` composes. |
+| `vram_matched_compute_mismatched` | Same VRAM, different compute tier | RTX 3090 + RTX 4090 | TP=N works correctly, but faster cards wait at NCCL allreduce. Estate planner is better for multi-model workloads. |
+| `vram_mismatched` | Different VRAM sizes | RTX 3060 12 GB + RTX 3090 24 GB | Prefer llama.cpp `--tensor-split`, manual PP=N experiments, or estate planner. Avoid TP=N across the full mismatched set. |
+| `heterogeneous_mixed` | Multiple VRAM and compute tiers | RTX 3060 + RTX 3090 + RTX 4090 | Manual selection. Run one model on the largest matched subset or use estate planner for separate endpoints. |
+
+### Why TP=N is poor on VRAM-mismatched cards
+
+Tensor parallelism splits weights evenly across cards. If one card has 24 GB
+and another has 12 GB, TP=2 still puts roughly half the model on each card.
+The smaller card becomes the hard ceiling for weights, KV cache, activations,
+and fragmentation. For Qwen 3.6 27B INT4, that usually leaves too little KV
+headroom to be useful.
+
+For mismatched VRAM, the practical paths are:
+
+- llama.cpp `--tensor-split` for weighted layer placement.
+- PP=N as a manual vLLM flag flip (`--pipeline-parallel-size N`) when you are
+  deliberately experimenting. club-3090 does not ship a PP compose today.
+- Estate planner: `bash scripts/launch.sh --estate` runs different models on
+  different card subsets without forcing one model across uneven VRAM.
+
+### When compute-mismatched TP is fine
+
+Matched VRAM with different SM, such as RTX 3090 + RTX 4090, is a different
+trade-off. TP=2 works because both cards have enough memory for the same model
+shard and KV budget. The cost is throughput: the faster card waits at NCCL
+allreduce barriers, so effective pair speed caps near the slower card. You
+preserve per-card VRAM capacity, but waste some compute on the faster card.
+
+That is acceptable for one-model serving. If your goal is maximum aggregate
+throughput from two different cards, estate planner usually wins because each
+card runs its own model at full speed.
+
+---
+
 ## Valid TP values for Qwen3.6-27B
 
 vLLM's tensor parallelism splits attention heads across cards. The TP

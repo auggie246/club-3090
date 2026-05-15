@@ -19,7 +19,16 @@ if str(REPO_ROOT) not in sys.path:
 
 os.environ.setdefault("CLUB3090_LOG_LEVEL", "ERROR")
 
-from scripts.lib.profiles.compat import FitsResult, ProfileError, fits, load_profiles, to_compose_name  # noqa: E402
+from scripts.lib.profiles.compat import (  # noqa: E402
+    TOPOLOGY_ADVISORY,
+    FitsResult,
+    ProfileError,
+    TopologyClass,
+    classify_hardware_topology,
+    fits,
+    load_profiles,
+    to_compose_name,
+)
 from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY  # noqa: E402
 
 
@@ -100,6 +109,26 @@ def _parse_gpu_specs(value: str, profiles) -> list:
             raise LaunchCompatError(f"hardware profile `{hardware_id}` is not installed") from exc
     if not hardware:
         raise LaunchCompatError("no GPU specs were provided for profile validation")
+    return hardware
+
+
+def _parse_gpu_specs_with_indices(value: str, profiles) -> list[tuple[str, object]]:
+    hardware = []
+    for raw in value.split(";"):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            idx, name, mem_mib, sm = raw.split("|", 3)
+        except ValueError as exc:
+            raise LaunchCompatError(f"invalid --gpu-spec entry `{raw}`") from exc
+        hardware_id = _hardware_id_from_gpu(name, int(mem_mib), float(sm))
+        try:
+            hardware.append((idx, profiles.hardware[hardware_id]))
+        except KeyError as exc:
+            raise LaunchCompatError(f"hardware profile `{hardware_id}` is not installed") from exc
+    if not hardware:
+        raise LaunchCompatError("no GPU specs were provided for topology classification")
     return hardware
 
 
@@ -364,6 +393,90 @@ def command_resolve_variant_pin(args: argparse.Namespace) -> int:
     return 0
 
 
+def _hardware_line(index: str, hardware) -> str:
+    return f"  GPU {index}: {hardware.display_name} ({hardware.vram_gb:g} GB, sm {hardware.sm:g})"
+
+
+def _standalone_recommendation(topology: TopologyClass, count: int) -> list[str]:
+    if topology == TopologyClass.SINGLE_CARD:
+        return [
+            "Recommended:",
+            "  1. Use the largest single-card compose your model fits.",
+            "  2. Add another matched card for TP=2 when long-context concurrency matters.",
+        ]
+    if topology == TopologyClass.HOMOGENEOUS:
+        return [
+            "Recommended:",
+            f"  1. TP={count} is the default path for matched cards; use the shipped vllm/dual* or multi-card composes.",
+            "  2. Estate planner remains useful when you want separate models/endpoints instead of one larger TP instance.",
+        ]
+    if topology == TopologyClass.VRAM_MATCHED_COMPUTE_MISMATCHED:
+        return [
+            "Recommended:",
+            f"  1. TP={count} works as-is. Compute mismatch means the faster card waits at every NCCL allreduce; effective throughput caps at the slower card's speed (~30% of faster card idle). Full per-card VRAM capacity preserved.",
+            "  2. Estate planner — `bash scripts/launch.sh --estate` runs different models per card, each at full speed.",
+            "",
+            "Not recommended:",
+            "  - PP=N: possible as a manual flag flip (`--pipeline-parallel-size N`) on a vllm/dual compose, but no PP compose ships today.",
+        ]
+    if topology == TopologyClass.VRAM_MISMATCHED:
+        return [
+            "Recommended:",
+            "  1. llama.cpp `--tensor-split` for weighted layer split on mismatched VRAM.",
+            "  2. PP=N as a manual vLLM flag flip (`--pipeline-parallel-size N`) if you are deliberately experimenting.",
+            "  3. Estate planner — run different models per card or use the largest matched subset.",
+            "",
+            "Not recommended:",
+            "  - TP=N on the full mismatched set: the smaller card caps usable model size and KV headroom.",
+        ]
+    return [
+        "Recommended:",
+        "  1. Manual selection. Use the largest matched subset for one model.",
+        "  2. Estate planner — put different models on different card subsets.",
+    ]
+
+
+def command_topology(args: argparse.Namespace) -> int:
+    _quiet_compat_logger()
+    profiles = load_profiles()
+    indexed_hardware = _parse_gpu_specs_with_indices(args.gpu_spec, profiles)
+    hardware = [item[1] for item in indexed_hardware]
+    topology = classify_hardware_topology(hardware)
+    advisory = TOPOLOGY_ADVISORY.get(topology)
+
+    if args.format == "wizard":
+        if topology in (TopologyClass.SINGLE_CARD, TopologyClass.HOMOGENEOUS):
+            return 0
+        detected = " + ".join(
+            f"1x {hw.display_name} ({hw.vram_gb:g} GB, sm {hw.sm:g})"
+            for _idx, hw in indexed_hardware
+        )
+        print(f"Detected: {detected}")
+        print("")
+        print(f"Topology: {topology.value}")
+        if advisory:
+            print(f"  {advisory}")
+        print("")
+        print("Continue with the selected parallelism if that trade-off is acceptable.")
+        return 0
+
+    print("Detected hardware:")
+    for idx, hw in indexed_hardware:
+        print(_hardware_line(idx, hw))
+    print("")
+    print(f"Topology class: {topology.value}")
+    print("")
+    for line in _standalone_recommendation(topology, len(hardware)):
+        print(line)
+    print("")
+    if advisory:
+        print("Advisory:")
+        print(f"  {advisory}")
+        print("")
+    print("For details, see docs/MULTI_CARD.md.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Profile bridge for scripts/launch.sh")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -403,6 +516,11 @@ def build_parser() -> argparse.ArgumentParser:
     variant_pin.add_argument("--variant", required=True)
     variant_pin.add_argument("--format", choices=("shell", "json", "value"), default="shell")
     variant_pin.set_defaults(func=command_resolve_variant_pin)
+
+    topology = sub.add_parser("topology")
+    topology.add_argument("--gpu-spec", required=True)
+    topology.add_argument("--format", choices=("standalone", "wizard"), default="standalone")
+    topology.set_defaults(func=command_topology)
 
     return parser
 

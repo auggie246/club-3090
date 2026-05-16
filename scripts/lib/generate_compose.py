@@ -170,6 +170,36 @@ def resolve_arch(root: Path, runtime: dict, arches: list[dict], model: str) -> t
 # --------------------------------------------------------------------------
 # Step 3 — engine-pin validation (validation ONLY; never rewrites image).
 # --------------------------------------------------------------------------
+def scope_gate(engine_id: str, engine: dict, runtime: dict, profile: str) -> dict:
+    """The #141 in-scope predicate (extracted verbatim from :func:`generate`
+    step 2 — behaviour/messages/codes byte-identical).
+
+    Raises :class:`Refuse` with the SAME message + code as the inlined
+    sequence did when the profile is out of scope; returns the resolved
+    ``profile_runtime`` block on success. This is pure (data in, data out /
+    Refuse) so the Pull-Gate stratum-2 path can REUSE this exact predicate
+    read-only instead of reimplementing it (locked design `[D]` reuse).
+    """
+    if engine.get("type") != "vllm":
+        raise Refuse(
+            f"engine {engine_id} type={engine.get('type')!r} != vllm; the #141 "
+            f"generator is non-Genesis vLLM only -> refuse (out of scope)"
+        )
+    prof_rt = (runtime.get("profiles") or {}).get(profile)
+    if prof_rt is None:
+        raise Refuse(
+            f"profile {profile!r} has no profile_runtime.yml capture "
+            f"(only in-scope vLLM profiles are captured) -> refuse"
+        )
+    if prof_rt.get("genesis_equipped") is True:
+        raise Refuse(
+            f"profile {profile} is genesis_equipped:true "
+            f"({prof_rt.get('genesis_equipped_evidence')}); Genesis-flag "
+            f"generation is permanently out of scope -> refuse"
+        )
+    return prof_rt
+
+
 def validate_engine_pin(engine_id: str, engine: dict, arch_row: dict) -> str:
     """Confirm <engine>@<sha-from-install.spec> matches a loads:true pin.
 
@@ -427,23 +457,7 @@ def generate(
     engine = load_engine(root, engine_id)
 
     # Step 2 — SCOPE GATES FIRST (before any capture lookup).
-    if engine.get("type") != "vllm":
-        raise Refuse(
-            f"engine {engine_id} type={engine.get('type')!r} != vllm; the #141 "
-            f"generator is non-Genesis vLLM only -> refuse (out of scope)"
-        )
-    prof_rt = (runtime.get("profiles") or {}).get(profile)
-    if prof_rt is None:
-        raise Refuse(
-            f"profile {profile!r} has no profile_runtime.yml capture "
-            f"(only in-scope vLLM profiles are captured) -> refuse"
-        )
-    if prof_rt.get("genesis_equipped") is True:
-        raise Refuse(
-            f"profile {profile} is genesis_equipped:true "
-            f"({prof_rt.get('genesis_equipped_evidence')}); Genesis-flag "
-            f"generation is permanently out of scope -> refuse"
-        )
+    prof_rt = scope_gate(engine_id, engine, runtime, profile)
 
     # Step 4 (model->arch) feeds step 3's pin validation.
     arch_name, arch_row = resolve_arch(root, runtime, arches, E["model"])

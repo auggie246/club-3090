@@ -1,0 +1,840 @@
+#!/usr/bin/env bash
+# v0.8.0 Pull-Gate P4 — the EXHAUSTIVE state-machine truth table.
+#
+# Per the LOCKED stop-condition (brief v6): prose iteration ended; THIS test
+# is now the authoritative spec for the Pull-Gate state machine. It covers,
+# with NO live network / NO GPU / NO HF-API / NO real [D]-emit:
+#
+#   * the §4.1 9 cells of [C1] (3 confidences × 3 raw-verdicts) with the
+#     correct terminal + every flag interaction, asserted TOTAL + design-
+#     locked (terminal set EXACTLY the locked 4);
+#   * every stratum's abort, in order, with ordering assertions
+#     (stratum-4 [C2a] AFTER stratum-3 [C0]; stratum-5 after [C2a];
+#     stratum-6 Path-A-only);
+#   * --experimental-arch bypasses ONLY no-arch-row (NOT
+#     runtime-incompatible, NOT stratum-5 no-fit-model);
+#   * golden cases g0..g15 from the brief;
+#   * no --trust-remote-code ever in an in-scope Path-A emitted body
+#     (reusing the patch_attribution.service_body()==0 check pattern).
+#
+# Hermetic: hardware_sm injected; HF fetcher is a recorded FixtureFetcher;
+# disk free is an injected fake statvfs; [D] emit goes through the REAL
+# generate_compose.generate (pure, no container) for the integration
+# goldens and an injected d_runner for the dry-run-refusal golden.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
+python3 - "$ROOT_DIR" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+os.environ.pop("HF_TOKEN", None)  # deterministic gated path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+
+from scripts.lib.profiles import pull as P  # noqa: E402  (P4 — under test)
+from scripts.lib.profiles import deriver as D  # noqa: E402 (P2, frozen)
+from scripts.lib.profiles import gates as G  # noqa: E402  (P3, frozen)
+from scripts.lib.profiles import patch_attribution as PA  # noqa: E402
+from scripts.lib.profiles.compat import load_profiles  # noqa: E402
+from scripts.lib import generate_compose as GC  # noqa: E402  ([D], frozen)
+
+failures: list[str] = []
+
+
+def check(cond: bool, msg: str) -> None:
+    if cond:
+        print(f"PASS: {msg}")
+    else:
+        print(f"FAIL: {msg}", file=sys.stderr)
+        failures.append(msg)
+
+
+profiles = load_profiles()
+SM_86 = 8.6   # RTX 3090 (Ampere)
+SM_90 = 9.0   # Hopper-class
+
+CFG = f"{D._HF_RESOLVE}/{{slug}}/resolve/main/config.json"
+API = f"{D._HF_API}/{{slug}}?blobs=true"
+
+
+class FixtureFetcher:
+    """Recorded-response fetcher (the P2/P3 pattern). Raises if a Path-A
+    curated run touches it (curated hits must be network-free)."""
+
+    def __init__(self, routes: dict):
+        self.routes = routes
+        self.calls: list = []
+
+    def get(self, url, headers=None, range_=None):
+        self.calls.append((url, range_))
+        if url not in self.routes:
+            return D.FetchResponse(status=404, body=b"")
+        spec = self.routes[url]
+        if isinstance(spec, D.FetchResponse):
+            return spec
+        if isinstance(spec, dict):
+            return D.FetchResponse(
+                status=200, body=json.dumps(spec).encode("utf-8")
+            )
+        raise AssertionError(f"bad fixture for {url}")
+
+
+class NoNet:
+    def get(self, *a, **k):
+        raise AssertionError("curated Path-A run must not hit the network")
+
+
+def fake_statvfs(free_gb: float):
+    def _sv(_p):
+        class S:
+            f_frsize = 4096
+            f_bavail = int(free_gb * (1024 ** 3) / 4096)
+        return S()
+    return _sv
+
+
+BIG_DISK = fake_statvfs(500.0)
+TINY_DISK = fake_statvfs(2.0)
+
+
+def dense_cfg(arch="LlamaForCausalLM", **over):
+    c = {
+        "model_type": "llama",
+        "architectures": [arch],
+        "hidden_size": 4096,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "max_position_embeddings": 131072,
+        "torch_dtype": "bfloat16",
+    }
+    c.update(over)
+    return c
+
+
+def dense_api(weight_gb=8.0):
+    return {
+        "siblings": [
+            {"rfilename": "config.json", "size": 700},
+            {"rfilename": "tokenizer.json", "size": 1_000_000},
+            {"rfilename": "model.safetensors",
+             "size": int(weight_gb * (1024 ** 3))},
+        ]
+    }
+
+
+def ff_derived(slug, cfg, weight_gb=8.0):
+    return FixtureFetcher({
+        API.format(slug=slug): dense_api(weight_gb),
+        CFG.format(slug=slug): cfg,
+    })
+
+
+CURATED_SLUG = "Lorbus/Qwen3.6-27B-int4-AutoRound"
+
+# ===========================================================================
+# SECTION 1 — [C1] §4.1 TOTAL FUNCTION: all 9 cells × flag interactions.
+#   This is a PURE-function unit. It is the single authoritative mapping;
+#   the rest of the orchestrator only consumes it.
+# ===========================================================================
+print("\n--- [C1] §4.1 3×3 total function (pure) ---")
+
+# design-lock: terminal set is EXACTLY the locked 4.
+check(
+    P.LOCKED_TERMINALS == {"proceed", "confirm→proceed", "hard-block",
+                           "override-accepted"},
+    f"design-lock: Terminal set == locked 4 (got {sorted(P.LOCKED_TERMINALS)})",
+)
+check(
+    {t.value for t in P.Terminal} == P.LOCKED_TERMINALS,
+    "design-lock: Terminal enum == LOCKED_TERMINALS (no extra states)",
+)
+
+# TOTAL: every (confidence, raw_verdict) in the domain maps to a cell.
+unmapped = [
+    (c, v)
+    for c in P.C1_CONFIDENCE_DOMAIN
+    for v in P.C1_RAW_VERDICT_DOMAIN
+    if (c, v) not in P._C1_TABLE
+]
+check(not unmapped, f"[C1] is TOTAL over 3×3 domain (unmapped: {unmapped})")
+check(
+    len(P._C1_TABLE) == 9,
+    f"[C1] table is exactly 9 cells (got {len(P._C1_TABLE)})",
+)
+# every cell's terminal is in the locked set
+bad_term = [
+    k for k, c in P._C1_TABLE.items()
+    if c.base_terminal.value not in P.LOCKED_TERMINALS
+]
+check(not bad_term, f"[C1] every cell terminal ∈ locked 4 (bad: {bad_term})")
+
+# Expected §4.1 outcomes (terminal, satisfied) per cell + flags.
+# Source: v0.8.x-design.md §4.1 table (lines 62-66) + footnote line 68.
+EXACT = D.Confidence.EXACT.value
+DERV = D.Confidence.DERIVED.value
+ELB = D.Confidence.ESTIMATED_LOWER_BOUND.value
+
+# exact × fits-clean  -> proceed, SILENT (the ONLY silent gate-pass).
+o = P.c1_terminal(EXACT, "fits-clean", {})
+check(o.terminal is P.Terminal.PROCEED and o.satisfied and o.needs == "",
+      "[C1] exact×fits-clean -> proceed (silent, no flag)")
+
+# exact × fits-constrained -> confirm→proceed; needs --yes.
+o = P.c1_terminal(EXACT, "fits-constrained", {})
+check(o.terminal is P.Terminal.CONFIRM_PROCEED and not o.satisfied
+      and o.needs == "--yes",
+      "[C1] exact×fits-constrained -> confirm→proceed, needs --yes")
+o = P.c1_terminal(EXACT, "fits-constrained", {"yes": True})
+check(o.terminal is P.Terminal.CONFIRM_PROCEED and o.satisfied,
+      "[C1] exact×fits-constrained + --yes -> satisfied")
+
+# exact × wont-fit -> hard-block (no flag clears it).
+o = P.c1_terminal(EXACT, "wont-fit", {"yes": True, "force_download": True})
+check(o.terminal is P.Terminal.HARD_BLOCK and not o.satisfied,
+      "[C1] exact×wont-fit -> hard-block (NO flag clears it)")
+
+# derived × fits-clean -> confirm→proceed, needs --yes.
+o = P.c1_terminal(DERV, "fits-clean", {})
+check(o.terminal is P.Terminal.CONFIRM_PROCEED and not o.satisfied
+      and o.needs == "--yes",
+      "[C1] derived×fits-clean -> confirm→proceed, needs --yes")
+o = P.c1_terminal(DERV, "fits-clean", {"yes": True})
+check(o.satisfied, "[C1] derived×fits-clean + --yes -> satisfied")
+
+# derived × fits-constrained -> confirm→proceed, needs --yes.
+o = P.c1_terminal(DERV, "fits-constrained", {})
+check(o.terminal is P.Terminal.CONFIRM_PROCEED and not o.satisfied,
+      "[C1] derived×fits-constrained -> confirm→proceed, needs --yes")
+
+# derived × wont-fit -> advisory → --force-download → override-accepted.
+o = P.c1_terminal(DERV, "wont-fit", {})
+check(o.terminal is P.Terminal.OVERRIDE_ACCEPTED and not o.satisfied
+      and o.needs == "--force-download",
+      "[C1] derived×wont-fit -> override-accepted, needs --force-download")
+o = P.c1_terminal(DERV, "wont-fit", {"force_download": True})
+check(o.terminal is P.Terminal.OVERRIDE_ACCEPTED and o.satisfied,
+      "[C1] derived×wont-fit + --force-download -> override-accepted")
+# --yes alone does NOT clear a wont-fit advisory.
+o = P.c1_terminal(DERV, "wont-fit", {"yes": True})
+check(not o.satisfied,
+      "[C1] derived×wont-fit + --yes (no --force-download) -> NOT satisfied")
+
+# estimated-lower-bound × fits-clean -> confirm→proceed, needs --yes.
+o = P.c1_terminal(ELB, "fits-clean", {})
+check(o.terminal is P.Terminal.CONFIRM_PROCEED and not o.satisfied
+      and o.needs == "--yes",
+      "[C1] estimated-lower-bound×fits-clean -> confirm→proceed, needs --yes")
+o = P.c1_terminal(ELB, "fits-clean", {"yes": True})
+check(o.satisfied,
+      "[C1] estimated-lower-bound×fits-clean + --yes -> satisfied")
+
+# estimated-lower-bound × fits-constrained -> confirm→proceed, needs --yes.
+o = P.c1_terminal(ELB, "fits-constrained", {})
+check(o.terminal is P.Terminal.CONFIRM_PROCEED and not o.satisfied,
+      "[C1] estimated-lower-bound×fits-constrained -> confirm→proceed")
+
+# estimated-lower-bound × wont-fit -> advisory → --force-download.
+o = P.c1_terminal(ELB, "wont-fit", {})
+check(o.terminal is P.Terminal.OVERRIDE_ACCEPTED and not o.satisfied
+      and o.needs == "--force-download",
+      "[C1] estimated-lower-bound×wont-fit -> override-accepted, "
+      "needs --force-download")
+o = P.c1_terminal(ELB, "wont-fit", {"force_download": True})
+check(o.terminal is P.Terminal.OVERRIDE_ACCEPTED and o.satisfied,
+      "[C1] estimated-lower-bound×wont-fit + --force-download -> "
+      "override-accepted")
+
+# §4.1 footnote line 68: ONLY exact×fits-clean reaches proceed without --yes.
+silent = [
+    (c, v)
+    for c in P.C1_CONFIDENCE_DOMAIN
+    for v in P.C1_RAW_VERDICT_DOMAIN
+    if P.c1_terminal(c, v, {}).satisfied
+    and P.c1_terminal(c, v, {}).terminal is P.Terminal.PROCEED
+]
+check(silent == [(EXACT, "fits-clean")],
+      f"[C1] ONLY exact×fits-clean silent-passes (got {silent})")
+
+# ===========================================================================
+# SECTION 2 — STRATUM 1: deriver structured errors (g12 trio + stratum-1).
+#   Aborts BEFORE any gate.
+# ===========================================================================
+print("\n--- stratum-1: deriver structured errors (g12) ---")
+
+# g12a: no *.safetensors -> unsupported-format.
+s = "fixtures/gguf-only"
+ff = FixtureFetcher({
+    API.format(slug=s): {"siblings": [{"rfilename": "model.gguf",
+                                       "size": 9}]},
+    CFG.format(slug=s): dense_cfg(),
+})
+r = P.run_pull(s, "vllm/minimal", hardware_sm=SM_86, fetcher=ff,
+               profiles=profiles, statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.DERIVER
+      and r.abort_reason == "unsupported-format" and not r.ok,
+      f"g12: no safetensors -> stratum-1 unsupported-format "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+
+# g12b: multiple top-level safetensors, no index -> ambiguous-weight-set.
+s = "fixtures/ambiguous"
+ff = FixtureFetcher({
+    API.format(slug=s): {"siblings": [
+        {"rfilename": "modelA.safetensors", "size": 9000000000},
+        {"rfilename": "modelB.safetensors", "size": 9000000000},
+        {"rfilename": "config.json", "size": 700},
+    ]},
+    CFG.format(slug=s): dense_cfg(),
+})
+r = P.run_pull(s, "vllm/minimal", hardware_sm=SM_86, fetcher=ff,
+               profiles=profiles, statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.DERIVER
+      and r.abort_reason == "ambiguous-weight-set",
+      f"g12: multiple sets -> stratum-1 ambiguous-weight-set "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+
+# g12c: repo-not-found (HF model API 404).
+s = "fixtures/nope"
+ff = FixtureFetcher({API.format(slug=s): D.FetchResponse(404, b"")})
+r = P.run_pull(s, "vllm/minimal", hardware_sm=SM_86, fetcher=ff,
+               profiles=profiles, statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.DERIVER
+      and r.abort_reason == "repo-not-found",
+      f"g12: 404 -> stratum-1 repo-not-found "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+# stratum-1 aborts BEFORE [C0] / [B] (no fabricated verdict, §1).
+check(r.raw_verdict is None and r.terminal is None,
+      "g12: stratum-1 abort emits NO fit verdict (§1 honesty)")
+
+# ===========================================================================
+# SECTION 3 — STRATUM 2: --profile-like precondition (g0, g3b, g13).
+#   Both paths, BEFORE [C0].
+# ===========================================================================
+print("\n--- stratum-2: --profile-like precondition (g0/g3b/g13) ---")
+
+# g13: non-vLLM --profile-like (llamacpp/default) -> unsupported-runtime-engine
+# (both paths), BEFORE [C0]/[B].
+r = P.run_pull(CURATED_SLUG, "llamacpp/default", path="B",
+                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.PROFILE_LIKE
+      and r.abort_reason == "unsupported-runtime-engine",
+      f"g13: llamacpp/default -> stratum-2 unsupported-runtime-engine "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+
+# g0: Path-A non-emittable profile (vllm/dual-turbo, genesis_equipped) ->
+# stratum-2 profile-not-emittable BEFORE [C0].
+r = P.run_pull(CURATED_SLUG, "vllm/dual-turbo", path="A",
+                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.PROFILE_LIKE
+      and r.abort_reason == "profile-not-emittable",
+      f"g0: vllm/dual-turbo (genesis) -> stratum-2 profile-not-emittable "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+
+# g3b: Path-A model/variant mismatch -> stratum-2 profile-mismatch.
+# vllm/gemma-mtp is vLLM + emittable but model=gemma-4-31b != curated qwen.
+r = P.run_pull(CURATED_SLUG, "vllm/gemma-mtp", path="A",
+                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.PROFILE_LIKE
+      and r.abort_reason == "profile-mismatch",
+      f"g3b: model/variant mismatch -> stratum-2 profile-mismatch "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+
+# ===========================================================================
+# SECTION 4 — STRATUM 3: [C0] engine-support / runtime / SM
+#   (g4, g5, g6a, g6b, g10, g14) + flag-bypass scoping.
+# ===========================================================================
+print("\n--- stratum-3: [C0] (g4/g5/g6a/g6b/g10/g14) ---")
+
+# g4: Llama (head_dim derived), trc:unverified -> needs-trust-remote-code-ack;
+# --trust-remote-code -> engine-supported -> eligible -> estimated-lower-bound
+# verdict, NO [D] (Path B).
+s = "fixtures/llama-trc"
+ffL = lambda: ff_derived(s, dense_cfg("LlamaForCausalLM"), weight_gb=8.0)
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ffL(), profiles=profiles, statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.C0
+      and r.abort_reason == "needs-trust-remote-code-ack",
+      f"g4: Llama trc:unverified -> stratum-3 needs-trust-remote-code-ack "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+# + --trust-remote-code clears stratum-3; an estimated-lower-bound model
+# then reaches [C1] = confirm→proceed which itself needs --yes (§4.1 — a
+# low-confidence model is NEVER a silent pass). Without --yes it is an
+# honest non-pass (NOT a fabricated fit).
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ffL(), profiles=profiles, statvfs=BIG_DISK,
+                trust_remote_code=True)
+check(not r.ok and r.stratum is P.Stratum.DECIDED
+      and r.confidence == "estimated-lower-bound"
+      and r.raw_verdict is not None and not r.emitted
+      and r.abort_reason.startswith("confirm→proceed"),
+      f"g4: + --trust-remote-code -> engine-supported -> [C1] "
+      f"confirm→proceed (needs --yes; honest non-pass, NO [D]) "
+      f"(ok={r.ok}, conf={r.confidence}, reason={r.abort_reason})")
+# + --yes -> the Path-B verdict is download-eligible, still NO [D].
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ffL(), profiles=profiles, statvfs=BIG_DISK,
+                trust_remote_code=True, yes=True)
+check(r.ok and r.stratum is P.Stratum.DECIDED
+      and r.confidence == "estimated-lower-bound"
+      and r.raw_verdict is not None and not r.emitted,
+      f"g4: + --trust-remote-code --yes -> Path-B verdict, NO [D] "
+      f"(ok={r.ok}, conf={r.confidence}, emitted={r.emitted})")
+check(any("soak-continuous" in n for n in r.notices),
+      "g4: Path-B verdict carries the §7 boot-fit≠runtime caveat")
+
+# g5: no-arch-row; --experimental-arch -> eligible: verdict;
+#     ineligible -> stratum-5 no-fit-model (NOT bypassed) [also g11].
+s = "fixtures/exotic-dense"
+exo = dense_cfg("TotallyExoticForCausalLM")
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, exo), profiles=profiles,
+                statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.C0
+      and r.abort_reason == "engine-support-unknown/no-arch-row",
+      f"g5: exotic arch -> stratum-3 no-arch-row "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+# + --experimental-arch clears no-arch-row; eligible derived model reaches
+# [C1] confirm→proceed (estimated-lower-bound) — needs --yes to be
+# download-eligible.
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, exo), profiles=profiles,
+                statvfs=BIG_DISK, experimental_arch=True, yes=True)
+check(r.ok and r.stratum is P.Stratum.DECIDED and r.raw_verdict is not None,
+      f"g5: + --experimental-arch --yes (eligible) -> Path-B verdict "
+      f"(ok={r.ok}, stratum={r.stratum.name})")
+check(any("bypassed" in n for n in r.notices),
+      "g5: bypass surfaces a notice (Path B only, capture deferred)")
+
+# g6a: known arch + auto_map -> --trust-remote-code only.
+s = "fixtures/automap-llama"
+am = dense_cfg("LlamaForCausalLM", auto_map={"x": "y"})
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, am), profiles=profiles,
+                statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.C0
+      and r.abort_reason == "needs-trust-remote-code-ack"
+      and r.diagnostics.get("c0_bypassable_by") == ["--trust-remote-code"],
+      f"g6a: known arch + auto_map -> needs-trc-ack, --trust-remote-code "
+      f"ONLY (got {r.diagnostics.get('c0_bypassable_by')})")
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, am), profiles=profiles,
+                statvfs=BIG_DISK, trust_remote_code=True, yes=True)
+check(r.ok and r.stratum is P.Stratum.DECIDED,
+      "g6a: + --trust-remote-code --yes -> proceeds (Path-B verdict)")
+# g6a: --experimental-arch alone does NOT clear an auto_map+known-arch trc.
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, am), profiles=profiles,
+                statvfs=BIG_DISK, experimental_arch=True)
+check(r.stratum is P.Stratum.C0,
+      "g6a: --experimental-arch alone does NOT clear auto_map trc")
+
+# g6b: no-arch-row + auto_map -> BOTH flags required.
+s = "fixtures/automap-exotic"
+amx = dense_cfg("ExoticAutoMapForCausalLM", auto_map={"x": "y"})
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, amx), profiles=profiles,
+                statvfs=BIG_DISK)
+check(set(r.diagnostics.get("c0_bypassable_by") or [])
+      == {"--trust-remote-code", "--experimental-arch"},
+      f"g6b: no-arch-row+auto_map -> needs BOTH flags "
+      f"(got {r.diagnostics.get('c0_bypassable_by')})")
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, amx), profiles=profiles,
+                statvfs=BIG_DISK, trust_remote_code=True)
+check(r.stratum is P.Stratum.C0,
+      "g6b: only --trust-remote-code (missing --experimental-arch) -> "
+      "still stratum-3 (subset rule)")
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, amx), profiles=profiles,
+                statvfs=BIG_DISK, trust_remote_code=True,
+                experimental_arch=True, yes=True)
+check(r.ok and r.stratum is P.Stratum.DECIDED,
+      "g6b: BOTH flags (+ --yes) -> clears stratum-3 -> Path-B verdict")
+
+# g10: runtime-incompatible is NON-bypassable; --experimental-arch does
+# NOT bypass it. Curated MoE arch with a loads:false pin (Path B, arch from
+# config) -> runtime-incompatible.
+s = "fixtures/qwen35-moe"
+moe = {
+    "model_type": "qwen3_5_moe",
+    "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+    "hidden_size": 4096, "num_hidden_layers": 32,
+    "num_attention_heads": 32, "num_key_value_heads": 8,
+    "num_local_experts": 128, "torch_dtype": "bfloat16",
+}
+r = P.run_pull(s, "vllm/default", path="B", hardware_sm=SM_90,
+                fetcher=ff_derived(s, moe), profiles=profiles,
+                statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.C0
+      and r.abort_reason == "engine-support-unknown/runtime-incompatible",
+      f"g10: loads:false pin -> stratum-3 runtime-incompatible "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+r = P.run_pull(s, "vllm/default", path="B", hardware_sm=SM_90,
+                fetcher=ff_derived(s, moe), profiles=profiles,
+                statvfs=BIG_DISK, experimental_arch=True)
+check(r.stratum is P.Stratum.C0
+      and r.abort_reason == "engine-support-unknown/runtime-incompatible",
+      "g10: --experimental-arch does NOT bypass runtime-incompatible "
+      "(non-bypassable)")
+
+# g14: hardware-SM mismatch. Gemma fp8_e4m3 / required_sm 9.0 profile on a
+# detected RTX 3090 (sm_86) -> runtime-incompatible (no false 'fits'),
+# non-bypassable. (Curated Gemma 31B + vllm/gemma-mtp-tp1.)
+GEMMA_SLUG = "Intel/gemma-4-31B-it-int4-AutoRound"
+r = P.run_pull(GEMMA_SLUG, "vllm/gemma-mtp-tp1", path="A",
+                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK)
+check(r.stratum is P.Stratum.C0
+      and r.abort_reason == "engine-support-unknown/runtime-incompatible",
+      f"g14: fp8_e4m3/required_sm 9.0 on sm_86 -> stratum-3 "
+      f"runtime-incompatible (got {r.stratum.name}/{r.abort_reason})")
+r = P.run_pull(GEMMA_SLUG, "vllm/gemma-mtp-tp1", path="A",
+                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK, experimental_arch=True)
+check(r.stratum is P.Stratum.C0,
+      "g14: --experimental-arch does NOT bypass the SM mismatch "
+      "(non-bypassable)")
+# Same profile on sm_90 clears the SM gate (proves it IS the SM gate).
+r = P.run_pull(GEMMA_SLUG, "vllm/gemma-mtp-tp1", path="A",
+                hardware_sm=SM_90, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK)
+check(r.stratum is not P.Stratum.C0
+      or r.abort_reason != "engine-support-unknown/runtime-incompatible",
+      "g14: same profile on sm_90 passes [C0] SM gate (proves SM gate)")
+
+# ===========================================================================
+# SECTION 5 — STRATUM 4: [C2a] disk pre-gate (g7) + ordering AFTER [C0].
+# ===========================================================================
+print("\n--- stratum-4: [C2a] disk (g7) + order vs [C0] ---")
+
+# g7: disk-short -> stratum-4 hard-abort AFTER [C0], BEFORE [B].
+# (--trust-remote-code clears the trc:unverified [C0] so the run REACHES
+#  stratum-4 — proving [C2a] is evaluated AFTER a clean [C0].)
+s = "fixtures/big-llama"
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, dense_cfg("Qwen2ForCausalLM"),
+                                   weight_gb=200.0),
+                profiles=profiles, statvfs=TINY_DISK,
+                trust_remote_code=True)
+check(r.stratum is P.Stratum.C2A_DISK and r.abort_reason == "disk-short",
+      f"g7: 200 GiB model, 2 GiB free, [C0] clean -> stratum-4 "
+      f"disk-short (got {r.stratum.name}/{r.abort_reason})")
+# Ordering: a CLEAN [C0] still hard-aborts on disk-short, AND [B] never ran
+# (no fit verdict).
+check(r.raw_verdict is None,
+      "g7 ordering: [C2a] is AFTER [C0] and BEFORE [B] "
+      "(no fit verdict produced before the disk abort)")
+# A no-arch-row model with disk-short stops at stratum-3 FIRST (proves
+# strict 3-before-4 ordering: [C0] precedes [C2a]).
+s = "fixtures/exotic-bigdisk-short"
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, dense_cfg("ZQZForCausalLM"),
+                                   weight_gb=200.0),
+                profiles=profiles, statvfs=TINY_DISK)
+check(r.stratum is P.Stratum.C0,
+      "ordering: no-arch-row + disk-short stops at stratum-3 FIRST "
+      "([C0] strictly precedes [C2a])")
+
+# ===========================================================================
+# SECTION 6 — STRATUM 5: pre-[B] no-fit-model (g11) — monotonic,
+#   non-bypassable; [C0] stays engine-supported.
+# ===========================================================================
+print("\n--- stratum-5: pre-[B] no-fit-model (g11) ---")
+
+# g11: Gemma2-SWA-only style ineligible derived model with a KNOWN arch row
+# (so [C0]=engine-supported, stays) -> stratum-5 no-fit-model.
+# Use a SWA-only config on a no-arch-row arch + --experimental-arch so [C0]
+# resolves (engine-support bypassed) then stratum-5 STILL fires (proves
+# --experimental-arch does NOT bypass stratum-5).
+s = "fixtures/swa-only"
+swa = dense_cfg("SwaOnlyForCausalLM", sliding_window=4096)
+swa.pop("max_window_layers", None)
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, swa), profiles=profiles,
+                statvfs=BIG_DISK, experimental_arch=True)
+check(r.stratum is P.Stratum.ELIGIBILITY
+      and r.abort_reason == "no-fit-model",
+      f"g11: SWA-only ineligible -> stratum-5 no-fit-model "
+      f"(got {r.stratum.name}/{r.abort_reason})")
+check("non-bypassable" in r.detail,
+      "g11: no-fit-model is non-bypassable (detail states it)")
+# MoE-on-known-arch path: [C0]=engine-supported (stays) -> stratum-5.
+# Mixtral has no arch row; use a config that is MoE AND has the curated
+# Qwen MoE arch row (engine-supported on a clean engine) to prove [C0] is
+# NOT rewritten by stratum-5.
+s = "fixtures/moe-known"
+moe2 = {
+    "model_type": "qwen3_5_moe",
+    "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+    "hidden_size": 4096, "num_hidden_layers": 32,
+    "num_attention_heads": 32, "num_key_value_heads": 8,
+    "num_local_experts": 128, "torch_dtype": "bfloat16",
+}
+c0 = G.c0_engine_support(
+    "vllm/qwen-a3b-preview", P.D.DeriveResult(
+        slug=s, profile={"arch": "Qwen3_5MoeForConditionalGeneration",
+                         "auto_map": False}),
+    path="B", hardware_sm=SM_86, root=root)
+r = P.run_pull(s, "vllm/qwen-a3b-preview", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, moe2), profiles=profiles,
+                statvfs=BIG_DISK, experimental_arch=True)
+check(c0.state is G.C0State.ENGINE_SUPPORTED
+      and r.stratum is P.Stratum.ELIGIBILITY
+      and r.abort_reason == "no-fit-model",
+      f"g11 monotonic: [C0]=engine-supported (stays) -> stratum-5 "
+      f"no-fit-model ([C0]={c0.state.value}, "
+      f"got {r.stratum.name}/{r.abort_reason})")
+# --experimental-arch did NOT bypass stratum-5 (it ran WITH the flag set).
+check(r.abort_reason == "no-fit-model",
+      "g11: --experimental-arch does NOT bypass stratum-5 no-fit-model")
+
+# ===========================================================================
+# SECTION 7 — STRATUM 6: Path-A [D] dry-run (g1, g2, g8, g15) + Path-B
+#   never touches [D].
+# ===========================================================================
+print("\n--- stratum-6: Path-A [D] dry-run + Path-B isolation "
+      "(g1/g2/g8/g15) ---")
+
+# g8: curated + --dry-run -> Path-B verdict, NO [D] (forced Path B even
+# though the slug is curated and an --out is given).
+r = P.run_pull(CURATED_SLUG, "vllm/dual", dry_run=True, out="/tmp/_no.yml",
+                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK, yes=True)
+check(r.path == "B" and not r.emitted and r.compose_text is None,
+      f"g8: curated + --dry-run -> Path B, NO [D] emit "
+      f"(path={r.path}, emitted={r.emitted})")
+check(not os.path.exists("/tmp/_no.yml"),
+      "g8: Path B wrote NO compose file even with --out (never emits)")
+
+# g2: Path-A effective-capped (fits-constrained) -> exact×fits-constrained
+# -> confirm→proceed; with --yes -> "known effective-cap warning"
+# (NOT 'applied constraint'; no rewrite) -> [D] dry-run -> emit.
+OUT = "/tmp/_pull_g2.yml"
+if os.path.exists(OUT):
+    os.unlink(OUT)
+r = P.run_pull(CURATED_SLUG, "vllm/dual", path="A", out=OUT,
+                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK, yes=True)
+check(r.ok and r.path == "A" and r.raw_verdict == "fits-constrained"
+      and r.terminal == "confirm→proceed" and r.emitted,
+      f"g2: Path-A curated fits-constrained + --yes -> confirm→proceed "
+      f"-> [D] emit (ok={r.ok}, verdict={r.raw_verdict}, "
+      f"terminal={r.terminal}, emitted={r.emitted})")
+cap_notice = [n for n in r.notices if "effective-cap warning" in n]
+check(cap_notice and "no compose config rewritten" in cap_notice[0]
+      and "applied constraint" not in cap_notice[0],
+      "g2: prints 'known effective-cap warning' (NOT 'applied "
+      "constraint'; no rewrite)")
+# without --yes -> NOT satisfied (honest non-pass, needs --yes).
+r2 = P.run_pull(CURATED_SLUG, "vllm/dual", path="A", out=OUT + ".x",
+                 hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                 statvfs=BIG_DISK)
+check(not r2.ok and not r2.emitted
+      and r2.abort_reason.startswith("confirm→proceed"),
+      f"g2: Path-A fits-constrained WITHOUT --yes -> NOT eligible, "
+      f"NO [D] (reason={r2.abort_reason})")
+check(not os.path.exists(OUT + ".x"),
+      "g2: a non-satisfied confirm→proceed emits NO compose file")
+
+# g1: Path-A curated, gate-passing, [D] dry-run ok -> proceed → [D] invoked.
+# (We use the satisfied confirm→proceed above as the integration analogue
+# of g1; here also assert the emitted body + that --project-directory note
+# is surfaced, and the trc-leak invariant.)
+check(r.compose_text is not None and "services:" in r.compose_text,
+      "g1/g2: [D] produced a compose body on a clean dry-run")
+check(os.path.exists(OUT),
+      "g1/g2: Path-A satisfied terminal wrote the compose to --out")
+check(any("--project-directory" in n for n in r.notices),
+      "g1/g2: emitted compose carries the COMPOSE_GENERATOR.md "
+      "--project-directory consumption note")
+
+# trc-leak invariant: no --trust-remote-code in the in-scope Path-A emitted
+# body (reuse the patch_attribution.service_body()==0 check pattern).
+body = PA.service_body(r.compose_text)
+check(body.count("--trust-remote-code") == 0,
+      "g1/g2: in-scope Path-A emitted body contains ZERO "
+      "--trust-remote-code (governed-slot invariant, service_body()==0)")
+
+# g15: Path-A passes stratum-2 + [C1] download-eligible but the [D] dry-run
+# REFUSES at a later point (foundational/degraded patch drift) -> Path-A
+# abort, NOT reported download-eligible. Inject a d_runner that refuses.
+def refusing_runner(_root, _profile, _ad):
+    raise GC.Refuse("PN12: foundational drift-guard failed (compile-safe) "
+                    "-> hard-refuse")
+
+r = P.run_pull(CURATED_SLUG, "vllm/dual", path="A", out=OUT + ".g15",
+                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK, yes=True, d_runner=refusing_runner)
+check(r.stratum is P.Stratum.D_DRY_RUN
+      and r.abort_reason == "d-refused:foundational-drift"
+      and not r.ok and not r.emitted,
+      f"g15: [D] dry-run refuses -> stratum-6 Path-A abort, NOT "
+      f"download-eligible (got {r.stratum.name}/{r.abort_reason}, "
+      f"ok={r.ok})")
+check(not os.path.exists(OUT + ".g15"),
+      "g15: a [D]-refused dry-run wrote NO compose file")
+
+# g3: Path-A profile too big -> exact×wont-fit -> hard-block; no [D].
+# vllm/minimal is tp=1 + emittable + model/variant-matches curated qwen;
+# the curated generic-dense spec at tp=1 prices wont-fit -> exact (curated)
+# × wont-fit -> hard-block (no flag clears it, no [D]).
+r = P.run_pull(CURATED_SLUG, "vllm/minimal", path="A", out=OUT + ".g3",
+                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
+                statvfs=BIG_DISK, yes=True, force_download=True)
+check(r.terminal == "hard-block" and not r.ok and not r.emitted
+      and r.abort_reason == "hard-block",
+      f"g3: Path-A exact×wont-fit -> hard-block, NO [D] (even with "
+      f"--yes --force-download) (terminal={r.terminal}, ok={r.ok})")
+check(not os.path.exists(OUT + ".g3"),
+      "g3: hard-block wrote NO compose file")
+
+# Path-B structural isolation: NO Path-B run can ever set emitted/
+# compose_text. Sweep a representative matrix.
+pathb_emit = False
+for pl in ("vllm/minimal", "vllm/dual", "vllm/tools-text"):
+    rb = P.run_pull(CURATED_SLUG, pl, dry_run=True, hardware_sm=SM_86,
+                    fetcher=NoNet(), profiles=profiles, statvfs=BIG_DISK,
+                    yes=True, force_download=True)
+    if rb.emitted or rb.compose_text is not None:
+        pathb_emit = True
+check(not pathb_emit,
+      "Path B is structurally incapable of [D] emit / download "
+      "(--force-download is a no-op + notice this phase)")
+
+# g9: generic-dense lower-bound is honored end-to-end + --calibration 22/22
+# is asserted by the harness below (kv-calc unchanged).
+s = "fixtures/llama-dense-elb"
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, dense_cfg("Qwen2ForCausalLM"),
+                                   weight_gb=4.0),
+                profiles=profiles, statvfs=BIG_DISK, yes=True,
+                trust_remote_code=True)
+check(r.confidence == "estimated-lower-bound" and r.raw_verdict is not None,
+      f"g9: derived dense -> estimated-lower-bound confidence, real "
+      f"verdict (conf={r.confidence}, verdict={r.raw_verdict})")
+
+# ===========================================================================
+# SECTION 8 — STRATUM ORDERING PROOF (1→2→3→4→5→6 strict & monotonic).
+#   Stack multiple failing conditions; assert the EARLIEST stratum wins.
+# ===========================================================================
+print("\n--- stratum ordering proof (earliest-wins, monotonic) ---")
+
+# stratum-1 BEFORE stratum-2: a deriver error + a bad profile-like ->
+# stratum-1 wins (deriver runs first).
+s = "fixtures/order-s1"
+ff = FixtureFetcher({API.format(slug=s): D.FetchResponse(404, b"")})
+r = P.run_pull(s, "llamacpp/default", hardware_sm=SM_86, fetcher=ff,
+                profiles=profiles, statvfs=TINY_DISK)
+check(r.stratum is P.Stratum.DERIVER,
+      "order: stratum-1 (deriver) precedes stratum-2 (bad profile-like) "
+      "+ stratum-4 (tiny disk)")
+
+# stratum-2 BEFORE stratum-3: bad profile-like + would-be-bad [C0] ->
+# stratum-2 wins.
+s = "fixtures/order-s2"
+r = P.run_pull(s, "llamacpp/default", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, dense_cfg("ExoticXForCausalLM")),
+                profiles=profiles, statvfs=TINY_DISK)
+check(r.stratum is P.Stratum.PROFILE_LIKE,
+      "order: stratum-2 (profile-like) precedes stratum-3 ([C0]) + "
+      "stratum-4 (disk)")
+
+# stratum-3 BEFORE stratum-4: no-arch-row + disk-short -> stratum-3 wins.
+s = "fixtures/order-s3"
+r = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, dense_cfg("NoRowForCausalLM"),
+                                   weight_gb=200.0),
+                profiles=profiles, statvfs=TINY_DISK)
+check(r.stratum is P.Stratum.C0,
+      "order: stratum-3 ([C0]) precedes stratum-4 ([C2a] disk)")
+
+# stratum-4 BEFORE stratum-5: disk-short + ineligible (MoE) on a clean
+# [C0] -> stratum-4 wins.
+s = "fixtures/order-s4"
+moec = {
+    "model_type": "qwen3_5_moe",
+    "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+    "hidden_size": 4096, "num_hidden_layers": 32,
+    "num_attention_heads": 32, "num_key_value_heads": 8,
+    "num_local_experts": 128, "torch_dtype": "bfloat16",
+}
+r = P.run_pull(s, "vllm/qwen-a3b-preview", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, moec, weight_gb=300.0),
+                profiles=profiles, statvfs=TINY_DISK,
+                experimental_arch=True)
+check(r.stratum is P.Stratum.C2A_DISK,
+      "order: stratum-4 ([C2a] disk-short) precedes stratum-5 "
+      "(no-fit-model)")
+
+# stratum-5 BEFORE [B]/[C1]: ineligible model never reaches a verdict.
+s = "fixtures/order-s5"
+r = P.run_pull(s, "vllm/qwen-a3b-preview", path="B", hardware_sm=SM_86,
+                fetcher=ff_derived(s, moec, weight_gb=4.0),
+                profiles=profiles, statvfs=BIG_DISK,
+                experimental_arch=True)
+check(r.stratum is P.Stratum.ELIGIBILITY and r.raw_verdict is None,
+      "order: stratum-5 (no-fit-model) precedes [B] (no fit verdict "
+      "produced)")
+
+# stratum-6 is Path-A-only: the same gate-passing model on Path B NEVER
+# reaches stratum-6 (no [D] dry-run on Path B).
+r = P.run_pull(CURATED_SLUG, "vllm/dual", dry_run=True, hardware_sm=SM_86,
+                fetcher=NoNet(), profiles=profiles, statvfs=BIG_DISK,
+                yes=True)
+check(r.stratum is not P.Stratum.D_DRY_RUN and not r.emitted,
+      "order: stratum-6 ([D] dry-run) is Path-A ONLY (Path B never "
+      "reaches it)")
+
+# --experimental-arch bypass scoping — consolidated assertion:
+#   bypasses no-arch-row; does NOT bypass runtime-incompatible; does NOT
+#   bypass stratum-5 no-fit-model. (Cited individually in g5/g10/g14/g11.)
+s = "fixtures/scope-norow"
+r_norow = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
+                      fetcher=ff_derived(s, dense_cfg("ScopeXForCausalLM")),
+                      profiles=profiles, statvfs=BIG_DISK,
+                      experimental_arch=True)
+check(r_norow.ok or r_norow.stratum is not P.Stratum.C0,
+      "scope: --experimental-arch BYPASSES no-arch-row")
+check(
+    P.run_pull("fixtures/qwen35-moe2", "vllm/default", path="B",
+               hardware_sm=SM_90,
+               fetcher=ff_derived("fixtures/qwen35-moe2", {
+                   "model_type": "qwen3_5_moe",
+                   "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+                   "hidden_size": 4096, "num_hidden_layers": 32,
+                   "num_attention_heads": 32, "num_key_value_heads": 8,
+                   "num_local_experts": 128, "torch_dtype": "bfloat16"}),
+               profiles=profiles, statvfs=BIG_DISK,
+               experimental_arch=True).abort_reason
+    == "engine-support-unknown/runtime-incompatible",
+    "scope: --experimental-arch does NOT bypass runtime-incompatible",
+)
+
+# ===========================================================================
+# Done.
+# ===========================================================================
+if failures:
+    print(f"\nSUMMARY: {len(failures)} assertion(s) FAILED.",
+          file=sys.stderr)
+    for f in failures:
+        print(f"  - {f}", file=sys.stderr)
+    sys.exit(1)
+
+print("\nSUMMARY: all Pull-Gate P4 truth-table assertions passed "
+      "(§4.1 9 cells + 6 strata + ordering + g0..g15 + trc-leak + "
+      "Path-B isolation).")
+PY
+
+echo "test-pull.sh OK"

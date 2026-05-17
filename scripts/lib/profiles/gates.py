@@ -499,25 +499,37 @@ def c2a_disk(
     `disk-short` → non-negotiable hard-abort (NO bypass tag — there is no
     flag that can clear it; per design §5.2 / §4.1).
 
-    The footprint is the P2-selected total (`profile.footprint_gb`), which
-    the deriver already computes as Σ(selected weight blobs + required
-    config/tokenizer siblings). ×1.2 safety margin (design §5.2).
-    `resolve_hf_home()` is reused from P2's deriver (the documented
-    `--hf-home > $HF_HOME > $XDG_CACHE_HOME/huggingface > ~` chain).
+    The footprint is the v0.8.0 [E] CONTRACT-3 SHARED `download_set()` total:
+    `[C2a]` sizes EXACTLY the union E2 fetches + E3 smokes — one function,
+    no parallel lists that can drift. When the derived profile carries the
+    raw HF siblings API (`profile["_hf_api"]`, the deriver's additive E2
+    surface) this gate sizes `deriver.sized_download_gb(api)` directly (which
+    internally calls the shared `download_set(api)`). Tier-1 curated hits
+    carry no API (the curated footprint is the variant `size_gb`) — fall
+    back to the precomputed footprint / variant size there. ×1.2 safety
+    margin (design §5.2). `resolve_hf_home()` is reused from P2's deriver
+    (the documented `--hf-home > $HF_HOME > $XDG_CACHE_HOME/huggingface > ~`
+    chain).
     """
     from . import deriver as D
 
     profile = getattr(derive_result, "profile", None) or {}
-    # Σ(selected weight blobs + required config/tokenizer siblings) — P2's
-    # footprint_gb already sums exactly this set. Fall back to the curated
-    # variant size for a tier-1 hit (no derived footprint there).
-    footprint = profile.get("footprint_gb")
-    if footprint is None:
-        footprint = (
-            profile.get("weights_variant_size_gb")
-            or profile.get("weights_total_gb")
-            or 0.0
-        )
+    # v0.8.0 [E] CONTRACT-3: size the SHARED download_set() — the exact set
+    # E2 fetches. `sized_download_gb` calls `download_set(api)` internally,
+    # so [C2a] / E2 / E3 are provably the same set.
+    hf_api = profile.get("_hf_api")
+    if hf_api is not None:
+        footprint = D.sized_download_gb(hf_api)
+    else:
+        # tier-1 curated hit (no derived API) or a fixture without the API:
+        # fall back to the precomputed footprint / variant size.
+        footprint = profile.get("footprint_gb")
+        if footprint is None:
+            footprint = (
+                profile.get("weights_variant_size_gb")
+                or profile.get("weights_total_gb")
+                or 0.0
+            )
     required_gb = round(float(footprint) * 1.2, 4)
 
     target = D.resolve_hf_home(hf_home)

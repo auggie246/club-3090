@@ -208,6 +208,21 @@ def resolve_hf_home(hf_home: Optional[str] = None) -> Path:
     return Path.home() / ".cache" / "huggingface"
 
 
+# v0.8.0 [E] E2 (additive): the canonical fetcher E1's deferred dtype
+# header-probe step (2) uses. E1's `_resolve_compute_dtype()` calls the
+# deriver's existing `probe_safetensors_dtype()` ONLY when a usable fetcher
+# is present at `einput.diagnostics["fetcher"]`. E2 standardizes the SOURCE
+# of that fetcher here (a real range-bounded `HttpFetcher`) so E4 can wire
+# `diagnostics["fetcher"]` deterministically and tests can inject a fixture.
+# This does NOT change E1's resolution ORDER/semantics — it only makes the
+# probe path live by supplying the fetcher E1 already looks for.
+def default_probe_fetcher() -> "HttpFetcher":
+    """The canonical real bounded-header-probe fetcher (range-GET only;
+    never downloads a full weight). Tests inject a recorded fixture
+    instead."""
+    return HttpFetcher()
+
+
 # ---------------------------------------------------------------------------
 # Tier-1 curated lookup
 # ---------------------------------------------------------------------------
@@ -402,6 +417,97 @@ def _selected_weight_gb(api: dict, selected: list[str]) -> float:
         if size is not None:
             by_name[s["rfilename"]] = int(size)
     total = sum(by_name.get(n, 0) for n in selected)
+    return round(total / (1024 ** 3), 4)
+
+
+# ---------------------------------------------------------------------------
+# v0.8.0 [E] CONTRACT-3 — the SINGLE shared download allowlist.
+#
+# `select_weight_files()` returns only `*.safetensors`; vLLM also needs the
+# config/tokenizer/template assets. CONTRACT-3 reconciles v2's `*.jinja`
+# addition with the legacy `[C2a]` footprint's `vocab.json`/`merges.txt` into
+# ONE union, used identically by `[C2a]` sizing (gates.c2a_disk), E2 download
+# (downloader.download_model -> snapshot_download allow_patterns), and E3
+# smoke. There is exactly ONE function — no parallel lists that can drift.
+# ---------------------------------------------------------------------------
+# Exact non-glob metadata basenames (the brief's REQUIRED_METADATA, minus the
+# `*.jinja` glob which is matched separately). "those that exist in siblings".
+REQUIRED_METADATA = (
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "tokenizer.model",
+    "special_tokens_map.json",
+    "vocab.json",
+    "merges.txt",
+)
+
+
+def download_set(api: dict) -> list[str]:
+    """CONTRACT-3 reconciled union — the ONE allowlist:
+
+        select_weight_files(api)                  # *.safetensors (no adapters)
+      + the *.safetensors.index.json if present
+      + REQUIRED_METADATA siblings that exist     # config/tokenizer/...
+      + every top-level *.jinja sibling           # chat templates
+
+    Deterministic ordering: weights (as `select_weight_files` returns them),
+    then the index, then metadata in REQUIRED_METADATA order, then sorted
+    `*.jinja`. Only siblings that ACTUALLY EXIST are included ("those that
+    exist in siblings"). On an unselectable weight set this returns `[]`
+    (the caller already surfaced the structured `select_weight_files` error;
+    `download_set` never raises — it is a pure projection of `api`).
+
+    This is the literal list E2 passes as `snapshot_download(...,
+    allow_patterns=...)` and the exact set `[C2a]` sizes — a test asserts
+    fetched-set == sized-set.
+    """
+    selected, err = select_weight_files(api or {})
+    if err is not None or not selected:
+        return []
+    names = {s["rfilename"] for s in _siblings(api or {})}
+    out: list[str] = list(selected)
+    # the *.safetensors.index.json (top-level) if present
+    for n in sorted(names):
+        if n.endswith(".safetensors.index.json") and "/" not in n:
+            out.append(n)
+    # REQUIRED_METADATA — exact basenames that exist (top-level)
+    for meta in REQUIRED_METADATA:
+        if meta in names:
+            out.append(meta)
+    # every top-level *.jinja (chat templates)
+    for n in sorted(names):
+        if n.endswith(".jinja") and "/" not in n and n not in out:
+            out.append(n)
+    # de-dup while preserving first-seen order (a weight is never metadata,
+    # but be defensive against an index/metadata name collision).
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for n in out:
+        if n not in seen:
+            seen.add(n)
+            deduped.append(n)
+    return deduped
+
+
+def sized_download_gb(api: dict) -> float:
+    """Σ size of EXACTLY `download_set(api)` (LFS-resolved), GiB.
+
+    This is the CONTRACT-3 footprint: `[C2a]` sizes precisely the set E2
+    fetches, so `[C2a]`/E2/E3 cannot drift. Replaces the legacy
+    `_sum_blob_gb` heuristic (which approximated the same union but with a
+    hand-listed metadata set that omitted `*.jinja`); behaviour-equivalent
+    to within KB on any real model (metadata is negligible vs multi-GB
+    weights) and now provably == the fetched set."""
+    by_name = {}
+    for s in _siblings(api or {}):
+        size = s.get("size")
+        if size is None and isinstance(s.get("lfs"), dict):
+            size = s["lfs"].get("size")
+        if size is not None:
+            by_name[s["rfilename"]] = int(size)
+    total = sum(by_name.get(n, 0) for n in download_set(api or {}))
     return round(total / (1024 ** 3), 4)
 
 
@@ -693,7 +799,10 @@ def derive(
         return res
 
     weight_gb = _selected_weight_gb(api or {}, selected or [])
-    footprint_gb = _sum_blob_gb(api or {}, selected or [])
+    # v0.8.0 [E] CONTRACT-3: footprint sizes EXACTLY the shared download_set
+    # (the same union E2 fetches + [C2a] gates on) — single source, no drift.
+    # (`_sum_blob_gb` kept above as append-only history; superseded here.)
+    footprint_gb = sized_download_gb(api or {})
 
     # --- §4 generic-dense eligibility (reuse P1's predicate) ---------------
     kv = _load_kv_calc()
@@ -725,6 +834,13 @@ def derive(
         "weights_total_gb": weight_gb,
         "footprint_gb": footprint_gb,
         "selected_weight_files": selected,
+        # v0.8.0 [E] CONTRACT-3 (additive): the raw HF siblings API so
+        # gates.c2a_disk can size the SHARED download_set() directly (single
+        # function, [C2a]/E2/E3 cannot drift). Additive field ONLY — no
+        # existing field/behaviour changes; absent for a tier-1 curated hit
+        # (curated footprint comes from the variant size_gb, not the API).
+        "_hf_api": api or {},
+        "download_set": download_set(api or {}),
         "config_hidden_size": _int(config or {}, "hidden_size"),
         "config_num_hidden_layers": _int(config or {}, "num_hidden_layers"),
         "config_num_attention_heads": _int(config or {}, "num_attention_heads"),

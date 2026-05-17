@@ -37,6 +37,8 @@ What you'll see — exactly one of:
 | `hard-block` | `2` | Honest stop with a precise reason (unsupported engine/arch, won't-fit, disk, needs `--trust-remote-code`). Nothing downloaded. |
 | `override-accepted` | `0` | You explicitly accepted a non-pass path (e.g. `--force-download`); proceeds with the caveat recorded. |
 
+> **First-run heads-up:** many common models (anything `Qwen2ForCausalLM` — Qwen2.5 & a large family, plus other custom-code archs) hard-block at `[C0] needs-trust-remote-code-ack` on the *very first* try — **even with `--dry-run`**. That's the gate working, not a failure. After you've checked what code the repo would run, add **`--trust-remote-code`** to that same command to clear it. See [`--trust-remote-code` — a security decision](#--trust-remote-code--a-security-decision) below.
+
 It is **honest about confidence and never silently passes.** A "fits"
 verdict is a *boot-time* check — read [Boot-fit ≠ runtime-stability](#boot-fit--runtime-stability--read-this)
 before relying on it for sustained agent workloads. Full detail below.
@@ -116,8 +118,8 @@ scripts/pull.sh some-org/Some-Llama-7B --profile-like vllm/minimal --dry-run
 |---|---|
 | `0` | Download-eligible / clean verdict. |
 | `3` | Needs a flag — a `confirm→proceed` or advisory terminal that is not yet satisfied (re-run with the named flag). |
-| `2` | Honest hard-stop (a gate aborted, or `hard-block`). |
-| `64` | Usage error. |
+| `2` | Honest hard-stop (a gate aborted, or `hard-block`) — **and** argument/usage errors (missing/unknown flag): the CLI argument parser exits `2`. So a typo and an honest gate-block currently share `2`; check the printed message to tell them apart. |
+| `64` | Reserved for post-parse usage errors. (Note: argument-parser errors currently exit `2`, not `64` — distinguishing them is a tracked follow-up.) |
 
 ---
 

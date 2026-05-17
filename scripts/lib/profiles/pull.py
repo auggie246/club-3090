@@ -174,8 +174,8 @@ class PullResult:
 # ===========================================================================
 # [C1] — §4.1 3×3 confidence × raw-verdict → terminal TOTAL FUNCTION.
 #
-# Reproduced EXACTLY (as DATA, not branching prose) from
-# /opt/ai/docs/v0.8.x-design.md §4.1, the table block at lines 62-66:
+# Reproduced EXACTLY (as DATA, not branching prose) from the locked
+# v0.8.x design §4.1 (the confidence × raw-verdict table):
 #
 #   | Confidence            | fits-clean      | fits-constrained | wont-fit  |
 #   | exact                 | proceed(silent) | confirm→proceed  | hard-block|

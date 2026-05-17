@@ -1,7 +1,8 @@
 """v0.8.0 Loop `[F]` — STEP F1: the `FInput` capture-bundle reader.
 
-CONTRACT-1 (the LOCKED brief's F1 spec — `/opt/ai/docs/v0.8.0-loop-brief.md`
-"## CONTRACT 1"). `[E]` (`capture.py`) is the **producer**; this module is
+CONTRACT-1 (the locked v0.8.0 Loop design brief, "CONTRACT 1"; see
+docs/LOOP.md for the shipped contributor reference). `[E]`
+(`capture.py`) is the **producer**; this module is
 the **consumer**: it parses ONE on-disk capture directory into a validated
 `FInput` object that the later `[F]` STEPs (F2 classifier / F4 trust pipeline
 / F5 dedup) consume. F1 is a STRICT boundary validator — any schema/shape

@@ -1,8 +1,8 @@
 """v0.8.0 Loop `[F]` — STEP F5: the §6.3 canonical-tuple-hash dedup.
 
-CONTRACT-4 (the LOCKED brief — `/opt/ai/docs/v0.8.0-loop-brief.md`
-"## CONTRACT 4"; source-of-truth design `/opt/ai/docs/v0.8.x-design.md`
-§6.3, line 135 verbatim). F1 (`loop_input.py`) produced the validated
+CONTRACT-4 (the locked v0.8.0 Loop design brief, "CONTRACT 4";
+source-of-truth design §6.3 verbatim; see docs/LOOP.md for the
+shipped contributor reference). F1 (`loop_input.py`) produced the validated
 `FInput`; F2/F3 (`classifier.py`) produced the §6.1 `ClassificationResult`.
 This module CONSUMES both as a library and runs the §6.3 dedup-or-file
 submit path: canonical 7-tuple -> sha256[:12] hash label -> query the

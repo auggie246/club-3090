@@ -1,7 +1,7 @@
 # failure_fingerprints.yml — v0.8.0 [F] STEP F2 seed DB (CONTRACT-2 Tier-2).
 #
-# The §6.1 Tier-2 semantic-fingerprint DB. Design §6.1 (verbatim,
-# /opt/ai/docs/v0.8.x-design.md): ambiguous errors ->
+# The §6.1 Tier-2 semantic-fingerprint DB. Design §6.1 (verbatim):
+# ambiguous errors ->
 # `fingerprint = sha256(error_substring + arch_family + engine_version)` ->
 # YAML `(fingerprint -> class)` DB. Classes are the §6.1 enum VERBATIM, no
 # additions:

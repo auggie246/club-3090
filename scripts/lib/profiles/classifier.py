@@ -1,8 +1,8 @@
 """v0.8.0 Loop `[F]` — STEP F2+F3: the §6.1 two-tier failure classifier.
 
-CONTRACT-2 (the LOCKED brief — `/opt/ai/docs/v0.8.0-loop-brief.md`
-"## CONTRACT 2" + "## Appendix A"; source-of-truth design §6.1
-`/opt/ai/docs/v0.8.x-design.md`). F1 (`loop_input.py`) produced the
+CONTRACT-2 (the locked v0.8.0 Loop design brief, "CONTRACT 2" +
+"Appendix A"; source-of-truth design §6.1; see docs/LOOP.md for the
+shipped contributor reference). F1 (`loop_input.py`) produced the
 validated `FInput`; this module CONSUMES it and emits exactly one §6.1
 class or `unknown`.
 
@@ -375,7 +375,7 @@ def _match_condition(rule: dict, finput: FInput,
 # nightly (bf610c2f) raises a CLEAN `ValueError` from
 # `_check_enough_kv_cache_memory` — NOT `torch.cuda.OutOfMemoryError` —
 # whenever the requested max_model_len's KV cache exceeds the measured-
-# available KV memory (see `/opt/ai/f8-real-vllm-oom.log` line 74/97):
+# available KV memory (verbatim shape from a captured real vLLM KV-OOM):
 #
 #   ValueError: To serve at least one request with the models's max seq len
 #   (2000000), (22.89 GiB KV cache is needed, which is larger than the

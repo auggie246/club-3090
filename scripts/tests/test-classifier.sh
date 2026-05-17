@@ -450,9 +450,9 @@ check(r.route_as_kv_calc_bug is False
 # `_check_enough_kv_cache_memory` — NOT torch.cuda.OutOfMemoryError — so the
 # SHIPPED classic-torch-only Tier-1 OOM signature MISSED this real, common,
 # kv-calc-relevant failure (it fell through to Tier-2 -> `unknown`, Tier-1
-# never fired). These lines are copied VERBATIM from
-# /opt/ai/f8-real-vllm-oom.log (line 42 = gpu_worker available; lines
-# 74/97 = the ValueError). With the F8-fix the widened signature MUST fire
+# never fired). These lines are copied VERBATIM from a captured real
+# vLLM KV-OOM log (the gpu_worker-available line + the ValueError).
+# With the F8-fix the widened signature MUST fire
 # Tier-1 -> genuine-oom, and with the new pt3.actual parse + a
 # pt1.predicted_b_breakdown all three inputs are present -> route TRUE.
 F8_REAL_EXCERPT = (

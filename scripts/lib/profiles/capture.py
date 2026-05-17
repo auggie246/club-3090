@@ -418,8 +418,8 @@ _RE_GPU_WORKER_PEAK = re.compile(
 # the captured nightly (bf610c2f / v0.20.2rc1.dev371, the v0.21.0+ memory-
 # profiler regime) does NOT raise `torch.cuda.OutOfMemoryError` for this very
 # common kv-calc-relevant case. It raises a CLEAN `ValueError` from
-# `_check_enough_kv_cache_memory` with this VERBATIM shape (see
-# `/opt/ai/f8-real-vllm-oom.log` lines 42 + 74/97):
+# `_check_enough_kv_cache_memory` with this VERBATIM shape (captured
+# from a real vLLM KV-OOM):
 #
 #   ValueError: To serve at least one request with the models's max seq len
 #   (2000000), (22.89 GiB KV cache is needed, which is larger than the

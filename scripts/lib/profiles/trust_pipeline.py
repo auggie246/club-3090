@@ -1,8 +1,8 @@
 """v0.8.0 Loop `[F]` — STEP F4: the §6.2 inbound-trust pipeline.
 
-CONTRACT-3 + CONTRACT-3a (the LOCKED brief — `/opt/ai/docs/v0.8.0-loop-brief.md`
-"## CONTRACT 3" / "## CONTRACT 3a"; source-of-truth design
-`/opt/ai/docs/v0.8.x-design.md` §6.2). F1 (`loop_input.py`) produced the
+CONTRACT-3 + CONTRACT-3a (the locked v0.8.0 Loop design brief,
+"CONTRACT 3" / "CONTRACT 3a"; source-of-truth design §6.2; see
+docs/LOOP.md for the shipped contributor reference). F1 (`loop_input.py`) produced the
 validated `FInput`; F2/F3 (`classifier.py`) produced the §6.1
 `ClassificationResult`. This module CONSUMES both as a library and runs the
 4-stage success-anchor trust pipeline:

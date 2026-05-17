@@ -71,6 +71,7 @@ arches:
       - gemma-vllm-gemma4-tool-parser-fixes
       - gemma-vllm-gemma4-dflash
       - gemma-vllm-gemma4-dflash-int8
+      - gemma-vllm-pr41800-truncate-prompt-tokens
     valid_tp:
       tp_divisors: [1, 2, 4, 8, 16]
       marlin_alignment_required: false

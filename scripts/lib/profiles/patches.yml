@@ -279,6 +279,44 @@ patches:
       drop_when: "each affected engine profile pins a vLLM nightly after d5b31c95"
     status: verified
 
+  - id: gemma-vllm-pr41800-truncate-prompt-tokens
+    model: [gemma-4-31b]
+    files:
+      - models/gemma-4-31b/vllm/patches/vllm-pr41800-truncate-prompt-tokens
+    load_bearing_when:
+      - composes:
+          - vllm/gemma-int8
+          - vllm/gemma-int8-262k
+          - vllm/gemma-awq
+          - vllm/gemma-int8-tq3
+          - vllm/gemma-dflash
+          - vllm/gemma-dflash-int8
+        reason: "Pre-d5b31c95 engine pins reject agent clients that send truncate_prompt_tokens."
+        evidence: "docs/UPSTREAM.md#41800 row; models/gemma-4-31b/vllm/patches/vllm-pr41800-truncate-prompt-tokens/README.md"
+    delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
+      dockerfile_bake: false
+      entrypoint_invoke: true
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: install_script
+    delivery_spec:
+      script: models/gemma-4-31b/vllm/patches/vllm-pr41800-truncate-prompt-tokens/install.sh
+      mounted_at: /etc/club3090/install-pr41800.sh
+      invoke: "bash /etc/club3090/install-pr41800.sh"
+      invoked_before: vllm-serve
+      wired_at: [volumes, entrypoint]
+    drift_guard:
+      kind: behavioral
+      check: "agent client sending truncate_prompt_tokens does not get HTTP 400 on the selected nightly (no-op if nightly post-d5b31c95)"
+      on_fail: capability-degraded
+    capability: truncate-prompt-tokens-kwarg
+    foundational: false
+    upstream:
+      ref: vllm-project/vllm#41800
+      status: merged
+      drop_when: "each affected engine profile pins a vLLM nightly after d5b31c95"
+    status: verified
+
   - id: gemma-vllm-gemma4-dflash
     model: [gemma-4-31b]
     files:

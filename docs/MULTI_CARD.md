@@ -7,6 +7,8 @@ This page explains what scales (and what doesn't) when going beyond TP=2,
 the constraints to know, and how to derive your own compose when `multi4.yml`
 isn't your topology.
 
+> **Model not in the configs here / want any HF safetensors repo?** → [`docs/PULL.md`](PULL.md): `scripts/pull.sh` evaluates any model against the KV math (honest, no download) and boots it if it passes. The recipes on this page are the measured/derivation path; both work.
+
 > **Validation note:** the maintainer rig is **2× RTX 3090 PCIe**, but
 > Whamp's 4× RTX 3090 PCIe rig validated the TP=4 fp8/MTP baseline in
 > [discussion #26](https://github.com/noonghunna/club-3090/discussions/26)

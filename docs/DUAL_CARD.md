@@ -2,6 +2,8 @@
 
 You have **2× RTX 3090s**. This page is the front door for picking a config and knowing what dual-card unlocks vs single. Model-specific deep dives (quants, Genesis, engine internals) live in the model directory — links at the bottom.
 
+> **Model not in the configs below / want any HF safetensors repo?** → [`docs/PULL.md`](PULL.md): `scripts/pull.sh` evaluates any model against the KV math (honest, no download) and boots it if it passes. The curated configs on this page are the measured path; both work.
+
 **NVLink auto-detection** (since 2026-05-14): the dual-card composes now auto-detect whether an NVLink bridge is present. If you have one, you get the NVLink-optimized path automatically. If not, PCIe mode is used. Override with `NVLINK_MODE=force_on|force_off` in your `.env`. See the "NVLink auto-detection" section below.
 
 > **Have 3+ GPUs?** See [`MULTI_CARD.md`](MULTI_CARD.md) — derivation of TP=4 / TP=8 configs from `dual.yml`, valid TP values for Qwen3.6-27B (1, 2, 4, 5, 8, 10), and what scales vs what doesn't.

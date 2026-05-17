@@ -1,6 +1,8 @@
 # Adding a model to the club-3090 stack
 
-End-to-end workflow for onboarding a new model into the v0.7.0 profile catalog + serving infrastructure. Pairs with [KV_MATH.md](KV_MATH.md) (math reference) and [ARCHITECTURE.md](ARCHITECTURE.md) (current stack state).
+End-to-end workflow for onboarding a new model into the **curated profile catalog** + serving infrastructure. Pairs with [KV_MATH.md](KV_MATH.md) (math reference) and [ARCHITECTURE.md](ARCHITECTURE.md) (current stack state).
+
+> **Just want to run a model, not add it to the catalog?** As of v0.8.0 you don't need this workflow — `scripts/pull.sh <org/Model> --profile-like vllm/minimal` evaluates *any* safetensors HF repo against the KV math and boots it if it passes (see [docs/PULL.md](PULL.md)). This page is for the heavier task of promoting a model into the **measured/calibration catalog** (real benchmarks, validated composes, calibration anchors, per-model gotchas) — the high-confidence backbone, not a prerequisite for serving.
 
 ## When to add a new model vs a new quant of an existing one
 

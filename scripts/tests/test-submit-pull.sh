@@ -411,9 +411,22 @@ fb = S.ghless_fallback(fi, cl, repo_root=rr, bundle_dir=gd)
 import urllib.parse as _up2  # noqa: E402
 _decoded_body = _up2.unquote(
     _up2.parse_qs(_up2.urlparse(fb["url"]).query)["body"][0])
-check("/opt/ai" not in _decoded_body and "/home/" not in _decoded_body,
+_PCN = ".pull-captures"
+check("/opt/ai" not in _decoded_body and "/home/" not in _decoded_body
+      and "/mnt/" not in _decoded_body,
       "leak-hygiene: the gh-less URL body (built from the [E]-redacted "
       "manifest) carries NO unredacted internal absolute path")
+# RIG-INDEPENDENT (the real catch the /opt|/home check missed when gd was a
+# tmp sandbox dir): the ABSOLUTE bundle dir must NEVER appear in the public-
+# paste body; only the repo-relative `.pull-captures/...` pointer may.
+check(str(gd) not in _decoded_body,
+      "leak-hygiene: the gh-less body MUST NOT contain the absolute capture "
+      f"dir ({gd}) — public-paste content is repo-relative only")
+check(_PCN in _decoded_body and not any(
+          _seg.startswith("/") for _seg in _decoded_body.split("`")
+          if _PCN in _seg),
+      "leak-hygiene: the gh-less body's bundle pointer is repo-relative "
+      f"(`{_PCN}/<slug>/<ts>`), never an absolute path")
 # The redacted-bundle pointer the message prints is the local capture dir
 # (a tmp path here, by design the on-ramp's only emitted artifact) — assert
 # the message NEVER instructs pasting terminal scrollback.

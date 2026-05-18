@@ -197,6 +197,20 @@ def _ghless_title(finput, classification) -> str:
     return f"[{model}] {cls_v} on {topo} (dedup:{h[:8]})"
 
 
+def _rel_capture(bundle_dir: Path) -> str:
+    """Repo-relative capture pointer (`.pull-captures/<slug>/<ts>`), NEVER an
+    absolute path. The gh-less body is pasted into a PUBLIC issue, so it must
+    not carry the user's filesystem layout (CONTRACT-1.3 "console is not a
+    safe source" + the acceptance: nothing the on-ramp tells a user to share
+    contains an unredacted absolute path). Falls back to the leaf name.
+    """
+    parts = Path(bundle_dir).parts
+    if _PULL_CAPTURES_DIRNAME in parts:
+        i = parts.index(_PULL_CAPTURES_DIRNAME)
+        return str(Path(*parts[i:]))
+    return Path(bundle_dir).name
+
+
 def _ghless_body(finput, classification, bundle_dir: Path) -> str:
     """URL-encoded-ready MARKDOWN body from the redacted manifest tuple
     (model/engine/arch/failure-class/topology + the dedup hash), hard-
@@ -230,7 +244,8 @@ def _ghless_body(finput, classification, bundle_dir: Path) -> str:
         (classification.error_substring or "")[:1200],
         "```",
         "",
-        f"full redacted bundle at `{bundle_dir}` — attach it to the issue",
+        f"redacted bundle dir (from your own run): "
+        f"`{_rel_capture(bundle_dir)}` — attach it to the issue",
     ]
     body = "\n".join(lines)
     # Hard-truncate so the FINAL encoded URL stays < _MAX_URL_BYTES. We
@@ -238,7 +253,8 @@ def _ghless_body(finput, classification, bundle_dir: Path) -> str:
     # trim the body until the assembled URL fits, always preserving the
     # trailing "attach it" pointer.
     tail = (
-        f"\n\nfull redacted bundle at `{bundle_dir}` — attach it to the issue"
+        f"\n\nredacted bundle dir (from your own run): "
+        f"`{_rel_capture(bundle_dir)}` — attach it to the issue"
     )
     while True:
         url = _build_issue_url(_ghless_title(finput, classification), body, h)

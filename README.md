@@ -6,64 +6,7 @@ If you have one or two RTX 3090s and want to run modern LLMs at home, in a homel
 
 ---
 
-## TL;DR — what this is
-
-- **Two complementary routes** — pick by what your workload breaks on:
-  - 🏎 **vLLM dual** = max throughput. Up to **127 TPS code** (DFlash) or **4 concurrent streams @ 262K** (turbo). Full feature stack (vision · tools · MTP · streaming).
-  - 🛡 **llama.cpp single** = max robustness. Full **262K context** on one 3090. Stress-tested clean: no prefill cliffs, 25K-token tool returns work, 90K needle ladder passes. Slower (~21 TPS) but doesn't crash on real-world tool-using agents.
-- **Validated docker compose configs** for both routes — drop-in OpenAI-compatible API on `localhost:8020`
-- **Multi-engine**: vLLM (full features), llama.cpp (max ctx + robustness), SGLang (currently blocked, watch list)
-- **Model-agnostic**: today ships curated configs for Qwen3.6-27B and friends; structure scales as we add models
-- **Universal `pull` (v0.8.0)** — *evaluate any safetensors HF repo; pull only vLLM-loadable supported ones, and only when the gates pass (or an explicit override is accepted)*. The model-agnostic front door for anything not in the curated list — the curated catalog above still ships and still works. → [`docs/PULL.md`](docs/PULL.md)
-
-**First time here?** → [Models](#supported-models) — pick yours.
-**Already running, want to compare engines?** → [docs/engines/](docs/engines/)
-**Picking an engine** (vLLM / llama.cpp / SGLang / ktransformers / ik_llama.cpp)? → [docs/INFERENCE_ENGINES.md](docs/INFERENCE_ENGINES.md)
-**Hardware questions** (does this work on a 4090, do I need NVLink)? → [docs/HARDWARE.md](docs/HARDWARE.md)
-**Don't know what TPS / KV / MTP mean?** → [docs/GLOSSARY.md](docs/GLOSSARY.md)
-
-> ⚠️ **Known issue (2026-05-05)**: Single-card 24 GB long-context (>~50K tokens) on `long-text.yml` / `long-text-no-mtp.yml` / `long-vision.yml` can OOM despite Genesis v7.72.2's PN59 fix. PN59's runtime eligibility check rejects the chunked-prefill path that 24 GB single-card configs are forced to take. Filed at [Sandermage/genesis-vllm-patches#22](https://github.com/Sandermage/genesis-vllm-patches/issues/22), pending Sander review. **If you hit it**: switch to `dual.yml` / `dual-turbo.yml` (TP=2 escapes the cliff) or `llamacpp/default` (different engine, no Cliff 2). See [docs/CLIFFS.md](docs/CLIFFS.md) for the full diagnosis.
-
----
-
-## Pick your path
-
-| You have | Start here |
-|---|---|
-| **1× RTX 3090** | [`docs/SINGLE_CARD.md`](docs/SINGLE_CARD.md) — workload → config → quick start |
-| **2× RTX 3090** (PCIe / no NVLink) | [`docs/DUAL_CARD.md`](docs/DUAL_CARD.md) — workload → config → quick start |
-| **3+ GPUs** (any class — 4× 3090, 8× A6000, mixed) | [`docs/MULTI_CARD.md`](docs/MULTI_CARD.md) — TP scaling math, derivation from `dual.yml`, valid TP values |
-| **A model not in the supported list** / any HF safetensors repo | [`docs/PULL.md`](docs/PULL.md) — universal `pull` flow: evaluate against the KV math, honest about confidence |
-| Considering self-host vs cloud APIs | [`docs/COMPARISONS.md`](docs/COMPARISONS.md) — cost crossover + when each wins |
-
-Each hardware page lists every supported model with the working composes for that card count, plus measured TPS and per-workload pitfalls. Model-specific deep dives (quants, Genesis patches, engine internals) live under [`models/<name>/`](models/).
-
----
-
-## Supported models
-
-| Model | Status | Card counts | Engines | Highlights |
-|---|---|---|---|---|
-| **[Qwen3.6-27B](models/qwen3.6-27b/)** | Production-ready ⭐ | 1× / 2× 3090 | vLLM ✅ · llama.cpp ✅ · SGLang ❌ blocked | Vision · tools · MTP n=3 · up to 262K ctx · vLLM dual = 89/127 TPS · llama.cpp single = full 262K, no prefill cliffs |
-| **[Gemma 4 31B](models/gemma-4-31b/)** | Production-ready (dual-card only on Ampere 24 GB) | 2× 3090 only ¹ | vLLM ✅ · llama.cpp ❌ · SGLang ❌ | Vision · tools · MTP n=3 (Google official drafter) **OR** DFlash n=7 (z-lab drafter) · up to 262K ctx via INT8 PTH KV (PR [#40391](https://github.com/vllm-project/vllm/pull/40391) vendored) · MTP dual = 106/141 TPS at 32K, 95/126 at 262K · DFlash dual = 105/177 TPS at 32K (code-optimal) |
-| **[Qwen3.6 35B-A3B](models/qwen3.6-35b-a3b/)** ⭐ NEW v0.7.3 | Preview (production-track blocked on Genesis v7.73.x) | 2× 3090 | vLLM ✅ (preview) · SGLang ❌ · llama.cpp ❌ | **MoE (256 experts × 8 active, ~3 B active params)** · vision · tools · upstream native loader via [vLLM PR #42521](https://github.com/vllm-project/vllm/pull/42521) · preview dual = **182/177 TPS at 16K** (no MTP, no TQ3, no Genesis) · ~2× the Qwen 3.6-27B dense baseline on the same hardware · production path (Genesis + TQ3 + MTP) pending upstream Genesis re-anchor |
-| **[Gemma 4 26B-A4B](models/gemma-4-26b-a4b/)** ⭐ NEW v0.7.3 | Production via AWQ (Intel AutoRound INT4 blocked on Ampere) | 2× 3090 | vLLM ✅ (AWQ overlay) · SGLang ❌ · llama.cpp ❌ | **MoE (128 experts × 8 active, ~4 B active params)** · vision · tools · cyankiwi AWQ-4bit weights via vendored [vLLM PR #40886](https://github.com/vllm-project/vllm/pull/40886) (compressed-tensors MoE key remapping) · AWQ dual = **139/139 TPS at 32K**, CV 0.2% / 0.0% · Intel AutoRound variants Ampere-blocked (Marlin K-dim alignment — moe_intermediate_size=704 not aligned to group_size=128) — AutoRound works on SM90+ |
-
-¹ Single-card boot OOMs on Ampere 24 GB regardless of KV format (weights + drafter + profiling at 8K ctx leaves no KV pool). Single-card Gemma 4 is feasible on 32 GB+ GPUs (validated on RTX 5090 32 GB by [@apnar](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042)).
-
-More models coming. The repo structure scales — when we add Qwen3.5-27B / GLM-4.6 / etc., they go under `models/<name>/` with the same internal pattern.
-
----
-
-## Measured TPS at a glance
-
-![Qwen3.6-27B TPS by config](docs/img/performance.png)
-
-Bench protocol: 3 warm + 5 measured runs of the canonical narrative + code prompts. `scripts/bench.sh` reports wall TPS, decode TPS, TTFT, and prompt-processing throughput (`PP tok/s`; vLLM log scrape, `PP=1` long-prompt fallback for llama.cpp). Substrate: vLLM nightly `0.20.1rc1.dev16+g7a1eb8ac2` + Genesis v7.69 dev tip (commit `2db18df`), with local backports `patch_inputs_embeds_optional.py` (vllm#35975) and `patch_tolist_cudagraph.py`. llama.cpp mainline `0d0764dfd`, RTX 3090 sm_86 PCIe-only at 230 W. Per-config details + run-by-run numbers + VRAM + AL/accept rates: [models/qwen3.6-27b/CHANGELOG.md](models/qwen3.6-27b/CHANGELOG.md) (per-model history) and [scripts/bench.sh](scripts/bench.sh) (canonical bench).
-
----
-
-## Quick start (for the current model — Qwen3.6-27B on vLLM)
+## Quick start
 
 ```bash
 # 1. Clone the repo
@@ -107,24 +50,66 @@ bash scripts/switch.sh vllm/long-vision   # for example
 # 7. Keep your install up-to-date as the stack moves (Genesis pin bumps,
 #    new compose variants, vendored patch updates):
 bash scripts/update.sh
-#   - bails if your tree has uncommitted edits (commit or stash first)
-#   - git pull --ff-only origin master, then re-runs setup.sh
-#   - tells you to restart your container via switch.sh after — so you can
-#     A/B old-vs-new before bringing the new variant up
-#   launch.sh + switch.sh also soft-warn at boot when your checkout is
-#   behind origin/master, so you'll usually find out before you ask.
 ```
 
 `launch.sh` calls `switch.sh` (down old, up new) and then `verify-full.sh` so you know it's serving cleanly before you point a client at it. See [`scripts/`](scripts/) for all helpers.
 
-For client snippets — Python (`openai` SDK + raw `requests`), TypeScript / Node, plus connection settings for Open WebUI, Cline, Cursor, and other OpenAI-compat clients — see [`docs/EXAMPLES.md`](docs/EXAMPLES.md). Common questions ("can I use a 4090?", "why MTP not EAGLE?", "why not Ollama?", "what's a prefill cliff?") have answers in [`docs/FAQ.md`](docs/FAQ.md). Trying to decide self-host vs cloud APIs vs other local options? [`docs/COMPARISONS.md`](docs/COMPARISONS.md). Want to contribute numbers, bug repros, or new variants? [`CONTRIBUTING.md`](CONTRIBUTING.md). Tracking the upstream issues and PRs we depend on or have filed? [`docs/UPSTREAM.md`](docs/UPSTREAM.md).
+> ⚠️ **Single-card long-context note:** Cliff 2 (GDN prefill OOM at >~50K single-prompt) is **open** on 24 GB single-card vLLM. Genesis v7.72.2 PN59 was intended as the fix but doesn't engage on chunked-prefill. **Workarounds:** [`vllm/dual`](docs/DUAL_CARD.md) (TP=2 escapes it) or [`llamacpp/default`](docs/SINGLE_CARD.md#bulletproof-no-cliffs) (different engine, no cliff). Full diagnosis at [`docs/CLIFFS.md`](docs/CLIFFS.md).
 
-**Hit an issue or want to share bench numbers?** Run `bash scripts/report.sh > my-rig.md` (add `--full` for the canonical "everything" pass: rig + verify-full + verify-stress 7/7 + SOAK_MODE=continuous + bench, ~35 min) and paste into the [bug](https://github.com/noonghunna/club-3090/issues/new?template=bug-report.yml) or [bench](https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml) issue template — single command captures everything we'd otherwise ask for individually. **Not on our shipped Docker composes?** Scripts now work on non-Docker host builds (llama.cpp host server, SGLang, etc.) via `URL=... CONTAINER=none MODEL=... bash scripts/...` — see [discussion #88](https://github.com/noonghunna/club-3090/discussions/88) for the full contributor flow.
+---
 
-For llama.cpp (different engine, different recipe — useful for max context on single-card):
-```bash
-cd models/qwen3.6-27b/llama-cpp && cat README.md
-```
+## TL;DR — what this is
+
+- **Two complementary routes** — pick by what your workload breaks on:
+  - 🏎 **vLLM dual** = max throughput. Up to **127 TPS code** (DFlash) or **4 concurrent streams @ 262K** (turbo). Full feature stack (vision · tools · MTP · streaming).
+  - 🛡 **llama.cpp single** = max robustness. Full **262K context** on one 3090. Stress-tested clean: no prefill cliffs, 25K-token tool returns work, 90K needle ladder passes. Slower (~21 TPS) but doesn't crash on real-world tool-using agents.
+- **Validated docker compose configs** for both routes — drop-in OpenAI-compatible API on `localhost:8020`
+- **Multi-engine**: vLLM (full features), llama.cpp (max ctx + robustness), SGLang (currently blocked, watch list)
+- **Model-agnostic**: today ships curated configs for Qwen3.6-27B and friends; structure scales as we add models
+- **Universal `pull` (v0.8.0)** — evaluate any safetensors HF repo; see [`docs/PULL.md`](docs/PULL.md)
+
+**New here?** → [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — 5-minute clone-to-curl path.
+**Already running, want to compare engines?** → [docs/engines/](docs/engines/)
+**Picking an engine** (vLLM / llama.cpp / SGLang)? → [docs/INFERENCE_ENGINES.md](docs/INFERENCE_ENGINES.md)
+**Hardware questions** (4090, NVLink, power caps)? → [docs/HARDWARE.md](docs/HARDWARE.md)
+**Don't know what TPS / KV / MTP mean?** → [docs/GLOSSARY.md](docs/GLOSSARY.md)
+
+---
+
+## Pick your path
+
+| You have | Start here |
+|---|---|
+| **1× RTX 3090** | [`docs/SINGLE_CARD.md`](docs/SINGLE_CARD.md) — workload → config → quick start |
+| **2× RTX 3090** (PCIe / NVLink auto-detected) | [`docs/DUAL_CARD.md`](docs/DUAL_CARD.md) — workload → config → quick start |
+| **3+ GPUs** (any class — 4× 3090, 8× A6000, mixed) | [`docs/MULTI_CARD.md`](docs/MULTI_CARD.md) — TP scaling math, derivation from `dual.yml`, valid TP values |
+| **A model not in the supported list** / any HF safetensors repo | [`docs/PULL.md`](docs/PULL.md) — universal `pull` flow: evaluate against the KV math, honest about confidence |
+| Considering self-host vs cloud APIs | [`docs/COMPARISONS.md`](docs/COMPARISONS.md) — cost crossover + when each wins |
+
+Each hardware page lists every supported model with the working composes for that card count, plus measured TPS and per-workload pitfalls. Model-specific deep dives (quants, Genesis patches, engine internals) live under [`models/<name>/`](models/).
+
+---
+
+## Supported models
+
+| Model | Status | Card counts | Engines | Highlights |
+|---|---|---|---|---|
+| **[Qwen3.6-27B](models/qwen3.6-27b/)** | Production-ready ⭐ | 1× / 2× 3090 | vLLM ✅ · llama.cpp ✅ · SGLang ❌ blocked | Vision · tools · MTP n=3 · up to 262K ctx · vLLM dual = 89/127 TPS · llama.cpp single = full 262K, no prefill cliffs |
+| **[Gemma 4 31B](models/gemma-4-31b/)** | Production-ready (dual-card only on Ampere 24 GB) | 2× 3090 only ¹ | vLLM ✅ · llama.cpp ❌ · SGLang ❌ | Vision · tools · MTP n=3 (Google official drafter) **OR** DFlash n=7 (z-lab drafter) · up to 262K ctx via INT8 PTH KV (PR [#40391](https://github.com/vllm-project/vllm/pull/40391) vendored) · MTP dual = 106/141 TPS at 32K, 95/126 at 262K · DFlash dual = 105/177 TPS at 32K (code-optimal) |
+| **[Qwen3.6 35B-A3B](models/qwen3.6-35b-a3b/)** ⭐ NEW v0.7.3 | Preview (production-track blocked on Genesis v7.73.x) | 2× 3090 | vLLM ✅ (preview) · SGLang ❌ · llama.cpp ❌ | **MoE (256 experts × 8 active, ~3 B active params)** · vision · tools · upstream native loader via [vLLM PR #42521](https://github.com/vllm-project/vllm/pull/42521) · preview dual = **182/177 TPS at 16K** (no MTP, no TQ3, no Genesis) |
+| **[Gemma 4 26B-A4B](models/gemma-4-26b-a4b/)** ⭐ NEW v0.7.3 | Production via AWQ (Intel AutoRound INT4 blocked on Ampere) | 2× 3090 | vLLM ✅ (AWQ overlay) · SGLang ❌ · llama.cpp ❌ | **MoE (128 experts × 8 active, ~4 B active params)** · vision · tools · AWQ dual = **139/139 TPS at 32K**, CV 0.2% / 0.0% |
+
+¹ Single-card boot OOMs on Ampere 24 GB regardless of KV format. Single-card Gemma 4 is feasible on 32 GB+ GPUs (validated on RTX 5090 32 GB by [@apnar](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042)).
+
+More models coming — they go under `models/<name>/` with the same internal pattern.
+
+---
+
+## Measured TPS at a glance
+
+![Qwen3.6-27B TPS by config](docs/img/performance.png)
+
+Bench protocol: 3 warm + 5 measured runs. See [`scripts/bench.sh`](scripts/bench.sh) for methodology. Per-config details + run-by-run numbers + VRAM + AL/accept rates: [models/qwen3.6-27b/CHANGELOG.md](models/qwen3.6-27b/CHANGELOG.md).
 
 ---
 

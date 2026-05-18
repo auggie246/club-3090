@@ -1,7 +1,7 @@
 #!/bin/bash
 # NVLink auto-detection + override. Sources NVLINK_MODE from env (default: auto).
 # Exports: _NVLINK_ENABLED (0 or 1), sets NCCL/PYTORCH env vars accordingly.
-# Designed for dual-card (2x GPU) setups. Skips detection on >2 GPUs.
+# Handles 2-GPU setups (single NVLink bridge) and N-GPU setups (e.g. 2 bridges on 4 cards).
 
 NVLINK_MODE="${NVLINK_MODE:-auto}"
 
@@ -17,8 +17,14 @@ case "$NVLINK_MODE" in
   auto)
     GPU_COUNT=$(nvidia-smi -L 2>/dev/null | grep -c 'GPU' || echo 0)
     if [ "$GPU_COUNT" -gt 2 ]; then
-      _NVLINK_ENABLED=0
-      echo "[nvlink] $GPU_COUNT GPUs detected — skipping NVLink detection (dual-card only)"
+      # Check topology matrix for any NVLink connections (e.g. 2 bridges on 4 cards).
+      if nvidia-smi topo -m 2>/dev/null | grep -qP '\bNV[0-9]+\b'; then
+        _NVLINK_ENABLED=1
+        echo "[nvlink] $GPU_COUNT GPUs detected — NVLink found, enabling NVLink mode"
+      else
+        _NVLINK_ENABLED=0
+        echo "[nvlink] $GPU_COUNT GPUs detected — no NVLink found, using PCIe mode"
+      fi
     elif [ "$GPU_COUNT" -eq 2 ]; then
       LINK=$(nvidia-smi topo -m 2>/dev/null | awk '/^GPU0/{print $3}')
       if [[ "$LINK" =~ ^NV[0-9]+$ ]]; then

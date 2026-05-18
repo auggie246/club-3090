@@ -884,6 +884,157 @@ for _m in (m1, m2, m3, m3b, m4):
           "submission_fingerprint (composition unchanged, value honest)")
 
 # ---------------------------------------------------------------------------
+# v0.8.2 CONTRACT-1.1 — the pt1-gate-only emitter + the SHARED .last marker.
+#
+# `emit_gate_capture()` is a SEPARATE function (the `emit_override_capture`
+# byte-preserving precedent) — NOT invoked by `emit_capture()`. It writes
+# ONLY pt1-gate.json + a schema:2 manifest.json (gate-only terminated
+# pre-download → no pt2/3/4/5), redacted via the SAME `_redact_text`.
+# `write_last_marker()` is the ONE shared `.last` helper BOTH emitters call
+# (the centralization mandate — gate-only is the commonest failure; if
+# `.last` were [E]-only, `--submit-last` would silently miss gate captures).
+# ---------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as td:
+    _root = Path(td)
+
+    # (i) emit_capture() STILL writes ONLY pt1-4 + manifest (the V1
+    #     RED-LINE: the gate emitter is separate, NOT invoked here).
+    o_full = C.emit_capture(
+        ei, confidence=SimpleNamespace(name="EXACT"),
+        raw_verdict="fits-clean", profile_like="vllm/x",
+        download_result=dl, boot_result=res, smoke_result=sm,
+        compose_meta=compose_meta, kv_calc_version="kvcalc-v7",
+        repo_root=_root, ts="20260518T100000Z",
+    )
+    _fnames = sorted(x.name for x in Path(o_full["dir"]).iterdir())
+    check(_fnames == ["manifest.json", "pt1-gate.json", "pt2-download.json",
+                      "pt3-boot.json", "pt4-smoke.json"],
+          f"V1 RED-LINE: emit_capture() STILL writes ONLY pt1-4 + manifest "
+          f"(the gate emitter is a SEPARATE fn) (got {_fnames})")
+
+    # (ii) emit_gate_capture() — a C0 no-arch-row hard-block, der present.
+    der_g = SimpleNamespace(profile={"arch": "ExoticForCausalLM",
+                                     "weight_format": "bfloat16"})
+    og = C.emit_gate_capture(
+        slug="org/Exotic-Model",
+        profile_like="vllm/minimal",
+        abort_reason="engine-support-unknown/no-arch-row",
+        confidence=SimpleNamespace(name="ESTIMATED_LOWER_BOUND"),
+        raw_verdict=None,
+        detail="[C0] engine-support-unknown/no-arch-row",
+        der=der_g,
+        hardware_sm=8.6,
+        gpu_topology=(1, [24576], ["NVIDIA GeForce RTX 3090"]),
+        club3090_commit="deadbeef",
+        repo_root=_root,
+        ts="20260518T101000Z",
+    )
+    _gnames = sorted(x.name for x in Path(og["dir"]).iterdir())
+    check(_gnames == ["manifest.json", "pt1-gate.json"],
+          f"emit_gate_capture: ONLY pt1-gate.json + manifest.json — no "
+          f"pt2/3/4/5 (gate-only terminated pre-download) (got {_gnames})")
+    gman = json.loads(Path(og["paths"]["manifest"]).read_text())
+    gpt1 = json.loads(Path(og["paths"]["gate"]).read_text())
+    check(gman["schema"] == 2 and gman["outcome"] == "hard-block"
+          and gman["failure_class"] is None
+          and gman["abort_reason"] == "engine-support-unknown/no-arch-row"
+          and gman["is_gate_only"] is True,
+          f"emit_gate_capture: manifest schema:2 / outcome:hard-block / "
+          f"failure_class:null / exact abort_reason (got {sorted(gman)})")
+    # Always-present row guaranteed; der present -> model/arch/quant set;
+    # topology resolved best-effort from the injected gpu_topology.
+    check(gman["model"] == "org/Exotic-Model"
+          and gman["arch_family"] == "ExoticForCausalLM"
+          and gman["quant_label"] == "bfloat16"
+          and gman["topology_class"] == "1x24576MiB"
+          and gman["topology_summary_canonical"]
+              == "[(NVIDIA GeForce RTX 3090, 24576)]",
+          "emit_gate_capture: der-present manifest carries model/arch/"
+          "quant + best-effort topology")
+    # post-C0 fields ALWAYS null on a gate-only bundle.
+    check(all(gman[k] is None for k in (
+              "selected_ctx", "kv_format", "smoke_capability_set",
+              "engine_pin", "engine_version", "submission_fingerprint")),
+          "emit_gate_capture: post-C0 fields ALWAYS null (never reached)")
+    check(gpt1["schema"] == 2 and gpt1["point"] == "gate"
+          and gpt1["abort_reason"]
+              == "engine-support-unknown/no-arch-row"
+          and gpt1["is_gate_only"] is True,
+          "emit_gate_capture: pt1-gate carries the raw abort_reason (H2)")
+
+    # (iii) pre-deriver (der=None) -> model/arch/quant null; topology null
+    #       when neither override nor nvidia-smi.
+    og2 = C.emit_gate_capture(
+        slug="org/NoDeriver",
+        profile_like="vllm/minimal",
+        abort_reason="unsupported-format",
+        confidence=None, raw_verdict=None,
+        detail="deriver: unsupported-format",
+        der=None, hardware_sm=None, gpu_topology=None,
+        club3090_commit="deadbeef", repo_root=_root,
+        ts="20260518T102000Z",
+    )
+    gm2 = json.loads(Path(og2["paths"]["manifest"]).read_text())
+    # arch/quant are GUARANTEED null pre-deriver (no der.profile). Topology
+    # is BEST-EFFORT (CONTRACT-1.1): null when neither --hardware-gpus nor
+    # nvidia-smi — but on a rig WITH nvidia-smi the capture-only resolve
+    # legitimately populates it (mirrors pull.py:853-855). So assert the
+    # guaranteed-null invariants + topology being either null OR a valid
+    # deterministic serialization (never fabricated/garbage).
+    check(gm2["arch_family"] is None and gm2["quant_label"] is None
+          and gm2["model"] == "org/NoDeriver",
+          "emit_gate_capture: pre-deriver -> arch/quant null (no "
+          "der.profile), model still the slug")
+    _tc, _ts2 = gm2["topology_class"], gm2["topology_summary_canonical"]
+    check((_tc is None and _ts2 is None)
+          or (isinstance(_tc, str) and _tc.endswith("MiB")
+              and isinstance(_ts2, str) and _ts2.startswith("[")),
+          f"emit_gate_capture: topology is best-effort — null XOR a valid "
+          f"deterministic serialization, never fabricated "
+          f"(class={_tc!r} summary={_ts2!r})")
+
+    # (iv) redaction: a leaky abort_reason/detail is _redact_text-scrubbed.
+    og3 = C.emit_gate_capture(
+        slug="org/Leaky",
+        profile_like="vllm/minimal",
+        abort_reason="hard-block",
+        confidence=None, raw_verdict="wont-fit",
+        detail="refused near /opt/ai/secret/model and /mnt/models/x",
+        der=None, hardware_sm=8.6, gpu_topology=None,
+        club3090_commit="deadbeef", repo_root=_root,
+        ts="20260518T103000Z",
+    )
+    for _a in og3["paths"].values():
+        _b = Path(_a).read_text()
+        check("/opt/ai" not in _b and "/mnt/models" not in _b,
+              f"emit_gate_capture: leaky path scrubbed from "
+              f"{Path(_a).name} (same _redact_text discipline)")
+
+    # (v) the SHARED `.last` marker — written by BOTH emitters (the
+    #     centralization mandate). The last writer wins; it points at the
+    #     RELATIVE bundle dir under .pull-captures/.
+    _last = _root / ".pull-captures" / ".last"
+    check(_last.is_file(),
+          "write_last_marker: .pull-captures/.last exists after a capture")
+    check(_last.read_text().strip()
+          == str(Path(og3["dir"]).relative_to(_root / ".pull-captures")),
+          "write_last_marker: .last points at the MOST-RECENT bundle "
+          "(last-writer-wins; relative path)")
+    # emit_capture() ALSO updates the SAME shared marker (not [E]-only).
+    o_full2 = C.emit_capture(
+        ei, confidence=SimpleNamespace(name="EXACT"),
+        raw_verdict="fits-clean", profile_like="vllm/x",
+        download_result=dl, boot_result=res, smoke_result=sm,
+        compose_meta=compose_meta, kv_calc_version="kvcalc-v7",
+        repo_root=_root, ts="20260518T104000Z",
+    )
+    check(_last.read_text().strip()
+          == str(Path(o_full2["dir"]).relative_to(
+              _root / ".pull-captures")),
+          "write_last_marker: emit_capture() ALSO updates the SHARED "
+          ".last (centralized — NOT wired into emit_capture only)")
+
+# ---------------------------------------------------------------------------
 # CONTRACT-5 G1 — live-topology verify gate (F6).
 #
 # `topology_summary_canonical` live wiring

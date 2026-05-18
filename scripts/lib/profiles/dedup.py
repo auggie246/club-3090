@@ -94,7 +94,22 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from scripts.lib.profiles.classifier import ClassificationResult, FailureClass
-from scripts.lib.profiles.loop_input import FInput
+# v0.8.2 CONTRACT-1.1 — F5 parameter annotations are retyped `FInput` ->
+# `BaseCaptureBundle` (a schema==1 `FInput` AND a schema==2 `FInputGate` both
+# satisfy the consumer surface by structural subtyping; pure static retype,
+# schema==1 byte-identical incl. dedup-hash).
+#
+# RED-LINE (V1, FENCED): `effective_dedup_hash` below
+# calls the *concrete-class UNBOUND* `FInput.dedup_hash(_EffProxy())` to
+# reuse F1's exact serialization primitive. The protocol retype of the
+# *parameter annotations* does NOT break this (the concrete `FInput` class
+# still carries `dedup_hash`); the `FInput` import is RETAINED for exactly
+# that one unbound call. It MUST NOT be "tidied" to
+# `BaseCaptureBundle.dedup_hash(...)` (a Protocol has no usable unbound
+# body) NOR to `finput.dedup_hash()` (would hash the unsubstituted tuple
+# with failure_class=None — silently corrupting every dedup hash AND
+# defeating the §6.1 mislabel safeguard).
+from scripts.lib.profiles.loop_input import BaseCaptureBundle, FInput
 
 # The §6.1 enum value-set (bounded — `class:<value>` labels are safe).
 _CLASS_ENUM_VALUES = tuple(c.value for c in FailureClass)
@@ -204,7 +219,7 @@ def _failure_class_value(classification: ClassificationResult) -> str:
 
 
 def effective_dedup_tuple(
-    finput: FInput,
+    finput: BaseCaptureBundle,
     classification: ClassificationResult,
 ) -> tuple:
     """The §6.3 7-tuple with the CLASSIFIER's `failure_class` substituted
@@ -231,7 +246,7 @@ def effective_dedup_tuple(
 
 
 def effective_dedup_hash(
-    finput: FInput,
+    finput: BaseCaptureBundle,
     classification: ClassificationResult,
 ) -> str:
     """`sha256("\\x1f".join(str(p) for p in effective_tuple))[:12]`.
@@ -284,7 +299,7 @@ def dedup_label(dedup_hash: str) -> str:
 def label_set(
     dedup_hash: str,
     classification: ClassificationResult,
-    finput: FInput,
+    finput: BaseCaptureBundle,
 ) -> list[str]:
     """The EXACT bounded label set for an issue (CONTRACT-4 — closes H4).
 
@@ -320,7 +335,7 @@ _TUPLE_FIELDS = (
 
 
 def _tuple_payload(
-    finput: FInput,
+    finput: BaseCaptureBundle,
     classification: ClassificationResult,
 ) -> dict:
     """The machine-readable body payload: the schema marker + the FULL
@@ -340,7 +355,7 @@ def _tuple_payload(
 
 
 def build_issue_body(
-    finput: FInput,
+    finput: BaseCaptureBundle,
     classification: ClassificationResult,
 ) -> str:
     """The new-issue body: a human header + the canonical 7-tuple in a
@@ -375,7 +390,7 @@ def build_issue_body(
 
 
 def build_plusone_comment(
-    finput: FInput,
+    finput: BaseCaptureBundle,
     classification: ClassificationResult,
 ) -> str:
     """The structured, machine-parseable `+1` comment added on a verified
@@ -405,7 +420,7 @@ def build_plusone_comment(
 
 
 def build_issue_title(
-    finput: FInput,
+    finput: BaseCaptureBundle,
     classification: ClassificationResult,
 ) -> str:
     """A DETERMINISTIC issue title (CONTRACT-4 — "open a new issue titled
@@ -460,7 +475,7 @@ def parse_body_tuple(body: str) -> Optional[list]:
 
 def body_tuple_matches(
     body: str,
-    finput: FInput,
+    finput: BaseCaptureBundle,
     classification: ClassificationResult,
 ) -> bool:
     """The sha12 COLLISION SAFEGUARD (CONTRACT-4 (c)): a candidate found
@@ -543,7 +558,7 @@ def _spool(spool_dir: Path, name: str, payload: dict) -> Optional[Path]:
 
 
 def _would_be_payload(
-    finput: FInput,
+    finput: BaseCaptureBundle,
     classification: ClassificationResult,
     dedup_hash: str,
     labels: list[str],
@@ -595,7 +610,7 @@ def bootstrap_labels(
 
 
 def submit(
-    finput: FInput,
+    finput: BaseCaptureBundle,
     classification: ClassificationResult,
     *,
     repo_root: Path,

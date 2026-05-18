@@ -51,12 +51,66 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
 # The schema version `[E]` stamps (`capture.py:42` `SCHEMA = 1`). F1 hard-
 # asserts the bundle is this exact schema — a strict boundary refuses an
 # unrecognised schema rather than mis-parsing a future shape.
 EXPECTED_SCHEMA = 1
+# v0.8.2 CONTRACT-1.1 — the gate-only (capture-on-hard-block) bundle schema
+# (`capture.py` `GATE_SCHEMA = 2`). The shipped schema==1
+# `read_capture_bundle()` path stays byte-identical; a SEPARATE
+# `read_gate_bundle()` (schema==2) returns `FInputGate`.
+GATE_SCHEMA = 2
+
+
+# ---------------------------------------------------------------------------
+# v0.8.2 CONTRACT-1.1 — `BaseCaptureBundle` (the maintainer-decided Protocol).
+#
+# F2 (`classifier.py`) + F5 (`dedup.py`) are retyped `FInput` ->
+# `BaseCaptureBundle` so a schema==1 `FInput` AND a schema==2 `FInputGate`
+# both satisfy the consumer surface by STRUCTURAL subtyping. `FInput`
+# satisfies it BY CONSTRUCTION (verified: there is no
+# `isinstance(finput, FInput)` anywhere in classifier.py/dedup.py — only
+# annotations; the retype is a pure static change, zero behaviour change,
+# schema==1 byte-identical incl. dedup-hash). pt2-5 are `Optional[dict]`
+# so `FInputGate` (None there) AND `FInput` (dict there) both conform; the
+# classifier's existing `or {}` guards already tolerate None.
+# ---------------------------------------------------------------------------
+@runtime_checkable
+class BaseCaptureBundle(Protocol):
+    manifest: dict
+    pt1_gate: dict
+    pt2_download: Optional[dict]
+    pt3_boot: Optional[dict]
+    pt4_smoke: Optional[dict]
+    pt5_override: Optional[dict]
+    is_gate_only: bool
+
+    # + properties already on FInput (F2 also reads these):
+    #   arch_family, model_id, engine_version, quant_label,
+    #   failure_class, outcome; + dedup_tuple(), dedup_hash().
+    @property
+    def arch_family(self) -> str: ...
+
+    @property
+    def model_id(self) -> str: ...
+
+    @property
+    def engine_version(self) -> str: ...
+
+    @property
+    def quant_label(self) -> str: ...
+
+    @property
+    def failure_class(self): ...
+
+    @property
+    def outcome(self) -> str: ...
+
+    def dedup_tuple(self) -> tuple: ...
+
+    def dedup_hash(self) -> str: ...
 
 
 class CaptureBundleError(Exception):
@@ -106,6 +160,13 @@ class FInput:
     pt5_override: Optional[dict] = None
     # NOT produced by [E] — optional externally-supplied attachment only.
     raw_bundle_path: Optional[Path] = None
+    # v0.8.2 — `BaseCaptureBundle` protocol member. ADDITIVE: a schema==1
+    # full bundle is NEVER gate-only. Defaults False and is NOT set by
+    # `read_capture_bundle()` so the shipped schema==1 parse + the
+    # consensus/dedup tuples + dedup_hash are byte-identical (a defaulted
+    # dataclass field changes no existing serialization). `FInput` thus
+    # satisfies `BaseCaptureBundle` by construction.
+    is_gate_only: bool = False
 
     # ---- CONTRACT-1 canonical accessors -------------------------------
     # These are the SHIPPED aliases (`capture.py:553/568`, `497-500`);
@@ -225,6 +286,115 @@ class FInput:
         primitive. F5 owns the issue-tracker side; F1 owns this canonical
         deterministic serialization so every STEP hashes identically.
         """
+        joined = "\x1f".join(str(p) for p in self.dedup_tuple())
+        return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
+
+
+# ---------------------------------------------------------------------------
+# v0.8.2 CONTRACT-1.1 — `FInputGate`: the schema==2 gate-only bundle.
+#
+# Parsed by the SEPARATE `read_gate_bundle()` (NOT `read_capture_bundle()`;
+# the shipped schema==1 path is byte-identical). It implements
+# `BaseCaptureBundle` so F2/F5 consume it through the protocol with no extra
+# code. A gate-only bundle has NO pt2/3/4/5 (terminated pre-download) and a
+# DEGRADED manifest (only the always-present key row guaranteed; model/arch/
+# quant null pre-deriver; topology best-effort/nullable; post-C0 fields
+# null). `dedup_tuple()` therefore uses `.get(k, None)` (NOT `m[k]`) —
+# behaviour-neutral for schema==1 (all 22 keys present on `FInput`'s path,
+# which uses its own `m[k]`), crash-safe for schema==2; `str(None)=="None"`
+# makes the hash deterministic + identical to how F1 renders an absent value
+# (CONTRACT-1.1 — load-bearing for the COMMON null-topology gate case,
+# not an edge case).
+# ---------------------------------------------------------------------------
+@dataclass
+class FInputGate:
+    """A schema==2 capture-on-hard-block bundle (CONTRACT-1.1).
+
+    `manifest`  — manifest.json (schema==2 hard-asserted; only the always-
+                  present key row is required, `outcome=="hard-block"`,
+                  `failure_class is None`).
+    `pt1_gate`  — pt1-gate.json (the pre-download verdict snapshot, incl.
+                  the EXACT shipped `abort_reason`).
+    `pt2_download` .. `pt5_override` — ALWAYS None (terminated pre-download;
+                  satisfies the `Optional[dict]` protocol slots so F2/F5's
+                  existing `or {}` guards tolerate it).
+    """
+
+    manifest: dict
+    pt1_gate: dict
+    pt2_download: Optional[dict] = None
+    pt3_boot: Optional[dict] = None
+    pt4_smoke: Optional[dict] = None
+    pt5_override: Optional[dict] = None
+    raw_bundle_path: Optional[Path] = None
+    is_gate_only: bool = True
+
+    # ---- canonical accessors (mirror FInput; `.get`-tolerant) ----------
+    @property
+    def model_id(self) -> str:
+        return self.manifest.get("model_id") or self.manifest.get("model")
+
+    @property
+    def engine_version(self) -> str:
+        # gate-only: post-C0 -> null. Render deterministically as F1 would.
+        return self.manifest.get("engine_pin")
+
+    @property
+    def quant_label(self) -> str:
+        """Normalized (LOWERCASED) `quant_label`. `None` pre-deriver ->
+        `_norm_quant` maps it to the literal ``"none"`` (the SAME defensive
+        discipline `FInput.quant_label` uses)."""
+        return _norm_quant(self.manifest.get("quant_label"))
+
+    @property
+    def arch_family(self) -> str:
+        """`arch_family` VERBATIM; `None` pre-deriver (gate-only legitimately
+        lacks it — `read_gate_bundle()` does NOT require it)."""
+        return self.manifest.get("arch_family")
+
+    @property
+    def failure_class(self):
+        """Authoritatively `None` on a gate-only bundle (`[E]`/the gate
+        emitter NEVER classifies — `[F]` does, downstream)."""
+        return self.manifest.get("failure_class")
+
+    @property
+    def outcome(self) -> str:
+        """Always `"hard-block"` on a gate-only bundle (NOT the §6.1 class —
+        same binding rule as `FInput.outcome`)."""
+        return self.manifest.get("outcome")
+
+    @property
+    def abort_reason(self):
+        """The EXACT shipped `res.abort_reason` sub-token (CONTRACT-1.1) —
+        the new `gate_abort_reason` `_match_condition` kind keys on this
+        (read off `pt1_gate`)."""
+        return self.pt1_gate.get("abort_reason")
+
+    # ---- §6.3 dedup key builders (`.get`-tolerant — CONTRACT-1.1) ------
+    def dedup_tuple(self) -> tuple:
+        """The §6.3 dedup 7-tuple, `.get(k, None)`-tolerant (NOT `m[k]`):
+        behaviour-neutral for schema==1, crash-safe for schema==2's
+        degraded manifest. `failure_class` is `None` here (gate emitter
+        never classifies); `[F]` substitutes the classifier's class
+        downstream (F5 `effective_dedup_tuple`).
+        """
+        m = self.manifest
+        return (
+            m.get("model", None),
+            _norm_quant(m.get("quant_label", None)),
+            m.get("arch_family", None),
+            m.get("kv_calc_version", None),
+            m.get("engine_pin", None),
+            m.get("failure_class", None),
+            m.get("topology_class", None),
+        )
+
+    def dedup_hash(self) -> str:
+        """`sha256("\\x1f".join(str(p) for p in dedup_tuple()))[:12]` —
+        byte-EXACTLY `FInput.dedup_hash`'s convention. `str(None)=="None"`
+        keeps a null-topology gate bundle's hash deterministic + stable
+        (acceptance asserts this)."""
         joined = "\x1f".join(str(p) for p in self.dedup_tuple())
         return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
 
@@ -369,6 +539,95 @@ def read_capture_bundle(
         pt3_boot=pts["pt3-boot.json"],
         pt4_smoke=pts["pt4-smoke.json"],
         pt5_override=pt5_override,
+        raw_bundle_path=(
+            Path(raw_bundle_path) if raw_bundle_path is not None else None
+        ),
+    )
+
+
+# v0.8.2 CONTRACT-1.1 — the schema==2 gate-only required key row. Per the
+# CONTRACT-1.1 enumerated per-abort-stratum table this is the ALWAYS-PRESENT
+# row (guaranteed at EVERY gate stratum). model/arch/quant/topology +
+# post-C0 keys are deliberately NOT required (early deriver / profile-like /
+# repo-not-found / hardware-sm-undetermined terminal legitimately lacks
+# them) —
+# `read_gate_bundle()` tolerates them via `.get()`, it MUST NOT reuse the
+# 22-key schema-1 `_require_keys` set (that hard-`raise`s on the post-C0
+# set the gate path can never populate).
+_GATE_REQUIRED_KEYS = (
+    "schema", "slug", "utc_ts", "club3090_commit", "outcome",
+    "abort_reason", "failure_class",
+)
+
+
+def read_gate_bundle(
+    capture_dir,
+    *,
+    raw_bundle_path=None,
+) -> FInputGate:
+    """v0.8.2 CONTRACT-1.1 — parse + validate ONE schema==2 (gate-only,
+    capture-on-hard-block) bundle into `FInputGate`.
+
+    A SEPARATE reader from `read_capture_bundle()`: the shipped schema==1
+    `FInput` path is byte-identical (untouched). Required artifacts:
+    `manifest.json` (schema==2) + `pt1-gate.json` (point=="gate"). pt2-5
+    are NOT present on a gate-only bundle (terminated pre-download) — the
+    returned `FInputGate` carries `None` for all of them.
+
+    Validation is DELIBERATELY narrow (it MUST NOT reuse the 22-key
+    schema-1 `_require_keys`): ONLY the always-present key row +
+    `outcome=="hard-block"` + `failure_class is None`. Everything else
+    (model/arch/quant/topology/post-C0) is `.get(k, None)`-tolerated —
+    a gate-only bundle legitimately lacks those (per the CONTRACT-1.1
+    per-abort-stratum table).
+
+    Raises `CaptureBundleError` on a schema mismatch / missing required
+    artifact / wrong `point` / bad `outcome` / non-null `failure_class`.
+    """
+    cdir = Path(capture_dir)
+    if not cdir.is_dir():
+        raise CaptureBundleError(f"capture dir does not exist: {cdir}")
+
+    # ---- manifest (required; schema==2 hard-asserted) ------------------
+    manifest = _load_json(cdir / _MANIFEST_FILENAME)
+    if manifest.get("schema") != GATE_SCHEMA:
+        raise CaptureBundleError(
+            f"gate-bundle manifest schema must be {GATE_SCHEMA}, "
+            f"got {manifest.get('schema')!r}"
+        )
+    # ONLY the always-present row — NOT the 22-key schema-1 validator
+    # (CONTRACT-1.1 hard rule: gate-only legitimately cannot populate the
+    # post-C0 set, so reusing `_require_keys` would wrongly reject it).
+    _require_keys(manifest, _GATE_REQUIRED_KEYS, "gate manifest.json")
+    if manifest.get("outcome") != "hard-block":
+        raise CaptureBundleError(
+            "gate-bundle manifest.outcome must be 'hard-block', "
+            f"got {manifest.get('outcome')!r}"
+        )
+    # The gate emitter NEVER classifies (§6.1 = [F]'s job) — enforce the
+    # invariant exactly as the schema-1 reader does for an [E] bundle.
+    if manifest.get("failure_class") is not None:
+        raise CaptureBundleError(
+            "gate-bundle manifest.failure_class must be null "
+            f"([F] classifies, not the gate emitter); "
+            f"got {manifest['failure_class']!r}"
+        )
+
+    # ---- pt1-gate.json (required; point=="gate", schema==2) -----------
+    pt1 = _load_json(cdir / "pt1-gate.json")
+    if "schema" in pt1 and pt1["schema"] != GATE_SCHEMA:
+        raise CaptureBundleError(
+            f"pt1-gate.json schema must be {GATE_SCHEMA}, "
+            f"got {pt1['schema']!r}"
+        )
+    if pt1.get("point") != "gate":
+        raise CaptureBundleError(
+            f"pt1-gate.json point must be 'gate', got {pt1.get('point')!r}"
+        )
+
+    return FInputGate(
+        manifest=manifest,
+        pt1_gate=pt1,
         raw_bundle_path=(
             Path(raw_bundle_path) if raw_bundle_path is not None else None
         ),

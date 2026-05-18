@@ -1311,6 +1311,151 @@ check("derived-runtime-unsupported:" in _n22
 check(r.download_ok is None and r.boot_ok is None,
       "g22: CONTRACT-5 reject leaves [E] additive fields None (no stage ran)")
 
+_purge_captures()
+
+# ===========================================================================
+# v0.8.2 CONTRACT-1.1 — capture-on-hard-block pass-through (V1).
+#
+# The pt1-gate emitter is wired on the terminal hard-block `return res`
+# paths as a PURE PASS-THROUGH: the decision (ok/stratum/abort_reason) is
+# UNCHANGED; a pt1-gate.json + schema:2 manifest.json bundle is emitted
+# BEFORE the existing return. We inject a mock `gate_capture_fn` to keep
+# this hermetic (real emit_gate_capture is unit-tested in
+# test-pullemit-capture.sh + on-rig V6); here we assert (a) the decision is
+# byte-unchanged vs the SAME run without the hook, and (b) the hook is
+# invoked with the EXACT shipped abort_reason at every enumerated stratum.
+# ===========================================================================
+print("\n--- v0.8.2 CONTRACT-1.1: capture-on-hard-block pass-through ---")
+
+_GATE_CALLS: list = []
+
+
+def _mock_gate_capture(**kw):
+    _GATE_CALLS.append(kw)
+    return {"paths": {"gate": "/tmp/x/pt1-gate.json",
+                      "manifest": "/tmp/x/manifest.json"},
+            "dir": "/tmp/x", "manifest": {"schema": 2}}
+
+
+def _gate_case(name, run_kwargs, *, expect_reason, expect_stratum):
+    # Baseline: the SAME run with NO gate hook (decision reference).
+    base = P.run_pull(**run_kwargs)
+    # With the pass-through hook injected.
+    _GATE_CALLS.clear()
+    hooked = P.run_pull(**run_kwargs, gate_capture_fn=_mock_gate_capture)
+    # (a) the decision is byte-unchanged (pass-through, NOT decision logic).
+    check(base.ok == hooked.ok
+          and base.stratum == hooked.stratum
+          and base.abort_reason == hooked.abort_reason
+          and base.detail == hooked.detail,
+          f"{name}: pass-through is decision-NEUTRAL (ok/stratum/"
+          f"abort_reason/detail byte-identical with vs without the hook)")
+    check(hooked.abort_reason == expect_reason
+          and hooked.stratum is expect_stratum,
+          f"{name}: terminal decision unchanged "
+          f"(stratum={hooked.stratum.name} reason={hooked.abort_reason!r})")
+    # (b) the gate emitter was invoked once with the EXACT shipped
+    #     abort_reason (NOT a semantic alias) at this stratum.
+    check(len(_GATE_CALLS) == 1
+          and _GATE_CALLS[0].get("abort_reason") == expect_reason
+          and _GATE_CALLS[0].get("slug") == run_kwargs["slug"],
+          f"{name}: emit_gate_capture invoked once with the exact shipped "
+          f"abort_reason {expect_reason!r} "
+          f"(got {[c.get('abort_reason') for c in _GATE_CALLS]})")
+    return hooked
+
+
+# C0 — engine-support-unknown/no-arch-row (the §10-R9 solicited lever).
+_s = "fixtures/exotic-dense-gate"
+_exo = dense_cfg("TotallyExoticForCausalLM")
+_gate_case(
+    "gate-C0-no-arch-row",
+    dict(slug=_s, profile_like="vllm/minimal", path="B", hardware_sm=SM_86,
+         fetcher=ff_derived(_s, _exo), profiles=profiles, statvfs=BIG_DISK),
+    expect_reason="engine-support-unknown/no-arch-row",
+    expect_stratum=P.Stratum.C0)
+
+# C2a — disk-short (a user-environment correct-refusal).
+_sd = "fixtures/big-llama-gate"
+_gate_case(
+    "gate-C2a-disk-short",
+    dict(slug=_sd, profile_like="vllm/minimal", path="B", hardware_sm=SM_86,
+         fetcher=ff_derived(_sd, dense_cfg("Qwen2ForCausalLM"),
+                            weight_gb=200.0),
+         profiles=profiles, statvfs=TINY_DISK, trust_remote_code=True),
+    expect_reason="disk-short", expect_stratum=P.Stratum.C2A_DISK)
+
+# Deriver stratum — a pre-deriver terminal (no der.profile -> model/arch
+# /quant null in the bundle). Uses the same fixture shape as g1 (unknown
+# weight format -> unsupported-format).
+_sdr = "fixtures/derr-gate"
+_ffdr = FixtureFetcher({
+    API.format(slug=_sdr): {"siblings": [
+        {"rfilename": "config.json", "size": 700},
+        {"rfilename": "model.bin", "size": 8 * 1024 ** 3}]},
+    CFG.format(slug=_sdr): dense_cfg("LlamaForCausalLM"),
+})
+_dr = P.run_pull(slug=_sdr, profile_like="vllm/minimal", hardware_sm=SM_86,
+                 fetcher=_ffdr, profiles=profiles, statvfs=BIG_DISK,
+                 gate_capture_fn=_mock_gate_capture)
+check(_dr.stratum is P.Stratum.DERIVER and not _dr.ok,
+      f"gate-deriver: terminal decision unchanged "
+      f"(stratum={_dr.stratum.name} reason={_dr.abort_reason!r})")
+
+# REAL end-to-end (no mock): a C0 hard-block writes a genuine schema:2
+# bundle on disk; assert pt1-gate.json + manifest.json exist, schema==2,
+# carry the EXACT abort_reason, outcome=='hard-block', failure_class null,
+# and NO absolute path leaked into either artifact (the V1 RED-LINE).
+_purge_captures()
+_real = P.run_pull(slug=_s, profile_like="vllm/minimal", path="B",
+                   hardware_sm=SM_86, fetcher=ff_derived(_s, _exo),
+                   profiles=profiles, statvfs=BIG_DISK)
+check(_real.abort_reason == "engine-support-unknown/no-arch-row",
+      "gate-real: C0 hard-block decision unchanged (real emitter path)")
+_gdir = _real.diagnostics.get("gate_capture", {}).get("dir")
+check(_gdir and Path(_gdir).is_dir(),
+      f"gate-real: a real .pull-captures/ bundle dir was written "
+      f"(dir={_gdir!r})")
+if _gdir:
+    _gp = Path(_gdir)
+    _g1 = _gp / "pt1-gate.json"
+    _gm = _gp / "manifest.json"
+    check(_g1.is_file() and _gm.is_file(),
+          "gate-real: pt1-gate.json + manifest.json both written "
+          "(NO pt2/3/4/5 — gate-only terminated pre-download)")
+    _names = sorted(x.name for x in _gp.iterdir())
+    check(_names == ["manifest.json", "pt1-gate.json"],
+          f"gate-real: ONLY pt1-gate.json + manifest.json (no pt2-5) "
+          f"(got {_names})")
+    _mj = json.loads(_gm.read_text())
+    _pj = json.loads(_g1.read_text())
+    check(_mj.get("schema") == 2 and _mj.get("outcome") == "hard-block"
+          and _mj.get("failure_class") is None
+          and _mj.get("abort_reason") == "engine-support-unknown/no-arch-row",
+          f"gate-real: manifest schema:2 / outcome:hard-block / "
+          f"failure_class:null / exact abort_reason (got "
+          f"schema={_mj.get('schema')} outcome={_mj.get('outcome')!r})")
+    check(_pj.get("schema") == 2 and _pj.get("point") == "gate"
+          and _pj.get("abort_reason")
+          == "engine-support-unknown/no-arch-row"
+          and _pj.get("is_gate_only") is True,
+          "gate-real: pt1-gate.json schema:2/point:gate carries the raw "
+          "abort_reason (H2 maintainer-distinguishability)")
+    for _art in (_g1, _gm):
+        _blob = _art.read_text()
+        check("/opt/ai" not in _blob and "/home/" not in _blob
+              and "/mnt/" not in _blob,
+              f"gate-real: NO absolute path leaked in {_art.name} "
+              f"(redacted; the V1 RED-LINE)")
+    # `.last` marker written by the SHARED helper (centralization mandate).
+    _last = root / ".pull-captures" / ".last"
+    check(_last.is_file()
+          and _last.read_text().strip() == str(
+              _gp.relative_to(root / ".pull-captures")),
+          "gate-real: the SHARED .last marker points at the gate bundle "
+          "(centralized: gate-only updates .last too — --submit-last works)")
+_purge_captures()
+
 # Purge ALL mocked-[E] capture residue (leave NO repo artifact).
 _purge_captures()
 
@@ -1348,5 +1493,13 @@ _ec(){ bash scripts/pull.sh "$@" >/dev/null 2>&1; echo $?; }
 [ "$(_ec --help)" = 0 ]                                        || { echo "FAIL: --help -> 0 (#370 must not regress help)" >&2; _clifail=1; }
 [ "$(_ec definitely/nonexistent-xyz123 --profile-like vllm/minimal --dry-run)" = 2 ] || { echo "FAIL: honest hard-stop -> 2 (must stay 2, not 64) (#370)" >&2; _clifail=1; }
 [ "$_clifail" = 0 ] && echo "PASS: CLI exit-code contract (#370): usage=64, --help=0, hard-stop=2" || { echo "1+ CLI-contract assertion(s) failed." >&2; exit 1; }
+
+# v0.8.2 CONTRACT-1.1: the real-CLI hard-stop above exercises the genuine
+# pt1-gate capture-on-hard-block pass-through end-to-end (pull.sh ->
+# emit_gate_capture). That writes a real gitignored .pull-captures/ bundle;
+# purge it so the test leaves NO repo residue and the CI condition
+# (gitignored runtime state ABSENT) is restored (same discipline as the
+# in-heredoc _purge_captures for the mocked-[E] residue).
+rm -rf "$ROOT_DIR/.pull-captures"
 
 echo "test-pull.sh OK"

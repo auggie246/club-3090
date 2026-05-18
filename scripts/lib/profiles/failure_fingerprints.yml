@@ -175,3 +175,91 @@ condition_matchers:
       accumulated-ctx ~21-26K OR prefill-cliff ~50-60K DeltaNet GDN).
       Tier-1 fast-path eligible — but Tier-1 is F3; F2 classifies + files
       genuine-oom yet NEVER routes it as a kv-calc bug.
+
+  # =========================================================================
+  # v0.8.2 CONTRACT-1.1 M1 — gate-only (capture-on-hard-block) seed rules.
+  #
+  # Keyed on the VERIFIED shipped `res.abort_reason` sub-token a schema==2
+  # gate bundle carries (the new `gate_abort_reason` matcher kind reads
+  # `pt1_gate.abort_reason`). A gate-only bundle has no pt3/pt4/error text,
+  # so NONE of the [E]-bundle rules above match it (empty error_substring,
+  # no pt4 results) — it falls through to here. Ordered: the ONE solicited
+  # sub-token first, then the conservative catch-alls.
+  #
+  # Class selection is data-only here; the additive matcher kind is the only
+  # code. Only `engine-support-unknown/no-arch-row` -> `kernel-unsupported`
+  # (`should_file=True`) — the genuine §10-R9 lever ("N users hit
+  # unsupported arch X" must aggregate/dedup/volume-rank so maintainers can
+  # add a registry row; feeds CONTRACT-2). Every OTHER listed reason ->
+  # `unknown` (∈ _SUPPRESSED_NEVER_FILED ⇒ review-queued, NOT public-filed —
+  # the maintainer's private triage surface, never public-issue spam). Any
+  # future promotion of a catch-all sub-token is DATA-ONLY (a new rule
+  # here), never code. The raw `abort_reason` survives `_redact_text` into
+  # pt1-gate.json + (via F5) the issue body so a maintainer can distinguish
+  # a registry gap from a genuine kernel bug (the H2 mandate).
+
+  # The ONE §10-R9 lever — C0, arch absent from the registry; a maintainer
+  # can add it (pull.py:575 emits this exact sub-token).
+  - id: gate-engine-support-no-arch-row
+    kind: gate_abort_reason
+    any:
+      - "engine-support-unknown/no-arch-row"
+    class: kernel-unsupported
+    note: >-
+      v0.8.2 CONTRACT-1.1: the genuine §10-R9 lever — C0 unsupported-arch
+      (registry gap a maintainer can flip on). should_file=True so it
+      aggregates/dedups/volume-ranks (feeds CONTRACT-2). The raw
+      abort_reason is carried in the redacted body so a maintainer can tell
+      "add a registry row" from "file an upstream kernel bug" (H2).
+
+  # Conservative catch-alls -> unknown (review-queued, NOT public-filed).
+  # arch known, engine/runtime can't serve it — NOT a registry gap a
+  # maintainer flips on (pull.py:575).
+  - id: gate-engine-support-runtime-incompatible
+    kind: gate_abort_reason
+    any:
+      - "engine-support-unknown/runtime-incompatible"
+    class: unknown
+    note: >-
+      v0.8.2 CONTRACT-1.1: arch known but engine/runtime can't serve it —
+      not a registry-gap a maintainer flips on. unknown -> review-queued,
+      NOT public-filed. Promote later only with evidence (data-only).
+
+  # C2a insufficient disk — user-environment correct-refusal (pull.py:593).
+  - id: gate-disk-short
+    kind: gate_abort_reason
+    any:
+      - "disk-short"
+    class: unknown
+    note: >-
+      v0.8.2 CONTRACT-1.1: insufficient disk — a user-environment
+      correct-refusal, not a stack bug. unknown -> review-queued, NOT
+      public-filed.
+
+  # C1 exact×wont-fit — the genuine kv-calc VRAM refusal (pull.py:649; the
+  # shipped abort_reason is literally `hard-block`; `wont-fit` lives only in
+  # raw_verdict, NEVER as an abort_reason).
+  - id: gate-hard-block-wont-fit
+    kind: gate_abort_reason
+    any:
+      - "hard-block"
+    class: unknown
+    note: >-
+      v0.8.2 CONTRACT-1.1: C1 exact×wont-fit — a user-environment VRAM
+      limit, not an unsupported config a maintainer can enable. §10-R9's
+      bet is the latter; the catch-all is correct today. unknown ->
+      review-queued, NOT public-filed.
+
+  # Remaining conservative catch-alls (pull.py:543/610; deriver/profile-like
+  # sub-tokens are open-ended so matched by id-list as observed). All ->
+  # unknown (review-queued, not public-filed); any promotion is data-only.
+  - id: gate-other-correct-refusals
+    kind: gate_abort_reason
+    any:
+      - "hardware-sm-undetermined"
+      - "no-fit-model"
+    class: unknown
+    note: >-
+      v0.8.2 CONTRACT-1.1: conservative catch-all for the remaining gate
+      strata — only /no-arch-row is solicited. unknown -> review-queued,
+      NOT public-filed. Any promotion is a data-only future, never code.

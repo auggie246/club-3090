@@ -546,6 +546,104 @@ for nm in ("a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9"):
           f"Tier-1 inputs; rest Tier-2)")
 
 # ---------------------------------------------------------------------------
+# v0.8.2 CONTRACT-1.1 M1 — the additive `gate_abort_reason` matcher kind +
+# the conservative seed. A gate-only (schema==2) FInputGate has empty
+# error text + no pt3/pt4, so it falls through every shipped [E]-bundle
+# rule to the new gate rules. Only `engine-support-unknown/no-arch-row` ->
+# `kernel-unsupported` (should_file=True, public-filed — the §10-R9 lever);
+# `runtime-incompatible`/`disk-short`/`hard-block` -> `unknown`
+# (should_file=False + review_queue=True — review-queued, NOT public-filed).
+# ---------------------------------------------------------------------------
+from scripts.lib.profiles.loop_input import read_gate_bundle  # noqa: E402
+
+
+def _gate_fi(nm, abort_reason):
+    d = tmp / nm
+    d.mkdir(parents=True, exist_ok=True)
+    gm = {
+        "schema": 2, "slug": "Org/Gate", "utc_ts": "20260518T000000Z",
+        "club3090_commit": "cafef00d", "outcome": "hard-block",
+        "abort_reason": abort_reason, "failure_class": None,
+        "model": "Org/Gate", "model_id": "Org/Gate",
+        "arch_family": None, "quant_label": None,
+        "topology_class": None, "topology_summary_canonical": None,
+        "selected_ctx": None, "kv_format": None,
+        "smoke_capability_set": None, "engine_pin": None,
+        "engine_version": None, "kv_calc_version": None,
+        "submission_fingerprint": None, "is_gate_only": True,
+        "capture_points": ["gate"],
+    }
+    gp = {
+        "schema": 2, "point": "gate", "slug": "Org/Gate",
+        "confidence": "ESTIMATED_LOWER_BOUND", "raw_verdict": None,
+        "profile_like": "vllm/minimal", "hardware_sm": 8.6,
+        "predicted_b_breakdown": None, "abort_reason": abort_reason,
+        "detail": "x", "is_gate_only": True,
+    }
+    (d / "manifest.json").write_text(json.dumps(gm), encoding="utf-8")
+    (d / "pt1-gate.json").write_text(json.dumps(gp), encoding="utf-8")
+    return read_gate_bundle(d)
+
+
+# /no-arch-row -> kernel-unsupported, PUBLIC-FILED (should_file=True).
+rg = classify(_gate_fi("g-narr", "engine-support-unknown/no-arch-row"))
+check(rg.failure_class is FailureClass.KERNEL_UNSUPPORTED,
+      f"M1: engine-support-unknown/no-arch-row -> kernel-unsupported "
+      f"(the §10-R9 lever) (got {rg.failure_class.value})")
+check(rg.should_file is True and rg.review_queue is False,
+      "M1: /no-arch-row is PUBLIC-FILED (should_file=True, NOT "
+      "review-queued) — it must aggregate/dedup/volume-rank")
+check(rg.matched_rule == "gate-engine-support-no-arch-row",
+      f"M1: matched the additive gate_abort_reason rule (got "
+      f"{rg.matched_rule!r})")
+check(rg.route_as_kv_calc_bug is False,
+      "M1: a gate-only bundle is NEVER a kv-calc bug (Tier-1 is F3; no "
+      "OOM signature on a gate bundle)")
+
+# runtime-incompatible / disk-short / hard-block -> unknown, REVIEW-QUEUED
+# (NOT public-filed) — deliberately suppressed (correct-refusal class).
+for _ar in ("engine-support-unknown/runtime-incompatible",
+            "disk-short", "hard-block"):
+    rq = classify(_gate_fi(f"g-{_ar.replace('/', '-')}", _ar))
+    check(rq.failure_class is FailureClass.UNKNOWN,
+          f"M1: {_ar} -> unknown (conservative catch-all) "
+          f"(got {rq.failure_class.value})")
+    check(rq.should_file is False and rq.review_queue is True,
+          f"M1: {_ar} is REVIEW-QUEUED, NOT public-filed "
+          f"(unknown ∈ _SUPPRESSED_NEVER_FILED; should_file=False, "
+          f"review_queue=True — never silently dropped)")
+
+# The raw abort_reason SURVIVES redaction into pt1-gate (H2 maintainer-
+# distinguishability: a /no-arch-row vs a kernel bug must be tellable).
+_h2 = _gate_fi("g-h2", "engine-support-unknown/no-arch-row")
+check(_h2.pt1_gate.get("abort_reason")
+      == "engine-support-unknown/no-arch-row"
+      and _h2.abort_reason == "engine-support-unknown/no-arch-row",
+      "M1/H2: the raw abort_reason survives into pt1_gate (a maintainer "
+      "can distinguish 'add a registry row' from 'file a kernel bug')")
+
+# §6.1-NEUTRALITY: the additive kind does NOT perturb the shipped
+# schema==1 path. The SAME [E] bundle classifies byte-identically + a
+# schema==1 FInput has NO pt1_gate.abort_reason so the gate rules are
+# inert for it (they only fire on a gate-only bundle).
+_s1 = fi("neutral-s1", pt3=boot_fail(
+    failure="torch.cuda.OutOfMemoryError: CUDA out of memory"))
+_r1a = classify(_s1)
+_r1b = classify(fi("neutral-s1b", pt3=boot_fail(
+    failure="torch.cuda.OutOfMemoryError: CUDA out of memory")))
+check(_r1a.failure_class is FailureClass.GENUINE_OOM
+      and _r1a.failure_class == _r1b.failure_class
+      and _r1a.matched_rule == _r1b.matched_rule
+      and _r1a.tier == _r1b.tier,
+      "V1: schema==1 classification is byte-identical post-protocol-lift "
+      "+ the additive gate_abort_reason kind is inert for [E] bundles "
+      "(no pt1_gate.abort_reason -> the gate rules never fire)")
+from scripts.lib.profiles.loop_input import BaseCaptureBundle  # noqa: E402
+check(isinstance(_s1, BaseCaptureBundle),
+      "V1: the schema==1 FInput classify() consumed satisfies "
+      "BaseCaptureBundle (the retype is a pure static change)")
+
+# ---------------------------------------------------------------------------
 # REAL on-disk .pull-captures/ bundle (a success/`partial`): classify
 # returns a valid enum and does NOT misclassify as a fileable failure.
 # ---------------------------------------------------------------------------

@@ -40,6 +40,12 @@ from typing import Any, Optional
 from .downloader import sanitize_slug
 
 SCHEMA = 1
+# v0.8.2 CONTRACT-1.1 — the gate-only (capture-on-hard-block) bundle schema.
+# A DISTINCT schema version so F1's strict schema==1 reader is byte-
+# unchanged; the gate-only bundle is consumed by a SEPARATE
+# `read_gate_bundle()` (schema==2) that validates only the always-present
+# key row (NOT the 22-key schema-1 validator).
+GATE_SCHEMA = 2
 
 # ---------------------------------------------------------------------------
 # CONTRACT-4 capability-smoke set for DERIVED models.
@@ -524,6 +530,47 @@ def _write_redacted_json(path: Path, obj: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# v0.8.2 CONTRACT-1.3 — the shared `.last`-marker write helper.
+#
+# `scripts/pull.sh --submit-last` (CONTRACT-1.3, V2) resolves "the most-recent
+# capture" from a single marker file `.pull-captures/.last` (one line: the
+# bundle dir RELATIVE to `.pull-captures/`). Centralization is MANDATORY
+# (design rule): `emit_capture()` (`[E]` path) and the new
+# `emit_gate_capture()` (the commonest — pre-download — failure) are SEPARATE
+# functions on SEPARATE terminal paths. If `.last` were written only by
+# `emit_capture()`, gate-only captures (exactly the §10-R9 volume the on-ramp
+# exists to harvest) would never update `.last` and `--submit-last` would
+# silently miss them. So BOTH emitters call this ONE helper.
+#
+# Atomic (`tmp` + `os.replace`) so a racing reader never sees a torn marker;
+# last-writer-wins by design (a serial user workflow — V2's submit re-reads
+# + re-shows the resolved bundle identity before the consent prompt). NEVER
+# raises — a marker-write failure must not break a capture (CONTRACT-1: the
+# gate path stays I/O-light + never blocks).
+# ---------------------------------------------------------------------------
+def write_last_marker(repo_root: Path, bundle_dir: Path) -> None:
+    """Atomically record `bundle_dir` (made relative to `.pull-captures/`)
+    as the most-recent capture for `--submit-last`. Shared by BOTH
+    `emit_capture()` and `emit_gate_capture()`. Never raises.
+    """
+    try:
+        pull_captures = Path(repo_root) / ".pull-captures"
+        pull_captures.mkdir(parents=True, exist_ok=True)
+        try:
+            rel = str(Path(bundle_dir).relative_to(pull_captures))
+        except ValueError:
+            # Defensive: a bundle dir outside .pull-captures/ (should not
+            # happen — both emitters write under it) — store as given.
+            rel = str(bundle_dir)
+        marker = pull_captures / ".last"
+        tmp = pull_captures / ".last.tmp"
+        tmp.write_text(rel + "\n", encoding="utf-8")
+        os.replace(tmp, marker)
+    except Exception:  # pragma: no cover - marker write is best-effort.
+        pass
+
+
+# ---------------------------------------------------------------------------
 # §6.2 submission_fingerprint + manifest helpers.
 # ---------------------------------------------------------------------------
 def _fingerprint(parts: list[str]) -> str:
@@ -793,6 +840,15 @@ def emit_capture(
     _write_redacted_json(Path(paths["smoke"]), pt4)
     _write_redacted_json(Path(paths["manifest"]), manifest)
 
+    # v0.8.2 CONTRACT-1.3 — the SHARED `.last` marker (centralized: invoked
+    # from BOTH `emit_capture()` here AND `emit_gate_capture()` below; never
+    # raises). This is purely additive: it writes ONE extra marker file and
+    # changes NONE of the pt1-4 / manifest artifacts — `test-pullemit-
+    # capture.sh`'s "emit_capture() writes ONLY pt1-4 + manifest" assertion
+    # is unaffected (`.last` lives at `.pull-captures/.last`, NOT inside the
+    # `<slug>/<ts>/` bundle dir it enumerates).
+    write_last_marker(Path(repo_root), out_dir)
+
     return {"paths": paths, "dir": str(out_dir), "manifest": manifest}
 
 
@@ -905,3 +961,192 @@ def _predicted_total_mib(breakdown) -> Optional[int]:
     if not saw:
         return None
     return int(round(total_gb * 1024.0))
+
+
+# ---------------------------------------------------------------------------
+# v0.8.2 CONTRACT-1.1 — capture-on-hard-block: the pt1-gate-only emitter.
+#
+# A SEPARATE, ADDITIVE function — the byte-preserving `emit_override_capture`
+# precedent (a separate fn NOT invoked by `emit_capture()`; same
+# `.pull-captures/<slug>/<ts>/` dir + the SAME `_redact_text` redaction).
+# `emit_capture()`'s pt1-4 + manifest emitters are byte-behaviour-unchanged
+# (`test-pullemit-capture.sh` still asserts `emit_capture()` writes ONLY
+# pt1-4 + manifest). `pull.py` wires this on its terminal hard-block
+# `return res` paths as a pure PASS-THROUGH capture — it emits a bundle
+# BEFORE the existing return; the `return res` decision is UNCHANGED (zero
+# §1-§6/§4.1/§5.x decision-logic change).
+#
+# Schema-2 bundle: a `pt1-gate.json` + `manifest.json` with `schema:2`,
+# `outcome:"hard-block"`, the EXACT shipped `res.abort_reason` (NOT a
+# semantic alias), `failure_class:null`. The manifest carries the
+# per-abort-stratum key subset (the CONTRACT-1.1 enumerated table): the
+# always-present row is guaranteed; model/arch/quant are `null` pre-deriver;
+# topology is best-effort/nullable at every gate stratum (resolved here
+# capture-only, mirroring `pull.py:853-855`, `null` when unavailable —
+# GUARANTEED `null` for `hardware-sm-undetermined`); the post-C0 fields are
+# always `null` (a gate-only bundle never reached them).
+#
+# F1's `read_gate_bundle()` (schema==2) consumes this; it validates ONLY the
+# always-present row + `outcome=="hard-block"` + `failure_class is None` (it
+# does NOT reuse the 22-key schema-1 validator). The raw `abort_reason` is
+# carried through redaction into the bundle so a maintainer can distinguish
+# a registry gap from a kernel bug (the H2 distinguishability mandate).
+# ---------------------------------------------------------------------------
+def _gate_topology_best_effort(
+    gpu_topology: Optional[tuple],
+) -> tuple[Optional[str], Optional[str]]:
+    """Capture-only best-effort `(topology_class, topology_summary_canonical)`
+    for a gate-only bundle. Mirrors `pull.py:853-855`: prefer an injected
+    `gpu_topology` (the `--hardware-gpus` override) else `detect_gpu_topology`
+    (needs nvidia-smi). Returns `(None, None)` when neither is available —
+    NOT a `pull.py` decision-logic change (capture-only). Never raises.
+    """
+    topo = gpu_topology
+    if topo is None:
+        try:  # late import — avoids a capture.py -> pull.py import cycle.
+            from scripts.lib.profiles.pull import (  # noqa: E402
+                detect_gpu_topology,
+            )
+
+            topo = detect_gpu_topology()
+        except Exception:  # pragma: no cover - defensive
+            topo = None
+    if not topo:
+        return None, None
+    try:
+        _count, vram_mib, names = topo
+        if not vram_mib:
+            return None, None
+        n = len(vram_mib)
+        vram = min(int(v) for v in vram_mib)
+        topo_class = f"{n}x{vram}MiB"
+        tuples = sorted(
+            (str(nm), int(v)) for nm, v in zip(names, vram_mib)
+        )
+        topo_summary = "[" + ", ".join(
+            f"({nm}, {v})" for nm, v in tuples
+        ) + "]"
+        return topo_class, topo_summary
+    except Exception:  # pragma: no cover - defensive
+        return None, None
+
+
+def emit_gate_capture(
+    *,
+    slug: str,
+    profile_like: str,
+    abort_reason: str,
+    confidence,
+    raw_verdict: Optional[str],
+    detail: str,
+    der=None,
+    hardware_sm=None,
+    gpu_topology: Optional[tuple] = None,
+    club3090_commit: str = "unknown",
+    kv_calc_version: Optional[str] = None,
+    predicted_b_breakdown=None,
+    repo_root: Path,
+    ts: Optional[str] = None,
+) -> dict:
+    """v0.8.2 CONTRACT-1.1 — write the pt1-gate-only redacted bundle on a
+    terminal hard-block. Writes `pt1-gate.json` + `manifest.json`
+    (`schema:2`, `outcome:"hard-block"`, the EXACT shipped `abort_reason`,
+    `failure_class:null`) under `<repo>/.pull-captures/<slug>/<ts>/`, then
+    updates the SHARED `.last` marker. Returns
+    `{paths:{gate,manifest}, dir:str, manifest:{...}}`. Never classifies
+    (§6.1 = `[F]`'s job) — `failure_class` is authoritatively `null`.
+
+    A SEPARATE function (NOT invoked by `emit_capture()`), cloning the
+    `emit_override_capture` byte-preserving precedent: same capture dir +
+    the SAME `_redact_text` redaction. Best-effort topology resolve is
+    capture-only (mirrors `pull.py:853-855`); `null` when unavailable —
+    GUARANTEED `null` for `hardware-sm-undetermined` (nvidia-smi absent).
+    """
+    san = sanitize_slug(slug)
+    stamp = ts or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = Path(repo_root) / ".pull-captures" / san / stamp
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Best-effort model/arch/quant: `null` pre-deriver (a deriver-error /
+    # profile-like / repo-not-found terminal has no `der.profile`). We read
+    # the SAME shipped accessors `emit_capture()` uses (`_arch_family` /
+    # `_quant_label`); both already tolerate a missing profile -> None.
+    arch_family = _arch_family(der) if der is not None else None
+    quant_label = _quant_label(der) if der is not None else None
+
+    # Topology is NOT guaranteed at any gate stratum (CONTRACT-1.1):
+    # capture-only best-effort resolve, `null` when unavailable.
+    topology_class, topology_summary_canonical = _gate_topology_best_effort(
+        gpu_topology
+    )
+
+    # ---- pt1-gate.json (gate-only): the pre-download verdict snapshot ----
+    pt1 = {
+        "schema": GATE_SCHEMA,
+        "point": "gate",
+        "slug": slug,
+        "confidence": (
+            str(getattr(confidence, "name", confidence))
+            if confidence is not None
+            else None
+        ),
+        "raw_verdict": raw_verdict,
+        "profile_like": profile_like,
+        "hardware_sm": hardware_sm,
+        "predicted_b_breakdown": predicted_b_breakdown,
+        # The EXACT shipped abort sub-token (NOT a semantic alias) — the
+        # §6.1 `gate_abort_reason` matcher keys on THIS. Carried through
+        # `_redact_text` so a maintainer can distinguish a registry gap
+        # from a kernel bug (the H2 distinguishability mandate).
+        "abort_reason": abort_reason,
+        "detail": detail,
+        "is_gate_only": True,
+    }
+
+    # ---- manifest.json schema:2 — per-abort-stratum key subset ----------
+    # ALWAYS-present row (guaranteed at every stratum). model/arch/quant are
+    # `null` pre-deriver. topology is best-effort/nullable. The post-C0
+    # fields are ALWAYS `null` (a gate-only bundle never reached them).
+    manifest = {
+        "schema": GATE_SCHEMA,
+        "slug": slug,
+        "utc_ts": stamp,
+        "club3090_commit": club3090_commit,
+        "outcome": "hard-block",
+        "abort_reason": abort_reason,
+        "failure_class": None,
+        # null if pre-deriver (profile-like / repo-not-found may have none).
+        "model": slug,
+        "model_id": slug,
+        "arch_family": arch_family,
+        "quant_label": quant_label,
+        # best-effort / nullable at every gate stratum (guaranteed null for
+        # hardware-sm-undetermined).
+        "topology_class": topology_class,
+        "topology_summary_canonical": topology_summary_canonical,
+        # post-C0 — NEVER reached on a gate-only bundle -> always null.
+        "selected_ctx": None,
+        "kv_format": None,
+        "smoke_capability_set": None,
+        "engine_pin": None,
+        "engine_version": None,
+        "kv_calc_version": kv_calc_version,
+        "submission_fingerprint": None,
+        # gate-only marker so F1 / F2 can branch without re-parsing.
+        "is_gate_only": True,
+        "capture_points": ["gate"],
+    }
+
+    paths = {
+        "gate": str(out_dir / "pt1-gate.json"),
+        "manifest": str(out_dir / "manifest.json"),
+    }
+    _write_redacted_json(Path(paths["gate"]), pt1)
+    _write_redacted_json(Path(paths["manifest"]), manifest)
+
+    # SHARED `.last` marker — the SAME helper `emit_capture()` calls (the
+    # CONTRACT-1.1 centralization mandate: gate-only is the commonest
+    # failure; if `.last` were `[E]`-only, `--submit-last` would miss it).
+    write_last_marker(Path(repo_root), out_dir)
+
+    return {"paths": paths, "dir": str(out_dir), "manifest": manifest}

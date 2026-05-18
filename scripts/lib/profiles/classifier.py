@@ -66,7 +66,12 @@ except ModuleNotFoundError as exc:  # pragma: no cover - env guard
         "python3-yaml or pip install pyyaml"
     ) from exc
 
-from scripts.lib.profiles.loop_input import FInput
+# v0.8.2 CONTRACT-1.1 — F2 is retyped to the `BaseCaptureBundle` Protocol so
+# a schema==1 `FInput` AND a schema==2 `FInputGate` both satisfy the consumer
+# surface by structural subtyping (pure static retype — verified: there is no
+# `isinstance(finput, FInput)` anywhere in this module, only annotations, so
+# the schema==1 path is byte-identical incl. dedup-hash).
+from scripts.lib.profiles.loop_input import BaseCaptureBundle
 
 # The seed DB ships next to this module (RED-LINE F2 file).
 _DEFAULT_DB = Path(__file__).with_name("failure_fingerprints.yml")
@@ -183,7 +188,7 @@ def _norm_error_substring(text: str) -> str:
     return collapsed.lower()[:_ERROR_SUBSTRING_CAP]
 
 
-def _extract_error_substring(finput: FInput) -> str:
+def _extract_error_substring(finput: BaseCaptureBundle) -> str:
     """CONTRACT-2 source precedence (works on TODAY's shipped [E] schema;
     forward-compatible with F3's additive fields, never requires them):
 
@@ -255,7 +260,7 @@ def _load_db(db_path: Path) -> dict:
     return data
 
 
-def _pt3_timeout_but_pt4_green(finput: FInput) -> bool:
+def _pt3_timeout_but_pt4_green(finput: BaseCaptureBundle) -> bool:
     """Appendix A row 7: pt3 boot timed-out/not-ready BUT pt4 smoked green
     (server became *healthy* after a slow first request) -> benign cold
     start.
@@ -278,7 +283,7 @@ def _pt3_timeout_but_pt4_green(finput: FInput) -> bool:
     return any(v == "green" for v in results.values())
 
 
-def _results_detail_http_404(finput: FInput) -> bool:
+def _results_detail_http_404(finput: BaseCaptureBundle) -> bool:
     """Appendix A row 8: historical negative control — [E] bug #1
     served-model-name 404 in pt4.results_detail (HTTP 404 status).
     """
@@ -289,7 +294,7 @@ def _results_detail_http_404(finput: FInput) -> bool:
     return False
 
 
-def _match_condition(rule: dict, finput: FInput,
+def _match_condition(rule: dict, finput: BaseCaptureBundle,
                      error_substring: str) -> bool:
     """Evaluate ONE Appendix-A condition matcher. FIRST match wins
     (caller iterates in YAML order). Unknown `kind` -> no match (a future
@@ -330,6 +335,27 @@ def _match_condition(rule: dict, finput: FInput,
         return bool(subs) and all(
             str(s).lower() in error_substring for s in subs
         )
+
+    # v0.8.2 CONTRACT-1.1 M1 — the ADDITIVE `gate_abort_reason` matcher kind.
+    #
+    # A new INPUT PREDICATE (exactly analogous to adding a column to a
+    # lookup): it reads the EXACT shipped `pt1_gate.abort_reason` sub-token a
+    # capture-on-hard-block bundle carries and matches it against a value
+    # list — returning bool exactly like the sibling kinds. It is §6.1-
+    # NEUTRAL by construction: `_match_condition` -> bool, the class is
+    # assigned downstream via `_coerce_class` (the 6-member clamp). It does
+    # NOT touch the `FailureClass` enum, `_SUPPRESSED_NEVER_FILED`,
+    # `_coerce_class`, or any routing — an implementation-contract addition,
+    # NOT a §6.1 design-unlock. A schema==1 [E] bundle has no
+    # `pt1_gate.abort_reason` -> `.get` is None -> no match -> the shipped
+    # schema==1 classification path is byte-identical (this kind appears in
+    # NO shipped seed rule; only the new gate-only rules use it).
+    if kind == "gate_abort_reason":
+        pt1 = finput.pt1_gate or {}
+        ar = pt1.get("abort_reason")
+        if not ar:
+            return False
+        return any(str(ar) == str(v) for v in (rule.get("any") or []))
 
     return False
 
@@ -421,7 +447,7 @@ def _predicted_total_mib(breakdown) -> Optional[int]:
     return int(round(total_gb * 1024.0))
 
 
-def _resolve_tier1_inputs(finput: FInput) -> dict:
+def _resolve_tier1_inputs(finput: BaseCaptureBundle) -> dict:
     """Resolve the THREE Tier-1 inputs by the A-iii precedence
     (pt5 > pt3-triple). Returns a dict ALWAYS carrying the keys
     `predicted_b_breakdown`, `attempted_alloc_mib`,
@@ -475,7 +501,7 @@ def _resolve_tier1_inputs(finput: FInput) -> dict:
 
 
 def _tier1_oom_fastpath(
-    finput: FInput, error_substring: str
+    finput: BaseCaptureBundle, error_substring: str
 ) -> Optional[ClassificationResult]:
     """The §6.1 Tier-1 fast-path. Returns a `ClassificationResult` IFF the
     definitive OOM signature is present (always `genuine-oom`); else `None`
@@ -582,7 +608,7 @@ def _coerce_class(value) -> FailureClass:
 # Public API.
 # ---------------------------------------------------------------------------
 def classify(
-    finput: FInput,
+    finput: BaseCaptureBundle,
     *,
     fingerprint_db_path: Optional[Path] = None,
 ) -> ClassificationResult:

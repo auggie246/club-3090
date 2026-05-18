@@ -495,6 +495,119 @@ check("kv-calc-bug" not in joined and "calibration bug" not in joined,
       "F5's filed issue is NOT a kv-calc-bug filing (boundary held)")
 
 # ===========================================================================
+# 4b. v0.8.2 CONTRACT-1.1 — F5 protocol lift (V1 RED-LINE).
+#
+#  * a real schema==1 bundle -> identical effective_dedup_hash /
+#    effective_dedup_tuple PRE/POST the protocol retype (byte-identity);
+#  * the FENCED `dedup.py` `FInput.dedup_hash(_EffProxy())` unbound-class
+#    idiom STILL produces F1's byte-exact serialization (NOT "tidied");
+#  * a schema==2 gate-only FInputGate flows through F5 via the protocol
+#    (effective hash deterministic + STABLE with null topology —
+#    CONTRACT-1.1; review-queued, NOT public-filed for `unknown`).
+# ===========================================================================
+from scripts.lib.profiles.loop_input import (  # noqa: E402
+    BaseCaptureBundle,
+    read_gate_bundle,
+)
+
+# (a) schema==1 byte-identity: the effective tuple/hash are a pure function
+#     of F1's normalized tuple + the classifier class — pinned so a
+#     protocol-lift regression fails LOUDLY.
+_fi_id = read_capture_bundle(write_bundle(tmp / "id-s1"))
+_cl_id = oom_classification(_fi_id)
+_et1 = D.effective_dedup_tuple(_fi_id, _cl_id)
+_eh1 = D.effective_dedup_hash(_fi_id, _cl_id)
+_et2 = D.effective_dedup_tuple(read_capture_bundle(tmp / "id-s1"), _cl_id)
+_eh2 = D.effective_dedup_hash(read_capture_bundle(tmp / "id-s1"), _cl_id)
+import hashlib as _hl2  # noqa: E402
+_exp_et = list(_fi_id.dedup_tuple())
+_exp_et[5] = "genuine-oom"
+_exp_eh = _hl2.sha256("\x1f".join(str(p) for p in _exp_et)
+                      .encode("utf-8")).hexdigest()[:12]
+check(_et1 == _et2 == tuple(_exp_et) and _eh1 == _eh2 == _exp_eh,
+      f"V1 RED-LINE: schema==1 effective_dedup_tuple/hash byte-identical "
+      f"+ pinned ({_exp_eh}) — the protocol lift is a pure static retype")
+check(isinstance(_fi_id, BaseCaptureBundle),
+      "V1: the schema==1 FInput F5 consumes satisfies BaseCaptureBundle")
+
+# (b) the FENCED unbound-class idiom: effective_dedup_hash MUST equal F1's
+#     OWN dedup_hash() of the substituted tuple (proves dedup.py:~277
+#     still reuses FInput.dedup_hash unbound, NOT finput.dedup_hash() which
+#     would hash the unsubstituted fc=None tuple).
+class _Probe:
+    def dedup_tuple(self):
+        return _et1
+
+
+from scripts.lib.profiles.loop_input import FInput as _FI  # noqa: E402
+check(D.effective_dedup_hash(_fi_id, _cl_id)
+      == _FI.dedup_hash(_Probe()),  # type: ignore[arg-type]
+      "V1 RED-LINE: effective_dedup_hash reuses F1's UNBOUND dedup_hash on "
+      "the SUBSTITUTED tuple (the dedup.py fence holds — NOT tidied to "
+      "finput.dedup_hash() which would hash the fc=None tuple)")
+# Negative control: hashing the UN-substituted tuple (fc=None) differs —
+# the exact silent-corruption the fence prevents.
+check(D.effective_dedup_hash(_fi_id, _cl_id) != _fi_id.dedup_hash(),
+      "V1 RED-LINE: the substituted hash != F1's fc=None hash (a 'tidy' "
+      "to finput.dedup_hash() WOULD silently corrupt + defeat the §6.1 "
+      "mislabel safeguard — proven divergent)")
+
+# (c) a schema==2 gate-only FInputGate flows through F5 via the protocol.
+_gd = tmp / "f5-gate"
+_gd.mkdir(parents=True, exist_ok=True)
+_gman = {
+    "schema": 2, "slug": "Org/Gate", "utc_ts": "20260518T000000Z",
+    "club3090_commit": "cafef00d", "outcome": "hard-block",
+    "abort_reason": "engine-support-unknown/no-arch-row",
+    "failure_class": None, "model": "Org/Gate", "model_id": "Org/Gate",
+    "arch_family": None, "quant_label": None, "topology_class": None,
+    "topology_summary_canonical": None, "selected_ctx": None,
+    "kv_format": None, "smoke_capability_set": None, "engine_pin": None,
+    "engine_version": None, "kv_calc_version": None,
+    "submission_fingerprint": None, "is_gate_only": True,
+    "capture_points": ["gate"],
+}
+_gp = {
+    "schema": 2, "point": "gate", "slug": "Org/Gate",
+    "confidence": "ESTIMATED_LOWER_BOUND", "raw_verdict": None,
+    "profile_like": "vllm/minimal", "hardware_sm": 8.6,
+    "predicted_b_breakdown": None,
+    "abort_reason": "engine-support-unknown/no-arch-row",
+    "detail": "x", "is_gate_only": True,
+}
+(_gd / "manifest.json").write_text(json.dumps(_gman), encoding="utf-8")
+(_gd / "pt1-gate.json").write_text(json.dumps(_gp), encoding="utf-8")
+_fg = read_gate_bundle(_gd)
+_clg = classify(_fg)  # /no-arch-row -> kernel-unsupported, should_file
+check(_clg.failure_class is FailureClass.KERNEL_UNSUPPORTED
+      and _clg.should_file is True,
+      "V1: gate-only /no-arch-row classifies kernel-unsupported "
+      "(public-filed) through the protocol")
+_egh1 = D.effective_dedup_hash(_fg, _clg)
+_egh2 = D.effective_dedup_hash(read_gate_bundle(_gd), _clg)
+check(re.fullmatch(r"[0-9a-f]{12}", _egh1) is not None
+      and _egh1 == _egh2,
+      f"V1: gate-only effective_dedup_hash is 12-hex + DETERMINISTIC with "
+      f"NULL topology (str(None)=='None' — the L3 fold; got {_egh1})")
+# unknown gate bundle -> REVIEW-QUEUED (no public issue, but a spool).
+(_gd2 := tmp / "f5-gate-rq").mkdir(parents=True, exist_ok=True)
+_g2m = dict(_gman); _g2m["abort_reason"] = "disk-short"
+_g2p = dict(_gp); _g2p["abort_reason"] = "disk-short"
+(_gd2 / "manifest.json").write_text(json.dumps(_g2m), encoding="utf-8")
+(_gd2 / "pt1-gate.json").write_text(json.dumps(_g2p), encoding="utf-8")
+_fg2 = read_gate_bundle(_gd2)
+_clg2 = classify(_fg2)
+_rq_gh = MockGh()
+_rq = D.submit(_fg2, _clg2, repo_root=repo_root, gh_runner=_rq_gh)
+check(_clg2.failure_class is FailureClass.UNKNOWN
+      and _rq.action is D.DedupAction.REVIEW_QUEUED
+      and _rq.spool_path is not None
+      and _rq_gh.calls == [],
+      f"V1: gate-only disk-short -> unknown -> REVIEW-QUEUED spool "
+      f"(NOT a public issue; ZERO gh I/O — filing-policy returns before "
+      f"any gh call) (action={_rq.action})")
+
+# ===========================================================================
 # 5. REAL on-disk capture(s) under .pull-captures/ (>=2 exist).
 #    Build FInput + classify + dedup with a mock gh returning "no existing
 #    issue" -> opens exactly one issue with a valid bounded label set + a

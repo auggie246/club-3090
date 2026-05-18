@@ -424,6 +424,75 @@ def _topology_summary_canonical(names: list[str], vram_mib: list[int]) -> str:
 
 
 # ===========================================================================
+# v0.8.2 CONTRACT-1.1 — capture-on-hard-block PASS-THROUGH.
+#
+# Emits a pt1-gate-only redacted bundle on a terminal hard-block, BEFORE the
+# existing `return res`. This is a PURE PASS-THROUGH: it changes NONE of the
+# `[C1]`/6-stratum decision logic — every `return res` decision (ok / stratum
+# / abort_reason / detail) is exactly what it was; we only emit a bundle (a
+# local file op, no network) and record the bundle dir on `res`. ANY emit
+# failure is swallowed structurally — a capture problem must NEVER change a
+# gate decision or raise out of `run_pull` (the locked `[F]`-offline / I/O-
+# free-gate boundary; pre-existing test-pull.sh assertions byte-unaffected).
+#
+# `res.capture_paths` (an existing additive PullResult field) is appended so
+# the surface step (V2) + tests can find the bundle; nothing else on `res`
+# is touched.
+# ===========================================================================
+def _gate_capture_passthrough(
+    res, *, slug, profile_like, der, hardware_sm, gpu_topology, root,
+    gate_capture_fn,
+):
+    """Emit the pt1-gate-only bundle for a terminal hard-block, then return
+    `res` UNCHANGED (pass-through). Swallows every exception — a capture
+    failure never alters a gate decision."""
+    try:
+        from scripts.lib.profiles import capture as _CAP
+
+        fn = gate_capture_fn or _CAP.emit_gate_capture
+
+        # club3090 commit captured on the HOST (mirrors _build_einput; never
+        # git-in-container) — best-effort, "unknown" on any failure.
+        commit = "unknown"
+        try:
+            import subprocess
+
+            cp = subprocess.run(
+                ["git", "-C", str(root or REPO_ROOT), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if cp.returncode == 0 and cp.stdout.strip():
+                commit = cp.stdout.strip()
+        except Exception:  # pragma: no cover - git always present on rig
+            commit = "unknown"
+
+        out = fn(
+            slug=slug,
+            profile_like=profile_like,
+            abort_reason=res.abort_reason or "",
+            confidence=(
+                SimpleNamespace(name=res.confidence)
+                if res.confidence else None
+            ),
+            raw_verdict=res.raw_verdict,
+            detail=res.detail,
+            der=der,
+            hardware_sm=hardware_sm,
+            gpu_topology=gpu_topology,
+            club3090_commit=commit,
+            predicted_b_breakdown=res.diagnostics.get("b_breakdown"),
+            repo_root=root or REPO_ROOT,
+        )
+        d = out.get("dir") if isinstance(out, dict) else None
+        if d:
+            res.capture_paths.append(str(d))
+            res.diagnostics["gate_capture"] = {"dir": str(d)}
+    except Exception as exc:  # pragma: no cover - capture is best-effort
+        res.diagnostics["gate_capture"] = {"error": repr(exc)}
+    return res
+
+
+# ===========================================================================
 # The orchestrator — chains the frozen slices in the LOCKED stratum order.
 # ===========================================================================
 def run_pull(
@@ -462,6 +531,12 @@ def run_pull(
     smoke_fn: Optional[Callable] = None,        # E3 smoke_derived
     capture_fn: Optional[Callable] = None,      # E3 emit_capture
     override_capture_fn: Optional[Callable] = None,  # E4 emit_override_capture
+    # v0.8.2 CONTRACT-1.1 — the pt1-gate-only emitter, wired as a pure
+    # PASS-THROUGH on the terminal hard-block return paths (it emits a
+    # bundle BEFORE the existing `return res`; the decision is UNCHANGED).
+    # Injectable so test-pull.sh stays mock-only; None -> the real shipped
+    # capture.emit_gate_capture.
+    gate_capture_fn: Optional[Callable] = None,
 ) -> PullResult:
     """Execute the 6-stratum Pull-Gate state machine.
 
@@ -499,10 +574,17 @@ def run_pull(
         slug, hf_home=hf_home, fetcher=fetcher, profiles=profiles
     )
     if der.error is not None:
-        return PullResult(
+        _der_res = PullResult(
             slug=slug, profile_like=profile_like, path="?",
             ok=False, stratum=Stratum.DERIVER,
             abort_reason=der.error.kind.value, detail=str(der.error),
+        )
+        # v0.8.2 CONTRACT-1.1 pass-through (pre-deriver: no der.profile ->
+        # model/arch/quant null). Decision UNCHANGED.
+        return _gate_capture_passthrough(
+            _der_res, slug=slug, profile_like=profile_like, der=None,
+            hardware_sm=hardware_sm, gpu_topology=gpu_topology, root=root,
+            gate_capture_fn=gate_capture_fn,
         )
 
     is_curated = der.tier1 is not None
@@ -530,7 +612,11 @@ def run_pull(
         res.stratum = Stratum.PROFILE_LIKE
         res.abort_reason = s2.refusal.reason
         res.detail = s2.refusal.detail
-        return res
+        return _gate_capture_passthrough(
+            res, slug=slug, profile_like=profile_like, der=der,
+            hardware_sm=hardware_sm, gpu_topology=gpu_topology, root=root,
+            gate_capture_fn=gate_capture_fn,
+        )
 
     # ----- stratum-3: [C0] engine-support / runtime / SM (P3, frozen) -----
     if hardware_sm is None:
@@ -546,7 +632,14 @@ def run_pull(
             "and no --hardware override given; refusing to run the SM gate "
             "blind"
         )
-        return res
+        # topology GUARANTEED null here (nvidia-smi absent — CONTRACT-1.1):
+        # pass gpu_topology=None so the bundle's topology is null even if
+        # an unrelated override was supplied.
+        return _gate_capture_passthrough(
+            res, slug=slug, profile_like=profile_like, der=der,
+            hardware_sm=None, gpu_topology=None, root=root,
+            gate_capture_fn=gate_capture_fn,
+        )
 
     c0 = G.c0_engine_support(
         profile_like, der, path=eff_path, hardware_sm=float(hardware_sm),
@@ -577,7 +670,11 @@ def run_pull(
             )
             res.detail = c0.detail
             res.diagnostics["c0_bypassable_by"] = list(c0.bypassable_by)
-            return res
+            return _gate_capture_passthrough(
+                res, slug=slug, profile_like=profile_like, der=der,
+                hardware_sm=hardware_sm, gpu_topology=gpu_topology,
+                root=root, gate_capture_fn=gate_capture_fn,
+            )
         res.notices.append(
             f"[C0] {c0.state.value}"
             + (f"/{c0.sub_reason.value}" if c0.sub_reason else "")
@@ -592,7 +689,11 @@ def run_pull(
         res.stratum = Stratum.C2A_DISK
         res.abort_reason = c2a.state.value          # "disk-short"
         res.detail = c2a.detail
-        return res
+        return _gate_capture_passthrough(
+            res, slug=slug, profile_like=profile_like, der=der,
+            hardware_sm=hardware_sm, gpu_topology=gpu_topology, root=root,
+            gate_capture_fn=gate_capture_fn,
+        )
 
     # ----- stratum-5: pre-[B] generic-dense eligibility (P4) --------------
     # Separate pre-[B] abort — NOT a [C0] rewrite ([C0] already emitted
@@ -614,7 +715,11 @@ def run_pull(
                 f"to price — pre-[B] hard-stop (non-bypassable; "
                 f"--experimental-arch does NOT apply — there is no model)"
             )
-            return res
+            return _gate_capture_passthrough(
+                res, slug=slug, profile_like=profile_like, der=der,
+                hardware_sm=hardware_sm, gpu_topology=gpu_topology,
+                root=root, gate_capture_fn=gate_capture_fn,
+            )
 
     # ----- [B]: raw fit verdict (P1 kv.raw_verdict) -----------------------
     entry = s2.registry_entry or {}
@@ -648,7 +753,15 @@ def run_pull(
         res.stratum = Stratum.DECIDED
         res.abort_reason = "hard-block"
         res.detail = f"[C1] {conf}×{raw} → hard-block ({c1.note})"
-        return res
+        # v0.8.2 CONTRACT-1.1 — the C1 exact×wont-fit terminal (the genuine
+        # kv-calc VRAM refusal). predicted_b_breakdown is in scope
+        # (res.diagnostics["b_breakdown"] set above) — the pass-through
+        # carries it. Decision UNCHANGED.
+        return _gate_capture_passthrough(
+            res, slug=slug, profile_like=profile_like, der=der,
+            hardware_sm=hardware_sm, gpu_topology=gpu_topology, root=root,
+            gate_capture_fn=gate_capture_fn,
+        )
 
     if not c1.satisfied:
         # confirm→proceed without --yes, or low-conf wont-fit advisory

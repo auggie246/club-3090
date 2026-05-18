@@ -45,9 +45,12 @@ root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
 
 from scripts.lib.profiles.loop_input import (  # noqa: E402
+    BaseCaptureBundle,
     CaptureBundleError,
     FInput,
+    FInputGate,
     read_capture_bundle,
+    read_gate_bundle,
 )
 
 failures: list[str] = []
@@ -297,6 +300,143 @@ check(not any("class_enum" in n or "six_one_class" in n
               or "classify" in n for n in api),
       "no FInput accessor claims `outcome` is the §6.1 class enum "
       "(binding rule: [F] derives failure_class itself downstream)")
+
+# ---------------------------------------------------------------------------
+# 7b. v0.8.2 CONTRACT-1.1 — `BaseCaptureBundle` protocol + schema==1
+#     byte-identity (the V1 RED-LINE) + `read_gate_bundle()` (schema==2).
+# ---------------------------------------------------------------------------
+import hashlib as _hl  # noqa: E402
+
+# (a) The protocol-lift is byte-identity-preserving: the SAME schema==1
+#     bundle yields a byte-identical FInput + identical dedup_tuple +
+#     dedup_hash + consensus_key PRE/POST (the F3-class risk). We assert
+#     determinism (two reads of the same bytes are identical) AND that
+#     FInput satisfies BaseCaptureBundle BY CONSTRUCTION.
+fi_a = read_capture_bundle(b1)
+fi_b = read_capture_bundle(b1)
+check(fi_a.manifest == fi_b.manifest
+      and fi_a.dedup_tuple() == fi_b.dedup_tuple()
+      and fi_a.dedup_hash() == fi_b.dedup_hash()
+      and fi_a.consensus_key() == fi_b.consensus_key(),
+      "V1 RED-LINE: a real schema==1 bundle -> byte-identical FInput + "
+      "identical dedup_tuple/dedup_hash/consensus_key (protocol lift is "
+      "a pure static retype)")
+# The literal expected dedup_hash for b1's manifest — pinned so a future
+# refactor that perturbs the schema==1 serialization fails LOUDLY here.
+_b1_dt = ("Org/My-Model", "bfloat16", "LlamaForCausalLM", "kvcalc-v0.8.0",
+          "vllm/vllm-openai:nightly-abc123", None, "1x24576MiB")
+_b1_h = _hl.sha256("\x1f".join(str(p) for p in _b1_dt)
+                   .encode("utf-8")).hexdigest()[:12]
+check(fi_a.dedup_hash() == _b1_h,
+      f"V1 RED-LINE: schema==1 dedup_hash is the pinned byte-exact value "
+      f"{_b1_h} (no drift from the protocol lift)")
+check(isinstance(fi_a, BaseCaptureBundle),
+      "FInput satisfies BaseCaptureBundle (runtime_checkable Protocol — "
+      "by construction; no isinstance(finput, FInput) anywhere in F2/F5)")
+check(fi_a.is_gate_only is False,
+      "FInput.is_gate_only defaults False (a schema==1 full bundle is "
+      "NEVER gate-only; additive default => schema==1 byte-identical)")
+
+# (b) read_gate_bundle(): a schema==2 gate-only bundle -> FInputGate. It
+#     validates ONLY the always-present row + outcome=='hard-block' +
+#     failure_class is None; it MUST NOT reuse the 22-key validator.
+def write_gate(d: Path, *, manifest=None, pt1=None) -> Path:
+    d.mkdir(parents=True, exist_ok=True)
+    gm = manifest if manifest is not None else {
+        "schema": 2, "slug": "Org/Gate-Model",
+        "utc_ts": "20260518T000000Z", "club3090_commit": "cafef00d",
+        "outcome": "hard-block",
+        "abort_reason": "engine-support-unknown/no-arch-row",
+        "failure_class": None,
+        "model": "Org/Gate-Model", "model_id": "Org/Gate-Model",
+        "arch_family": None, "quant_label": None,
+        "topology_class": None, "topology_summary_canonical": None,
+        "selected_ctx": None, "kv_format": None,
+        "smoke_capability_set": None, "engine_pin": None,
+        "engine_version": None, "kv_calc_version": None,
+        "submission_fingerprint": None, "is_gate_only": True,
+        "capture_points": ["gate"],
+    }
+    gp = pt1 if pt1 is not None else {
+        "schema": 2, "point": "gate", "slug": "Org/Gate-Model",
+        "confidence": "ESTIMATED_LOWER_BOUND", "raw_verdict": None,
+        "profile_like": "vllm/minimal", "hardware_sm": 8.6,
+        "predicted_b_breakdown": None,
+        "abort_reason": "engine-support-unknown/no-arch-row",
+        "detail": "[C0] no-arch-row", "is_gate_only": True,
+    }
+    (d / "manifest.json").write_text(json.dumps(gm, indent=2),
+                                     encoding="utf-8")
+    (d / "pt1-gate.json").write_text(json.dumps(gp, indent=2),
+                                     encoding="utf-8")
+    return d
+
+
+g1 = write_gate(tmp / "g1")
+fg = read_gate_bundle(g1)
+check(isinstance(fg, FInputGate),
+      "read_gate_bundle: schema==2 -> FInputGate")
+check(isinstance(fg, BaseCaptureBundle),
+      "FInputGate satisfies BaseCaptureBundle (protocol — F2/F5 consume "
+      "it through the same surface)")
+check(fg.pt2_download is None and fg.pt3_boot is None
+      and fg.pt4_smoke is None and fg.pt5_override is None,
+      "FInputGate: pt2-5 are None (gate-only terminated pre-download — "
+      "satisfies the Optional[dict] protocol slots)")
+check(fg.is_gate_only is True and fg.outcome == "hard-block"
+      and fg.failure_class is None
+      and fg.abort_reason == "engine-support-unknown/no-arch-row",
+      "FInputGate: is_gate_only / outcome / failure_class / abort_reason")
+check(fg.arch_family is None and fg.model_id == "Org/Gate-Model"
+      and fg.quant_label == "none",
+      "FInputGate: arch null pre-deriver, model_id the slug, quant_label "
+      "_norm_quant(None)=='none' (same defensive discipline as FInput)")
+# dedup_tuple uses .get(k,None) — crash-safe on the degraded manifest;
+# the null-topology hash is DETERMINISTIC + stable (CONTRACT-1.1).
+dtg = fg.dedup_tuple()
+check(isinstance(dtg, tuple) and len(dtg) == 7 and dtg[5] is None
+      and dtg[6] is None,
+      f"FInputGate.dedup_tuple(): 7-tuple, .get-tolerant, fc+topo None "
+      f"(got {dtg})")
+dhg1 = fg.dedup_hash()
+dhg2 = read_gate_bundle(g1).dedup_hash()
+_exp_g = _hl.sha256("\x1f".join(str(p) for p in (
+    "Org/Gate-Model", "none", None, None, None, None, None))
+    .encode("utf-8")).hexdigest()[:12]
+check(dhg1 == dhg2 == _exp_g,
+      f"FInputGate.dedup_hash(): DETERMINISTIC with null topology "
+      f"(str(None)=='None'); stable across reads (got {dhg1})")
+
+# Schema mismatch: read_gate_bundle rejects schema==1; read_capture_bundle
+# rejects schema==2 (the two readers are strictly separate).
+raises(lambda: read_gate_bundle(b1),
+       "read_gate_bundle rejects a schema==1 bundle (schema!=2)")
+raises(lambda: read_capture_bundle(g1),
+       "read_capture_bundle rejects a schema==2 gate bundle (untouched "
+       "schema==1 path stays strict)")
+
+# read_gate_bundle MUST NOT reuse the 22-key validator: a gate manifest
+# WITHOUT the post-C0 keys still parses (it only requires the always-
+# present row). And the [F]-classifies invariant is enforced.
+g_bad_oc = write_gate(tmp / "gbo", manifest={
+    "schema": 2, "slug": "x", "utc_ts": "t", "club3090_commit": "c",
+    "outcome": "ok", "abort_reason": "hard-block", "failure_class": None})
+raises(lambda: read_gate_bundle(g_bad_oc),
+       "read_gate_bundle rejects outcome != 'hard-block'")
+g_bad_fc = write_gate(tmp / "gbf", manifest={
+    "schema": 2, "slug": "x", "utc_ts": "t", "club3090_commit": "c",
+    "outcome": "hard-block", "abort_reason": "hard-block",
+    "failure_class": "genuine-oom"})
+raises(lambda: read_gate_bundle(g_bad_fc),
+       "read_gate_bundle rejects a non-null failure_class (the gate "
+       "emitter NEVER classifies — [F]'s job)")
+g_min = write_gate(tmp / "gmin", manifest={
+    "schema": 2, "slug": "x", "utc_ts": "t", "club3090_commit": "c",
+    "outcome": "hard-block", "abort_reason": "disk-short",
+    "failure_class": None})
+check(isinstance(read_gate_bundle(g_min), FInputGate),
+      "read_gate_bundle: a MINIMAL always-present-row-only manifest "
+      "parses (does NOT reuse the 22-key schema-1 _require_keys)")
 
 # ---------------------------------------------------------------------------
 # 8. REAL on-disk capture dir(s) under .pull-captures/ (skip if none).

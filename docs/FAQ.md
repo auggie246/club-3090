@@ -2,6 +2,15 @@
 
 Common questions about club-3090. If your question isn't here, open a [GitHub Discussion](https://github.com/noonghunna/club-3090/discussions) — most things end up in this doc eventually.
 
+## Quick links
+
+- [Hardware](#hardware) — 4090/5090, NVLink, AMD, WSL2, dtype
+- [Engine choice](#engine-choice) — Ollama, LM Studio, MTP vs EAGLE
+- [Performance](#performance) — slow TPS, prefill cliffs
+- [Troubleshooting ladder](#before-symptom-matching--boot-the-simplest-stack-first) — 5-step isolation from minimal to dual-turbo
+
+---
+
 ## Hardware
 
 ### Can I use a 4090 instead of a 3090?
@@ -293,7 +302,7 @@ SOAK_MODE=continuous SOAK_SESSIONS=5 SOAK_TURNS=5 \
 
 **Why this happens** (one-paragraph): the GDN forward kernel holds ~500 MiB of simultaneous intermediate tensors at T=4128 prefill chunks. With accumulated multi-turn KV cache (~5 GiB at 25K context) + model weights (14 GiB) + MTP draft (5 GiB) + other workspace, the per-card peak exceeds the 24 GiB ceiling. The fix is rewriting the kernel to stream those intermediates segment-by-segment instead of holding them simultaneously — that's upstream work in `vllm/model_executor/layers/fla/ops/` or via Genesis sidecar. Detailed mechanism analysis in [`docs/CLIFFS.md`](CLIFFS.md) "Why TP=2 escapes" and "Why llama.cpp escapes" sections.
 
-### Before symptom-matching — boot the simplest stack first
+## Troubleshooting ladder — boot the simplest stack first
 
 If you're hitting boot OOMs, weird MTP behavior, or memory-budget issues
 on TQ3 / long-context configs, validate that your hardware + driver +
@@ -400,7 +409,7 @@ Adds: TQ3 KV + Genesis on top of TP=2 + 4-stream concurrency.
   surface we'd want to debug carefully and the full pass (verify + stress
   + soak + bench) gives us everything to triage in one paste.
 
-### Why this works for both single and dual-card users
+## Why this works for both single and dual-card users
 
 The first 3 steps isolate stack layers (base → Genesis+MTP+fp8 →
 TQ3+long-ctx). Steps 4-5 add TP=2 surface separately. A user on dual
@@ -409,7 +418,7 @@ card first — it's the only way to tell apart "issue in single-card
 stack that also breaks dual" from "issue specific to TP=2 NCCL /
 multi-GPU coordination."
 
-### Quick recognition guide for common failure modes
+## Quick recognition guide for common failure modes
 
 - **Container dies at boot with `GPTQ_MARLIN_MIN_THREAD_N (64) > out_features`** — dual-card vllm#40361 patch didn't apply. Confirm `/opt/ai/engines/vllm/primary/` exists with the patched marlin kernel files.
 - **Container dies during DFlash boot** — vllm#40334 dtype mismatch. Verify the compose has `--dtype bfloat16`.

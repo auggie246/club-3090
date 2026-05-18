@@ -16,9 +16,11 @@ Start here if you want to run a model.
 
 | Doc | What it is |
 |---|---|
-| [`PULL.md`](PULL.md) | **Start here for any model not in the curated list.** The v0.8.0 universal flow: evaluate any safetensors HF repo against this stack's KV math, honest about confidence. |
+| [`GETTING_STARTED.md`](GETTING_STARTED.md) | **Start here — 5-minute clone-to-curl path.** No decisions, no menus. |
 | [`SINGLE_CARD.md`](SINGLE_CARD.md) | 1× RTX 3090 — workload → curated config → quick start. |
-| [`DUAL_CARD.md`](DUAL_CARD.md) | 2× RTX 3090 (PCIe / no NVLink) — workload → config → quick start. |
+| [`DUAL_CARD.md`](DUAL_CARD.md) | 2× RTX 3090 (PCIe / NVLink auto-detected) — workload → config → quick start. |
+| [`MULTI_CARD.md`](MULTI_CARD.md) | 3+ GPUs — TP scaling math, derivation from `dual.yml`, valid TP values. |
+| [`PULL.md`](PULL.md) | Any HF safetensors repo — evaluate against the KV math, honest about confidence. |
 | [`MULTI_CARD.md`](MULTI_CARD.md) | 3+ GPUs — TP scaling math, derivation from `dual.yml`, valid TP values. |
 | [`HARDWARE.md`](HARDWARE.md) | Card-class questions — 4090/5090, power caps, NVLink, laptop EC power. |
 | [`GLOSSARY.md`](GLOSSARY.md) | TPS / KV / MTP / TP and the rest of the vocabulary. |

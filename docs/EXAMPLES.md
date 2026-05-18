@@ -210,6 +210,62 @@ with requests.post(
 
 ---
 
+## Python — tool calling (agentic workflow)
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8020/v1", api_key="not-needed")
+
+# Define a tool the model can call
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current temperature for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City name"}
+                },
+                "required": ["location"]
+            },
+        }
+    }
+]
+
+# First turn: model decides to call the tool
+resp = client.chat.completions.create(
+    model="qwen3.6-27b-autoround",
+    messages=[{"role": "user", "content": "What's the weather in Paris?"}],
+    tools=tools,
+    tool_choice="auto",
+    max_tokens=512,
+)
+
+msg = resp.choices[0].message
+print(f"Tool call: {msg.tool_calls}")
+
+# Second turn: feed tool result back
+messages = [
+    {"role": "user", "content": "What's the weather in Paris?"},
+    msg,
+    {"role": "tool", "tool_call_id": msg.tool_calls[0].id, "content": "22°C, sunny"},
+]
+
+resp2 = client.chat.completions.create(
+    model="qwen3.6-27b-autoround",
+    messages=messages,
+    tools=tools,
+    max_tokens=512,
+)
+
+print(f"Final answer: {resp2.choices[0].message.content}")
+```
+
+---
+
 ## TypeScript / Node — `openai` SDK
 
 ```bash

@@ -66,7 +66,7 @@ bash scripts/update.sh
 - **Validated docker compose configs** for both routes — drop-in OpenAI-compatible API on `localhost:8020`
 - **Multi-engine**: vLLM (full features), llama.cpp (max ctx + robustness), SGLang (currently blocked, watch list)
 - **Model-agnostic**: today ships curated configs for Qwen3.6-27B and friends; structure scales as we add models
-- **Universal `pull` (v0.8.0)** — evaluate any safetensors HF repo; see [`docs/PULL.md`](docs/PULL.md)
+- **Universal `pull`** (v0.8.0; extended in v0.8.2) — evaluate any safetensors HF repo, get an honest one-line fit verdict (`--recommend`), and when a pull hard-blocks, send the redacted diagnostic back in one consented step (`--submit-last`). Broader arch coverage each release. See [`docs/PULL.md`](docs/PULL.md)
 
 **New here?** → [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) — 5-minute clone-to-curl path.
 **Already running, want to compare engines?** → [docs/engines/](docs/engines/)

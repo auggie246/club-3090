@@ -186,11 +186,12 @@ club-3090/
 | ~30 GB free disk | Per model. More for multiple models. |
 
 vLLM image pins live in `scripts/lib/profiles/engines/*.yml` and are exported
-by `scripts/launch.sh` / `scripts/switch.sh` as `VLLM_NIGHTLY_SHA`. To opt into
-the pre-built club image after CI has promoted it, override the full image ref:
+by `scripts/launch.sh` / `scripts/switch.sh` as `VLLM_NIGHTLY_SHA`. Set
+`VLLM_IMAGE` to override the full image ref — e.g. to pin a specific upstream
+nightly, or to run a current image when a pinned nightly has been purged:
 
 ```bash
-VLLM_IMAGE=ghcr.io/noonghunna/vllm-club3090:latest bash scripts/launch.sh --variant vllm/dual
+VLLM_IMAGE=vllm/vllm-openai:latest bash scripts/launch.sh --variant vllm/dual
 ```
 
 See [docs/HARDWARE.md](docs/HARDWARE.md) for hardware-specific notes (PCIe vs NVLink, power draw, etc.).

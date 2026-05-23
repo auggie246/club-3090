@@ -305,7 +305,13 @@ URL="$URL" MODEL="$MODEL" \
 # setups; benchlocal-cli will kill mid-batch if its internal default fires.
 # Override via env: AIDER_TIMEOUT_PER_CASE=7200 bash scripts/rebench-full.sh
 AIDER_TIMEOUT_PER_CASE="${AIDER_TIMEOUT_PER_CASE:-3600}"
-URL="$URL" MODEL="$MODEL" \
+# ik_llama reports its model id as the full GGUF path (leading + embedded
+# slashes); litellm inside the aider sandbox can't route a slash-laden model
+# id (#15/#16 family) → every exercise errors before the model → 0/30.
+# Mainline llama.cpp already reports a basename. Strip to basename for the
+# aider/litellm path — the server accepts any id (serves the one loaded model).
+AIDER_MODEL="${MODEL##*/}"
+URL="$URL" MODEL="$AIDER_MODEL" \
   SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
   ENABLE_THINKING="${ENABLE_THINKING:-0}" \
   THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}" \

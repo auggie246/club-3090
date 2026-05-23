@@ -100,6 +100,33 @@ Quality: line for compose schema field (paste into compose YAML header):
 Quality:   ToolCall-15 14/15 (93%) · InstructFollow-15 13/15 (87%) · StructOutput-15 15/15 (100%) · DataExtract-15 12/15 (80%) (--medium, packs v1.0.x, 2026-05-09)
 ```
 
+## Sampling & temperature
+
+By default the packs sample at **temperature 0** (greedy) — deterministic and reproducible, so scores are comparable across rigs and across runs. This is the **canonical** baseline, and it's what regression tracking and cross-config ranking should use.
+
+Two opt-in modes evaluate a model at a non-zero / model-recommended temperature instead. Both **tag the run non-canonical** (markdown header + saved JSON) and refuse to gate CI:
+
+| Mode | What it does | When to use |
+|---|---|---|
+| `--sampling-from-server` | Omits all sampling params from requests, so the server applies its **compose-configured** defaults; reads them back from `/props` (llama.cpp) and records them. The compose is the single source of truth. | "Evaluate the model exactly as it's served." |
+| `benchlocal-cli … --temperature N` (+ `--top-p` / `--top-k` / `--min-p` / `--repeat-penalty`) | Eval at sampling values you specify. Mutually exclusive with `--sampling-from-server`. | When you know the model's recommended temp and want it explicit and recorded. |
+
+The composes ship **model-recommended sampling defaults** (Qwen3.6 `0.6`, Qwopus3.6 `0.8`, Gemma `1.0`), set via the `TEMP` / `TEMPERATURE` / `TOP_P` / `TOP_K` / `MIN_P` / `REPEAT_PENALTY` env (see [`.env.example`](../.env.example)). `--sampling-from-server` inherits whatever the running compose declares — so "serve at the recommended temp" and "eval at the recommended temp" stay in sync from one source.
+
+```bash
+# canonical (default): temp 0, reproducible — use for ranking + regression tracking
+bash scripts/quality-test.sh --full
+
+# evaluate at the model's served / recommended temperature (inherits the compose default)
+bash scripts/quality-test.sh --full --sampling-from-server
+SAMPLING_FROM_SERVER=1 bash scripts/rebench-full.sh
+
+# or an explicit temperature, via benchlocal-cli directly
+benchlocal-cli run --full --endpoint http://localhost:8020 --model <name> --temperature 0.8
+```
+
+**Why it matters:** a reasoning / exploratory fine-tune (e.g. Qwopus3.6, whose author recommends temp 0.75–1) is *under-represented* at temp 0 — greedy decoding collapses the path-exploration the fine-tune was trained for. But high temp also *hurts* the deterministic packs (DataExtract / StructOutput want exact, repeatable output), so read **per-pack deltas**, not just the total — and keep canonical temp-0 as the bar for any apples-to-apples ranking.
+
 ## Compose `Quality:` schema field
 
 Each compose's `Profile` header (per [`AGENTS.md`](../AGENTS.md)) can carry an optional `Quality:` line:

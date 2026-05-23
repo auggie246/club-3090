@@ -25,6 +25,8 @@ All `Narr / Code TPS` rows come from `bash scripts/bench.sh`, which runs:
 > **Code:** "Write a Python implementation of quicksort with comments explaining each step." (`max_tokens=800`)
 >
 > Sampling: `temperature=0.6, top_p=0.95, top_k=20, presence_penalty=0.0, enable_thinking=false`. Three warmups + five measured runs per prompt. Mean wall TPS reported.
+>
+> **Quality (8-pack) sampling:** behavioral packs run at **temperature 0** (greedy, reproducible) by default — the canonical bar for cross-config / cross-model ranking. To score a model at its *recommended* temp instead, the composes ship per-model sampling defaults (Qwen3.6 0.6 / Qwopus3.6 0.8 / Gemma 1.0, env-overridable) and the eval inherits them via `quality-test.sh --sampling-from-server` (tagged non-canonical). See [QUALITY_TEST.md → Sampling & temperature](docs/QUALITY_TEST.md#sampling--temperature).
 
 `PP tok/s` is prompt-processing throughput. For vLLM rows, `bench.sh` scrapes
 the most recent `Avg prompt throughput` lines from container logs. For

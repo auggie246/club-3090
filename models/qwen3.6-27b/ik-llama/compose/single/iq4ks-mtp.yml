@@ -11,14 +11,18 @@
 #   Template:  native (GGUF-embedded) — A/B'd froggeric v19 here, native won
 #              the 8-pack 103 vs 99 (toolcall TIED 9/9); see header note below
 #   Vision:    NO (text-only this profile; mmproj is a separate axis → -vision.yml)
-#   Default ctx: 262144 — full native ctx (n_ctx_train) on ONE 3090, q4_0 KV.
-#              Bumped from 131072 → native max 2026-05-21, keeping -ub 1024 (NOT
-#              the -ub 512 the 21.5 GB datapoint below used). For lower VRAM /
+#   Default ctx: 200000 — cross-engine-aligned with llama-cpp mtp.yml's measured
+#              max-safe fill (2026-05-23), q4_0 KV, -ub 1024. Was 262144 (full
+#              n_ctx_train) but that is a *boot* ceiling, not a verified *fill*
+#              ceiling on ik — see the "boots ≠ fills" note below. For lower VRAM /
 #              cross-rig-safe boot, set CTX_SIZE=131072.
 #   MAX ctx:   262144 (model native ceiling; n_ctx_train = n_ctx_orig_yarn = 262144).
-#              VRAM: default -ub 1024 @ 262144 → 22.5 GB / 24 (verified 2026-05-21,
-#              KV pre-allocated so this is steady-state; ~2.1 GB headroom — fine on a
-#              dedicated card, tight if anything else shares GPU 0). -ub 512 @ 262144
+#              ⚠ "boots ≠ fills": -ub 1024 @ 262144 boots at 22.5 GB / 24 with the KV
+#              pool pre-reserved (verified 2026-05-21) — but that is a boot number, it
+#              does NOT mean a prompt fills to 262K. The mainline llama-cpp twin walls
+#              at ~125K (FA transient scratch at high fill — docs/CLIFFS.md 2026-05-23);
+#              ik's fillable ceiling is not yet laddered (ik is ~0.5 GB leaner, so ≥ that
+#              is expected). Default lowered to 200000 for fill-safety. -ub 512 @ 262144
 #              → 21.5 GB if you need the extra ~1 GB back.
 #   Status:    ✅ Shipped (advanced-quant track, #180). In the wizard +
 #              `bash scripts/switch.sh ik-llama/iq4ks-mtp`.
@@ -30,7 +34,7 @@
 #   Best for:  VRAM-tight single-card (sub-24 GB, shared GPU, WSL display tax)
 #              where the leaner footprint matters; or if you want IQK quants.
 # ---------------------------------------------------------------------------
-# Qwen3.6-27B on ik_llama.cpp — single 3090, IQ4_KS + q4_0 KV + MTP, 131K default (262K max).
+# Qwen3.6-27B on ik_llama.cpp — single 3090, IQ4_KS + q4_0 KV + MTP, 200K default (262K native max).
 #
 # CONFIG SOURCE: ampersandru's authoritative launch flags from discussion #152
 # (comment 16999100). Reproduced verbatim:
@@ -71,7 +75,7 @@
 # Override defaults via .env or shell:
 #   MODEL_DIR              host dir to mount as /models
 #   GGUF_FILE             path under /models (default: …ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf)
-#   CTX_SIZE              KV pool size       (default: 131072; MAX 262144 — see header)
+#   CTX_SIZE              KV pool size       (default: 200000; native MAX 262144 — see header)
 #   BATCH_SIZE           llama.cpp -b       (default: 4096 — matches llama-cpp mtp.yml)
 #   UBATCH_SIZE          llama.cpp -ub      (default: 1024; set 512 for 262144 ctx, ~2-4% TPS cost)
 #   NP                   parallel slots     (default: 1)
@@ -113,7 +117,7 @@ services:
       --port 8080
       --model /models/${GGUF_FILE:-qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf}
       -ngl 99
-      --ctx-size ${CTX_SIZE:-262144}
+      --ctx-size ${CTX_SIZE:-200000}
       -b ${BATCH_SIZE:-4096}
       -ub ${UBATCH_SIZE:-1024}
       -np ${NP:-1}

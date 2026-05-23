@@ -7,7 +7,8 @@
 #   KV:        q4_0 K + q4_0 V (densest mainline, Ampere-fast)
 #   Vision:    no (mmproj NOT mounted — for vision, see mtp-vision.yml)
 #   Template:  native (GGUF-embedded) — froggeric A/B'd here, regressed 8-pack 102→95
-#   Max ctx:   262144 default (@ -ub 512); 131072 also fine (@ -ub 1024, faster prefill)
+#   Max ctx:   200000 default (@ -ub 512, fills ~183K w/ ~1.1 GB margin); 262144 boots but
+#              walls ~125K (FA scratch at fill — see CTX_SIZE note); 131072 = faster prefill @ -ub 1024
 #   Genesis:   N/A — llama.cpp engine; Genesis is vLLM/Qwen3-Next-specific
 #   Status:    ✅ Production
 #   Engine-profile: llama-cpp-local
@@ -15,11 +16,11 @@
 #              speed + ctx workhorse. ~51 narr / ~60 code TPS, 7/7 verify-stress
 #              (incl. 60K + 91K needle), 102/150 quality (68%) on the 8-pack.
 # ---------------------------------------------------------------------------
-# Qwen3.6-27B on llama.cpp — single 3090, MTP, 262K ctx, no vision.
+# Qwen3.6-27B on llama.cpp — single 3090, MTP, 200K ctx, no vision.
 #
 # This is one of TWO named single-card profiles for this model (collapsed from
 # three on 2026-05-22 — the old vanilla Q3_K_XL `docker-compose.yml` was retired
-# once Q4_K_M was shown to reach the full 262K too; see the CTX_SIZE note below):
+# once Q4_K_M was shown to cover long context too; see the CTX_SIZE note below):
 #   - mtp.yml         → MTP n=2 + no vision (THIS file). `llamacpp/default`
 #                       is now an ALIAS for this profile.
 #   - mtp-vision.yml  → MTP n=2 + vision (multimodal)
@@ -61,11 +62,13 @@
 # Override defaults via .env or shell:
 #   MODEL_DIR              host dir to mount as /models  (default: ../../../../../models-cache)
 #   GGUF_FILE              path under /models  (default: qwen3.6-27b-gguf/unsloth-mtp-q4km/Qwen3.6-27B-Q4_K_M.gguf)
-#   CTX_SIZE               KV pool size        (default: 262144 = full native @ -ub 512;
-#                          boots ~23 GB, MTP active, verify-stress 7/7 + soak PASS, 2026-05-22.
-#                          For faster prefill / more headroom: CTX_SIZE=131072 UBATCH_SIZE=1024.)
+#   CTX_SIZE               KV pool size        (default: 200000 @ -ub 512 — fills ~183K with
+#                          ~1.1 GB free, the max-safe single-card value. 262144 boots ~23 GB,
+#                          MTP active, passes verify-stress(91K) + soak — but only *fills* to
+#                          ~125K before OOMing on the FA scratch at high fill: a false ceiling.
+#                          See docs/CLIFFS.md (2026-05-23). Faster prefill: CTX_SIZE=131072 UBATCH_SIZE=1024.)
 #   BATCH_SIZE             llama.cpp -b        (default: 4096 — on mainline -b does NOT drive VRAM)
-#   UBATCH_SIZE            llama.cpp -ub       (default: 512 — funds the 262K default; raise to 1024 at 131K)
+#   UBATCH_SIZE            llama.cpp -ub       (default: 512 — funds the 200K default; raise to 1024 at 131K)
 #   KV_TYPE                K and V quant type  (default: q4_0)
 #   NP                     parallel slots      (default: 1 — see ⚠ below)
 #   MTP_DRAFT_N_MAX        MTP draft tokens    (default: 2 — sweet spot per BENCHMARKS.md)
@@ -98,7 +101,7 @@ services:
       --host 0.0.0.0
       --port 8080
       -m /models/${GGUF_FILE:-qwen3.6-27b-gguf/unsloth-mtp-q4km/Qwen3.6-27B-Q4_K_M.gguf}
-      -c ${CTX_SIZE:-262144}
+      -c ${CTX_SIZE:-200000}
       -b ${BATCH_SIZE:-4096}
       -ub ${UBATCH_SIZE:-512}
       -ngl 99

@@ -207,6 +207,16 @@ You still do steps **1–3** (WSL + driver/passthrough + `.wslconfig` RAM) and *
 | 1× 24 GB, want vLLM | `vllm/single` + `GPU_MEMORY_UTILIZATION=0.94` `.env` | Full feature stack; needs the WSL2 VRAM + TDR tuning (steps 8–9) |
 | 2× 24 GB | `vllm/dual` | TP=2; the ~1.3 GiB overhead is noise at ~17 GB/card |
 
+## Diagnostics on WSL2
+
+Filing a bug or sharing cross-rig data? Run [`report.sh`](../README.md#diagnostics). On a minimal WSL2 distro, install `pciutils` first so the hardware section is complete (it's tiny and not bundled by default):
+
+```bash
+sudo apt install -y pciutils
+```
+
+⚠️ Expectation-setter: under WSL2, `lspci` lists the GPU as a paravirtualized **"Microsoft Basic Render Driver"**, not your real NVIDIA card — WSL exposes the GPU via `/dev/dxg` (GPU-PV), so the real PCIe link/gen/ACS topology isn't visible. That's normal; `report.sh` reads GPU topology from `nvidia-smi topo` instead. (The `lspci` PCIe/P2P detail only matters for **bare-metal multi-card** P2P diagnosis, not WSL2.)
+
 ## See also
 
 - [FAQ.md → Does this work on Windows / WSL2?](FAQ.md#does-this-work-on-windows--wsl2) — runtime VRAM/ctx tuning

@@ -1,0 +1,26 @@
+schema_version: 1
+id: llama-cpp-local
+display_name: llama.cpp local CUDA server (MTP-enabled)
+type: llama.cpp
+stability: stable
+install:
+  method: docker_image
+  spec: ghcr.io/ggml-org/llama.cpp:server-cuda
+min_sm: 6.0
+supported_model_families:
+  - qwen3-next-hybrid
+features: {}
+supported_kv_formats:
+  - q4_0
+  - q5_0
+  - q8_0
+  - k8v4
+supported_drafters:
+  - mtp
+supported_weight_formats:
+  - gguf
+required_overlays: []
+vendored_overlays: []
+required_genesis: false
+notes: "Cliff-immune single-card fallback for Qwen GGUF serving. Uses upstream `ghcr.io/ggml-org/llama.cpp`, pinned to build `server-cuda-b9246` (NOT the rolling `:server-cuda` tag — it regressed at b9282 with a broken-lib crash loop, #187). MTP PR #22673 merged upstream + draft-eagle3 + draft-mtp spec types available natively. Bump via env once a newer build is validated: `LLAMACPP_IMAGE=ghcr.io/.../server-cuda-bXXXX`. No club-3090 patches on llama.cpp; we follow upstream as-is."
+

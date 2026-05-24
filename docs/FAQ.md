@@ -2,6 +2,15 @@
 
 Common questions about club-3090. If your question isn't here, open a [GitHub Discussion](https://github.com/noonghunna/club-3090/discussions) — most things end up in this doc eventually.
 
+## Quick links
+
+- [Hardware](#hardware) — 4090/5090, NVLink, AMD, WSL2, dtype
+- [Engine choice](#engine-choice) — Ollama, LM Studio, MTP vs EAGLE
+- [Performance](#performance) — slow TPS, prefill cliffs
+- [Troubleshooting ladder](#before-symptom-matching--boot-the-simplest-stack-first) — 5-step isolation from minimal to dual-turbo
+
+---
+
 ## Hardware
 
 ### Can I use a 4090 instead of a 3090?
@@ -10,11 +19,23 @@ Yes — 4090 (Ada, sm_89) is strictly better than 3090 (Ampere, sm_86) for every
 
 ### Can I use a 5090?
 
-Should work for vLLM (Blackwell adds new kernels but back-compat). The Marlin pad-sub-tile-n fork we mount targets Ampere edge cases — on Blackwell you can probably drop the `/opt/ai/vllm-src/` mount. Not validated yet. We'd love numbers from a 5090 rig — use the [Numbers from your rig](https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml) issue template.
+Should work for vLLM (Blackwell adds new kernels but back-compat). The Marlin pad-sub-tile-n fork we mount targets Ampere edge cases — on Blackwell you can probably drop the `/opt/ai/engines/vllm/primary/` mount. Not validated yet. We'd love numbers from a 5090 rig — use the [Numbers from your rig](https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml) issue template.
 
 ### Do I need NVLink?
 
 No. Our dual-card configs use PCIe-only, no NVLink. Custom all-reduce is disabled in the composes. NVLink would help dual-card TPS but it's not required, and the user has explicitly declined NVLink bridges as a default — adding the dependency would exclude most consumer rigs.
+
+### What dtype/quant should I pick for my GPU?
+
+Depends on the arch. The short version:
+
+- **Ampere (3090/A100, sm_80/86)** → AutoRound INT4 weights + TQ3 / INT8 PTH / fp8 KV (fp8 KV works but is software-emulated). The primary target of this stack.
+- **Ada (4090/L40, sm_89)** → same as Ampere + you get a real FP8 hardware path for KV.
+- **Hopper (H100, sm_90)** → FP8 weights + FP8 KV on the transformer engine.
+- **Blackwell consumer (5090, sm_120)** → AutoRound INT4 today; NVFP4 / MXFP* when the kernels mature.
+- **Pre-Turing (V100, 10x0)** → llama.cpp only — vLLM needs sm_75+.
+
+Full hardware-acceleration matrix (which dtypes/quants run on Tensor Cores natively vs in software, per GPU class) at [DTYPE_MATRIX.md](DTYPE_MATRIX.md), including the weight-only vs weight+activation axis and the NVFP4 / MXFP4 / FP6 Blackwell additions.
 
 ### Does this work on AMD / Intel / Apple Silicon?
 
@@ -22,9 +43,50 @@ vLLM: NVIDIA-only (CUDA). llama.cpp: yes — pick the right Docker image (`ghcr.
 
 ### Does this work on Windows / WSL2?
 
-WSL2: yes, both engines. Make sure GPU passthrough is set up (`nvidia-smi` works inside WSL). Native Windows: vLLM doesn't support it; llama.cpp does — but use a native llama.cpp build, not Docker.
+Yes — both engines work on WSL2. Make sure GPU passthrough is set up (`nvidia-smi` works inside WSL). Native Windows: vLLM doesn't support it; llama.cpp does — but use a native llama.cpp build, not Docker.
 
-Two gotchas to know about up front, both documented in HARDWARE.md alongside the WSL2 section: (1) Windows' default 2-second TDR can kill long kernels mid-flight (WSL2-specific) — see ["extend the TDR delay"](HARDWARE.md#fix--extend-the-tdr-delay-on-the-windows-host); (2) PyTorch's `expandable_segments:True` allocator can crash boot at `gptq_marlin_repack` on some setups (a WSL2 single-card 3090 Ti hit it; JusefPol previously hit it on NVLink dual-3090) — override available via `.env`, see ["disable PyTorch expandable_segments"](HARDWARE.md#fix--disable-pytorch-expandable_segments-if-boot-crashes-at-weight-repack).
+**WSL2 adds ~1.3 GiB of invisible GPU overhead** — the Windows display driver, CUDA runtime, and WDDM reserve VRAM that `nvidia-smi` doesn't report at idle but is locked once a container starts. On a 24 GB card that leaves you with **~22.7 GB usable** instead of 24 GB.
+
+**Dual-card vLLM**: mostly unaffected. Each card runs at ~17 GB with ~7 GB headroom — 1.3 GB overhead is noise.
+
+**Single-card vLLM**: drop a `.env` with `GPU_MEMORY_UTILIZATION=0.94` (default 0.95 assumes headless Linux). Already documented with a combined `.env` template — see [HARDWARE.md WSL2 section](HARDWARE.md#note-for-wsl2--windows-users).
+
+**Single-card llama.cpp / ik_llama**: this is the gap. llama.cpp composes allocate by fixed sizes, not a utilization ratio, so there's no `GPU_MEMORY_UTILIZATION` knob to dial. The shipped defaults are tight for headless Linux:
+
+| Compose | Default ctx | Total VRAM | Headroom on Linux | Headroom on WSL2 | Status |
+|---|---|---|---|---|---|
+| `llamacpp/mtp` | 262K | 22.5 GB | ~1.5 GB | **~0.2 GB** | ❌ will OOM |
+| `llamacpp/mtp` | **131K** | 20.0 GB | ~4.0 GB | **~2.7 GB** | ✅ safe |
+| `llamacpp/mtp-vision` | 160K | 22.3 GB | ~1.7 GB | **~0.4 GB** | ⚠️ marginal |
+| `llamacpp/mtp-vision` | **131K** | ~21 GB | ~3.0 GB | **~1.7 GB** | ✅ safe |
+| `ik-llama/iq4ks-mtp` | 262K | 20.6 GB | ~3.4 GB | **~2.1 GB** | ✅ safe |
+| `ik-llama/iq4ks-mtp-vision` | 160K | ~21 GB | ~3.0 GB | **~1.7 GB** | ✅ safe |
+
+**Fix**: on WSL2, lower the context for the mainline llama.cpp composes:
+
+```sh
+# llamacpp/mtp — drop to 131K for WSL2 headroom
+CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml up -d
+
+# llamacpp/mtp-vision — drop to 131K
+CTX_SIZE=131072 UBATCH_SIZE=1024 docker compose -f models/qwen3.6-27b/llama-cpp/compose/single/mtp-vision.yml up -d
+```
+
+The ik_llama composes (IQ4_KS quants are smaller, ~15.1 GB weights) fit at defaults on WSL2.
+
+**Other WSL2 gotchas** (all documented in [HARDWARE.md](HARDWARE.md#note-for-wsl2--windows-users)):
+
+1. **TDR timeout** — Windows force-resets the GPU after 2 seconds of kernel time. Long-context prompts trigger this. Fix: extend TDR to 60s via registry.
+2. **PyTorch `expandable_segments` crash** — `device not ready` at `gptq_marlin_repack` on some WSL2 drivers. Fix: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False`.
+3. **GDN activation spike** — OOM at ~50-65K tokens on reduced-VRAM rigs. Fix: `VLLM_ENFORCE_EAGER=1` (vLLM only, ~20-30% TPS cost).
+
+Combined `.env` for vLLM single-card WSL2 (drop into `models/qwen3.6-27b/vllm/compose/.env`):
+
+```sh
+GPU_MEMORY_UTILIZATION=0.94
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False,max_split_size_mb:512
+VLLM_ENFORCE_EAGER=1
+```
 
 ---
 
@@ -52,9 +114,13 @@ Use LM Studio if you prefer a GUI and don't need the engineering. Use this repo 
 
 We tried EAGLE — it's blocked on Qwen3-Next (the family Qwen3.5/3.6 belong to) by DeltaNet hybrid attention's lack of KV rollback support in vLLM/SGLang. MTP works because it's a different protocol (multi-token prediction at draft-head level, not a separate draft model). See [INTERNALS.md "Speculative decoding"](../models/qwen3.6-27b/INTERNALS.md) for the full forensic chain. **Re-test triggers:** if vllm#39931 lands or DeltaNet rollback support arrives upstream, EAGLE becomes viable again.
 
+### The model I want isn't in the supported list — can I still run it?
+
+Yes, if it's a **safetensors** repo. As of v0.8.0, `scripts/pull.sh <org/Model> --profile-like vllm/minimal --dry-run` evaluates *any* safetensors HF repo against this stack's KV math — no download — and tells you honestly whether it fits and at what confidence. Drop `--dry-run` (add `--yes`) and, if it passes the gates, it downloads, generates a minimal compose, and boots it. Non-fits stop with a precise reason, not a crash. Full guide: [docs/PULL.md](PULL.md). One heads-up: many common archs (e.g. `Qwen2ForCausalLM`) stop at `needs-trust-remote-code-ack` on the first try even with `--dry-run` — add `--trust-remote-code` (after checking what code the repo runs) to clear it. Limits: safetensors + vLLM only; GGUF / `.bin` repos abort at derive as `unsupported-format` (not a crash) — see next Q.
+
 ### Why not GGUF on vLLM for this model?
 
-Multiple gates blocked. Qwen3.6-27B GGUF on vLLM hits a chain of "fixed but-not-quite" issues — multimodal config routing, ParallelLMHead skip, the `Qwen35TensorProcessor._reverse_reorder_v_heads` weight loader producing garbage output on the 27B layout (transformers PR #45283 only validated on 0.8B). Tracked in [INTERNALS.md](../models/qwen3.6-27b/INTERNALS.md#qwen36-27b-gguf-on-vllm). Use llama.cpp for GGUF on this model.
+Multiple gates blocked. Qwen3.6-27B GGUF on vLLM hits a chain of "fixed but-not-quite" issues — multimodal config routing, ParallelLMHead skip, the `Qwen35TensorProcessor._reverse_reorder_v_heads` weight loader producing garbage output on the 27B layout (transformers PR #45283 only validated on 0.8B). Tracked in [INTERNALS.md](../models/qwen3.6-27b/INTERNALS.md#qwen36-27b-gguf-on-vllm). Use llama.cpp for GGUF on this model. **Note (v0.8.0):** `pull` evaluates *safetensors* repos only — GGUF→llama.cpp is **not** served via `pull` (it stays the curated/manual path; cross-engine generation is deliberately deferred). A GGUF/`.bin` repo aborts cleanly at the deriver stage as `unsupported-format` (the message is generic — it does not yet say "GGUF, use llama.cpp"; a clearer message is a tracked v0.8.1 follow-up), not a crash.
 
 ### Why AutoRound INT4 not GPTQ / AWQ?
 
@@ -85,19 +151,76 @@ For the full deep dive — empirical bisection, root-cause walk-through, who-can
 
 ### vllm#40914 keeps coming up — what is it?
 
-Sandermage's K+1 verify routing PR for vLLM. When it lands, the spec-verify cost we're paying on Ampere SM 8.6 (~22 TPS narrative regression vs pre-bug substrate) closes. Our default on `0.20.1rc1.dev16+g7a1eb8ac2 + Genesis v7.65 dev tip` will jump from ~50 narr to ~70 narr, matching what ampersandru measures on the older `dev21 + v7.13` cascade-prone substrate. We track it in [INTERNALS.md "Upstream tracker"](../models/qwen3.6-27b/INTERNALS.md).
+Sandermage's K+1 verify routing PR for TurboQuant spec-decode. We tested a local post-#41434 rebase on 2026-05-11 and it is **not** enough for our Qwen3.6-27B Genesis-free TQ+MTP path: MTP acceptance becomes perfect, but long-context recall corrupts into repeated tokens and tool/multi-turn paths regress. Removing the overlay is better, but TQ3/TQ4/k8v4 + MTP still fail needle recall.
+
+The working paths today are `dual/tq3-nomtp.yml` without Genesis, or Genesis-backed TQ+MTP with P67/P67b. Treat #40914 as adjacent upstream work, not a shippable closure for this stack.
 
 ### What's PN8?
 
 A Genesis patch (`GENESIS_ENABLE_PN8_MTP_DRAFT_ONLINE_QUANT=1`) added in v7.62.x — backport of vllm#40849 that makes the MTP draft head inherit the target model's online-quant config. We measured ~800-900 MiB freed on the FP8+MTP single-card path (`tools-text.yml`), which **closes Cliff 1 there**. No-op on TQ3 paths. Enabled by default in `tools-text.yml` since 2026-04-29; opt-in elsewhere via the env var if you want to test.
 
+### INT8 PTH gives me 150 TPS single-stream but doesn't scale with concurrency — is that a bug?
+
+Not a bug — it's the canonical signature of `int8_per_token_head` quantization. INT8 PTH stores a separate scale per (token, head) pair, so at single-stream the dequant is cheap; at concurrency the per-token-head scale-lookup + dequant becomes a serialization point. fp8 has a single global scale, so dequant is essentially free regardless of how many concurrent streams are decoding. This is why INT8 PTH lands high on single-stream throughput but stays flat as you add concurrent requests, while fp8 starts lower per-stream but scales near-linearly.
+
+This shows up clearly in the head-to-head matrix on dual-3090:
+
+- **INT8 PTH** (`dual/int8.yml`) — 85 narr / 121 code TPS single-stream, 605K KV pool / 2.31× concurrency at 262K, p50 decode TPS stays near baseline at concurrency (no aggregate lift)
+- **fp8 default** (`dual/docker-compose.yml`) — lower per-stream but scales to ~9× concurrency at 262K, aggregate throughput goes up almost linearly with stream count
+
+So pick by workload: INT8 PTH if you want max single-stream TPS and don't need many concurrent users; fp8 if you want aggregate throughput across many streams. If you want **both** — high single-stream *and* high concurrency on the same compose — the answer is the Genesis-backed TQ3+MTP path (`dual/tq3-mtp-genesis.yml`): 89 / 119 narr / code TPS single-stream + 1.22M KV pool / 4.66× concurrency on the same PCIe dual-3090 rig (~5pp quality cost vs INT8 PTH on the 150-scenario quality suite, within noise on aider-polyglot-30 — see [docs/TQ3_MTP_GENESIS.md](TQ3_MTP_GENESIS.md) for the full writeup). This is also why `dual/turbo.yml` (4-stream production variant) ships TQ3+MTP rather than INT8 PTH — INT8 PTH wouldn't scale across the 4 concurrent streams.
+
+If your numbers on the same compose look different from ours by >15%, the most likely sources of the gap are: power cap (370W vs 290W = ~10-15%), vLLM nightly (pre-#41434 was ~15% slower on Qwen3-Next due to GPU↔CPU syncs in attention), Genesis patches loaded vs not (~10-15% via P67 + PN12 + PN25 on Qwen3-Next), MTP `n` value, or the prompt shape. Run `bash scripts/rebench-full.sh` to capture the canonical 5-phase numbers and we can compare apples-to-apples — see the [Numbers from your rig](https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml) issue template to share them back.
+
+If you're running an OpenAI-compatible endpoint that **isn't** one of our pre-baked Docker composes — `llama-swap`, `ramalama`, a host-build `llama-server`, `ik_llama.cpp`, raw vLLM, etc. — pass it explicitly:
+
+```bash
+bash scripts/rebench-full.sh \
+  --url http://HOST:PORT \
+  --model 'served-model-name' \
+  --engine vllm|llama-cpp|sglang|other
+```
+
+The chained scripts run in host-only mode (no `docker logs` / `docker inspect` scrapes) when `--url` is set, so the entire suite works against any OpenAI-API endpoint.
+
 ---
+
+## Community
+
+### Where can I ask quick questions or hang out with other users?
+
+- **Discord** — [discord.gg/3t6UKFGhKw](https://discord.gg/3t6UKFGhKw). Synchronous, casual; good for "I'm stuck, can someone eyeball this" type questions.
+- **GitHub Discussions** — [discussions tab](https://github.com/noonghunna/club-3090/discussions). Searchable, async, links cleanly to issues/PRs. Best for cross-rig bench drops, longer threads worth preserving.
+- **GitHub Issues** — [issues tab](https://github.com/noonghunna/club-3090/issues). Bug reports + regression repros only — please use the [triage ladder](#before-symptom-matching--boot-the-simplest-stack-first) before filing.
 
 ## Setup
 
-### `bash scripts/setup.sh qwen3.6-27b` is downloading 20+ GB. Where does it go?
+### How do I pick the right model + variant?
 
-`<repo>/models-cache/` by default. Override with `MODEL_DIR=/path/to/your/scratch bash scripts/setup.sh qwen3.6-27b`. See [`.env.example`](../.env.example) for all env vars.
+For a first install, run `bash scripts/setup.sh` with no model argument in a normal terminal. It opens a hardware-aware model picker, marks Qwen / Gemma / Both as eligible or not for your detected GPUs, then continues into the existing download flow.
+
+After setup, run `bash scripts/launch.sh`. The wizard asks which model (filtered to what you've downloaded), then which GPU(s) to use, auto-picks TP for homogeneous sets (PP for heterogeneous), filters variants by hardware fit, shows a per-card VRAM projection from `tools/kv-calc.py` for the suggested default, then boots and runs `verify-full.sh`. Power-user forms still work: `bash scripts/setup.sh qwen3.6-27b`, `bash scripts/launch.sh --variant vllm/dual`, partial flags like `bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1` (skips prompts), `--tp 4 --pp 2` to override parallelism, plus `setup.sh --help` / `launch.sh --help` for the full flag list. This wizard covers the **curated catalog**; for a model *not* in the catalog (any safetensors HF repo), use `scripts/pull.sh` instead — see [docs/PULL.md](PULL.md).
+
+### `bash scripts/setup.sh qwen3.6-27b` is downloading 20+ GB. Where does it go? / Can I put models on a different drive?
+
+Yes. The knob is `MODEL_DIR`, with **four ways** to set it (priority order):
+
+1. **`MODEL_DIR` env var in your shell** — takes precedence over everything:
+   ```bash
+   export MODEL_DIR=/mnt/your-second-drive/models
+   bash scripts/setup.sh qwen3.6-27b
+   ```
+2. **`.env` file at repo root** — picked up automatically on every script run. See [`.env.example`](../.env.example).
+3. **Interactive prompt** — `bash scripts/setup.sh` with nothing set first asks which model to download, then offers three model-dir choices: in-repo default, `~/models`, or custom path. After you pick custom, it asks "Save `MODEL_DIR=/your/path` to `.env` so we skip this next time?" — say `Y` and it persists for every subsequent `launch.sh` / `switch.sh` / `bench.sh` call.
+4. **Silent fallback** — `<repo>/models-cache/`. Functional but pollutes the git tree; not recommended.
+
+Every script that touches model paths reads from the same `MODEL_DIR`. The compose YAMLs' volume mount is `${MODEL_DIR:-...}:/root/.cache/huggingface` — once set, every container reads + writes there.
+
+**HF env-var integration** — we don't directly respect `HF_HOME` / `HF_HUB_CACHE` because we mount a host directory INTO the container's `/root/.cache/huggingface`, not the host's HF cache. The internal layout inside `MODEL_DIR` matches HF's repo-cache convention (`<MODEL_DIR>/<repo-subdir>/`), so models downloaded by `setup.sh` are byte-compatible with anything that reads HF's local cache layout. Two clean workarounds if you already have an HF cache you want to reuse:
+- Set `MODEL_DIR=$HF_HOME/hub`
+- Or symlink between them
+
+**On Windows / WSL2** — same mechanism. Docker Desktop handles path translation. Use Windows paths (`D:\models`) from PowerShell or WSL paths (`/mnt/d/models`) from WSL. If you flip between Linux and Windows on the same rig, point `MODEL_DIR` at a drive both OSes can see — the model files themselves are OS-agnostic.
 
 ### How do I keep my install up-to-date?
 
@@ -119,7 +242,7 @@ If your *Genesis tree* (not the repo) is out of sync — the pin in `setup.sh` m
 
 ### My GPU isn't card 0 — how do I change it?
 
-`CUDA_VISIBLE_DEVICES=2 bash scripts/launch.sh --variant vllm/default` (substitute your card index). For dual-card, pass two: `CUDA_VISIBLE_DEVICES=2,3`. The compose files inherit env from your shell.
+Use the `--gpus` flag: `bash scripts/launch.sh --gpus 2` (single-card) or `bash scripts/launch.sh --gpus 2,3` (two cards). The wizard exports `CUDA_VISIBLE_DEVICES` for you. The older form `CUDA_VISIBLE_DEVICES=2 bash scripts/launch.sh --variant vllm/default` still works if you prefer to set the env yourself.
 
 ### Container fails to start: "Free memory ... is less than desired GPU memory utilization"
 
@@ -213,7 +336,9 @@ Symptoms users report: "performance degrades after 20 turns", "throughput drops 
 bash scripts/switch.sh vllm/dual    # 111+ TPS p50, 0 errors, 0 MiB growth across 5 sessions
 
 # 1× 3090 — different engine, different kernels, different allocator
-bash scripts/switch.sh llamacpp/default    # 21 TPS, 262K context, cliff-immune
+bash scripts/switch.sh llamacpp/default      # 21 TPS, 262K context, cliff-immune, vision
+bash scripts/switch.sh llamacpp/mtp          # ~60 code TPS, 131K, MTP, 7/7 verify-stress (incl. 91K needle)
+bash scripts/switch.sh llamacpp/mtp-vision   # ~66 code TPS, 49K + vision (multimodal MTP — drop UBATCH_SIZE to 512 + raise CTX_SIZE to 196608 if you need long ctx; see SINGLE_CARD.md)
 ```
 
 **Want to verify your rig hits the same class:**
@@ -231,7 +356,17 @@ SOAK_MODE=continuous SOAK_SESSIONS=5 SOAK_TURNS=5 \
 
 **Why this happens** (one-paragraph): the GDN forward kernel holds ~500 MiB of simultaneous intermediate tensors at T=4128 prefill chunks. With accumulated multi-turn KV cache (~5 GiB at 25K context) + model weights (14 GiB) + MTP draft (5 GiB) + other workspace, the per-card peak exceeds the 24 GiB ceiling. The fix is rewriting the kernel to stream those intermediates segment-by-segment instead of holding them simultaneously — that's upstream work in `vllm/model_executor/layers/fla/ops/` or via Genesis sidecar. Detailed mechanism analysis in [`docs/CLIFFS.md`](CLIFFS.md) "Why TP=2 escapes" and "Why llama.cpp escapes" sections.
 
-### Before symptom-matching — boot the simplest stack first
+### Random crashes under sustained load on an AMD platform (Threadripper / Ryzen / EPYC)?
+
+Intermittent crashes during long runs — a `tokenizers` Rust segfault (`free(): invalid next size`), a Triton "unspecified launch failure", or both GPUs dropping out at once — are often the **AMD-Vi IOMMU** faulting under sustained TP=2 DMA, not a model bug. Check the kernel log:
+
+```bash
+dmesg | grep -E "AMD-Vi.*IO_PAGE_FAULT|Xid.*154"
+```
+
+If you see `AMD-Vi … IO_PAGE_FAULT` + `Xid … 154`, add **`iommu=pt`** to your kernel command line — the IOMMU stays on (isolation / PCIe grouping intact) but device DMA bypasses page-table translation, which clears it. No-op on Intel. Full writeup + kernel-log signature in [HARDWARE.md](HARDWARE.md) ("Note for AMD platforms"). Diagnosed by @mgabor3141 ([#178](https://github.com/noonghunna/club-3090/issues/178)).
+
+## Troubleshooting ladder — boot the simplest stack first
 
 If you're hitting boot OOMs, weird MTP behavior, or memory-budget issues
 on TQ3 / long-context configs, validate that your hardware + driver +
@@ -338,7 +473,7 @@ Adds: TQ3 KV + Genesis on top of TP=2 + 4-stream concurrency.
   surface we'd want to debug carefully and the full pass (verify + stress
   + soak + bench) gives us everything to triage in one paste.
 
-### Why this works for both single and dual-card users
+## Why this works for both single and dual-card users
 
 The first 3 steps isolate stack layers (base → Genesis+MTP+fp8 →
 TQ3+long-ctx). Steps 4-5 add TP=2 surface separately. A user on dual
@@ -347,9 +482,9 @@ card first — it's the only way to tell apart "issue in single-card
 stack that also breaks dual" from "issue specific to TP=2 NCCL /
 multi-GPU coordination."
 
-### Quick recognition guide for common failure modes
+## Quick recognition guide for common failure modes
 
-- **Container dies at boot with `GPTQ_MARLIN_MIN_THREAD_N (64) > out_features`** — dual-card vllm#40361 patch didn't apply. Confirm `/opt/ai/vllm-src/` exists with the patched marlin kernel files.
+- **Container dies at boot with `GPTQ_MARLIN_MIN_THREAD_N (64) > out_features`** — dual-card vllm#40361 patch didn't apply. Confirm `/opt/ai/engines/vllm/primary/` exists with the patched marlin kernel files.
 - **Container dies during DFlash boot** — vllm#40334 dtype mismatch. Verify the compose has `--dtype bfloat16`.
 - **Tool calls return `<tool_call>` as plain text** — Genesis didn't apply. Check `Genesis Results: 27 applied` in logs (boot-time).
 - **OOM during prefill at 60K+ tokens** — single-card Cliff 2 (DeltaNet GDN forward). 60K is the closed envelope on `long-text.yml` (Balanced MTP) and `long-text-no-mtp.yml` (Max-context); >60K still hits the hardware-physical wall on 24 GB. For larger prompts: switch to dual-card TP=2 or llama.cpp + q4_0 KV.

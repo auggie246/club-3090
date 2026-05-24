@@ -15,6 +15,7 @@
 #   bash scripts/report.sh --full            # ALL four: verify + stress + soak + bench (~35 min, the canonical "everything" pass for cross-rig contributions)
 #   bash scripts/report.sh --no-redact       # disable path/host/user redaction
 #   bash scripts/report.sh --container NAME  # override container auto-detection
+#   bash scripts/report.sh --full-calibration  # kv-calc matrix for ALL models (default: only the running model; skipped on llama.cpp/ik_llama)
 #   bash scripts/report.sh > my-rig.md       # capture for paste
 #
 # Why --soak is its own flag:
@@ -34,6 +35,9 @@ DO_SOAK=0
 DO_BENCH=0
 REDACT=1
 CONTAINER=""
+# KV-calc calibration is scoped to the running model by default (#168). Set to 1
+# (flag or REPORT_FULL_CALIBRATION=1) to emit the full catalog-wide matrix.
+FULL_CALIBRATION="${REPORT_FULL_CALIBRATION:-0}"
 
 print_help() {
   sed -n '2,/^set/p' "$0" | sed 's/^# \?//' | head -n -1
@@ -48,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     --full) DO_VERIFY=1; DO_STRESS=1; DO_SOAK=1; DO_BENCH=1; shift ;;
     --no-redact) REDACT=0; shift ;;
     --container) CONTAINER="${2:-}"; shift 2 ;;
+    --full-calibration) FULL_CALIBRATION=1; shift ;;
     -h|--help) print_help; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; echo "Try: bash scripts/report.sh --help" >&2; exit 1 ;;
   esac
@@ -60,12 +65,26 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# KV-calc calibration helpers (engine/model detection + per-model filter, #168).
+source "$REPO_ROOT/scripts/lib/report_calib.sh"
+
+# Pick up a saved MODEL_DIR (and other config) from the repo .env — same as
+# launch.sh / switch.sh, and what setup.sh writes there. An explicit exported
+# MODEL_DIR still wins. This makes the Disk section report the user's real
+# models path instead of falling back to the hardcoded mount below.
+if [[ -z "${MODEL_DIR:-}" && -f "${REPO_ROOT}/.env" ]]; then
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/.env"
+fi
+
 HOST_SHORT="$(hostname -s 2>/dev/null || echo unknown)"
 USER_NAME="${USER:-$(whoami 2>/dev/null || echo unknown)}"
 
 redact() {
   if [[ $REDACT -eq 1 ]]; then
-    sed \
+    # Mask the literal MODEL_DIR value first (if exported) so an arbitrary models
+    # path — /data/..., /srv/... — is caught before the prefix rules below.
+    { if [[ -n "${MODEL_DIR:-}" ]]; then sed -e "s|${MODEL_DIR}|<MODEL_DIR>|g"; else cat; fi; } | sed \
       -e "s|/home/${USER_NAME}|~|g" \
       -e "s|/root|~|g" \
       -e "s|${HOST_SHORT}|<HOST>|g" \
@@ -73,7 +92,10 @@ redact() {
       -e 's|HF_TOKEN=[^ "]*|HF_TOKEN=<REDACTED>|g' \
       -e 's|HUGGING_FACE_HUB_TOKEN=[^ "]*|HUGGING_FACE_HUB_TOKEN=<REDACTED>|g' \
       -e 's|api_key=[^ "]*|api_key=<REDACTED>|gi' \
-      -e 's|hf_[A-Za-z0-9]\{30,\}|hf_<REDACTED>|g'
+      -e 's|hf_[A-Za-z0-9]\{30,\}|hf_<REDACTED>|g' \
+      -e 's|/opt/ai|<STACK_ROOT>|g' \
+      -e 's|/mnt/[a-z]/Users/[^ /]*|/mnt/<DRIVE>/Users/<REDACTED>|g' \
+      -e 's|/mnt/models|<MODELS>|g'
   else
     cat
   fi
@@ -258,6 +280,77 @@ else
   subsection "Topology"
   nvidia-smi topo -m 2>&1 | redact | details "PCIe / GPU topology matrix"
 
+  # lspci-based PCIe/P2P detail. nvidia-smi reports negotiated gen/width but
+  # cannot show trained link state vs capability side-by-side, ACS state on the
+  # upstream bridge, or the real PCIe topology tree — the three things that
+  # actually decide whether GPU↔GPU P2P engages (see issues #137, #351).
+  subsection "PCIe / P2P detail (lspci)"
+  if ! have lspci; then
+    # Fallback: nvidia-smi topo -p2p doesn't need pciutils and shows P2P capability
+    if have nvidia-smi && nvidia-smi topo -p2p rw >/dev/null 2>&1; then
+      echo "_lspci not available (pciutils not installed) — showing P2P capability matrix instead._"
+      echo
+      nvidia-smi topo -p2p rw | redact
+    else
+      echo "_lspci not available (pciutils not installed) — skipping PCIe/P2P detail._"
+    fi
+  else
+    # sudo lspci -vvv is needed for full capability blocks (ACS lives in the
+    # extended config space, root-only). Degrade gracefully if sudo is
+    # unavailable / non-interactive — non-sudo lspci still shows LnkSta.
+    LSPCI_CMD=(lspci)
+    SUDO_NOTE=""
+    if [[ $EUID -ne 0 ]]; then
+      if have sudo && sudo -n true 2>/dev/null; then
+        LSPCI_CMD=(sudo lspci)
+      else
+        SUDO_NOTE="_Note: sudo unavailable/non-interactive — running lspci without root; ACS capability lines may be incomplete (LnkSta still accurate)._"
+      fi
+    fi
+
+    {
+      [[ -n "$SUDO_NOTE" ]] && { echo "$SUDO_NOTE"; echo; }
+
+      echo "# lspci -t  (PCIe topology tree)"
+      lspci -t 2>&1
+      echo
+
+      # Per NVIDIA VGA / 3D-controller function: trained link state vs
+      # capability + ACS state. Filter to the four load-bearing lines only —
+      # never dump the full -vvv block (keeps the report compact + redaction-safe).
+      # ACS (ACSCap/ACSCtl) lives on the UPSTREAM PCIe port, not the GPU
+      # endpoint — and ACS-redirect on that bridge is exactly what blocks P2P
+      # (issues #137, #351) — so for each GPU we also dump its upstream bridge.
+      dump_func() {
+        local slot="$1" label="$2"
+        echo "# lspci -vvv -s ${slot}  (${label}: LnkCap/LnkSta/ACSCap/ACSCtl)"
+        "${LSPCI_CMD[@]}" -vvv -s "$slot" 2>/dev/null \
+          | grep -E '^[[:space:]]*(LnkCap|LnkSta|ACSCap|ACSCtl):' \
+          || echo "  (no matching LnkCap/LnkSta/ACSCap/ACSCtl lines)"
+        echo
+      }
+      while read -r slot _; do
+        [[ -z "$slot" ]] && continue
+        dump_func "$slot" "GPU function"
+        # Resolve the upstream bridge via sysfs (../.. of the device node).
+        bridge=""
+        if [[ -e "/sys/bus/pci/devices/${slot}" ]]; then
+          bridge="$(basename "$(readlink -f "/sys/bus/pci/devices/${slot}/../" 2>/dev/null)" 2>/dev/null)"
+        fi
+        if [[ "$bridge" =~ ^[0-9a-fA-F]{4}: ]]; then
+          dump_func "$bridge" "upstream bridge of ${slot}"
+        else
+          echo "  (could not resolve upstream bridge for ${slot} — ACS state for P2P may be elsewhere in the tree)"
+          echo
+        fi
+      done < <(lspci -D 2>/dev/null | grep -iE 'VGA compatible controller.*NVIDIA|3D controller.*NVIDIA')
+
+      echo "# lspci -nnk | grep -A3 -i nvidia  (driver binding + device IDs)"
+      lspci -nnk 2>/dev/null | grep -A3 -i nvidia 2>/dev/null \
+        || echo "  (no NVIDIA functions found)"
+    } 2>&1 | redact | details "lspci PCIe/P2P detail (LnkSta / ACS / topology)"
+  fi
+
   subsection "Full nvidia-smi"
   nvidia-smi 2>&1 | redact | details "Full nvidia-smi output"
 fi
@@ -288,11 +381,21 @@ section "Display / desktop state"
   fi
 
   if have nvidia-smi; then
+    # Check if a club-3090 container is running (lightweight — full detection is later)
+    # NB: top-level (not in a function) — plain assignment, not `local`.
+    our_container=""
+    if have docker && docker info >/dev/null 2>&1; then
+      our_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
+    fi
     nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
       | while IFS=, read -r idx used; do
           idx="${idx# }"; used="${used# }"
           if [[ "$used" =~ ^[0-9]+$ ]] && [[ "$used" -gt 100 ]]; then
-            echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+            if [[ -n "$our_container" ]]; then
+              echo "- **GPU $idx idle VRAM:** ${used} MiB (held by running \`${our_container}\`)"
+            else
+              echo "- **GPU $idx idle VRAM:** ${used} MiB ⚠ something is using this GPU (display, browser, container)"
+            fi
           else
             echo "- **GPU $idx idle VRAM:** ${used} MiB ✓"
           fi
@@ -341,9 +444,13 @@ section "Container runtime"
 section "Stack version"
 {
   if [[ -d .git ]]; then
+    # Prefer `git describe` for a human-readable version (e.g. v0.6.2-3-ge299e70,
+    # "3 commits past v0.6.2 at SHA e299e70"). Falls back to raw SHA if no tags
+    # are reachable (shallow clone, fresh repo).
+    version=$(git describe --tags --always --dirty 2>/dev/null)
     commit=$(git rev-parse --short HEAD 2>/dev/null)
     branch=$(git branch --show-current 2>/dev/null)
-    echo "- **club-3090:** \`${commit:-unknown}\` (branch: \`${branch:-detached}\`)"
+    echo "- **club-3090:** \`${version:-${commit:-unknown}}\` (branch: \`${branch:-detached}\`, SHA \`${commit:-unknown}\`)"
     if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
       echo "- **Working tree:** ⚠ has uncommitted changes (run \`git status\` to inspect)"
     fi
@@ -373,6 +480,74 @@ section "Stack version"
 } | redact
 
 # ---------------------------------------------------------------------------
+# Profile state
+# ---------------------------------------------------------------------------
+
+if [[ -x scripts/lib/profiles/estate_cli.py || -f scripts/lib/profiles/estate_cli.py ]]; then
+  python3 scripts/lib/profiles/estate_cli.py report-state 2>&1 | redact || true
+fi
+
+# ---------------------------------------------------------------------------
+# KV math calibration
+# ---------------------------------------------------------------------------
+# When a user files a VRAM-OOM or context-ceiling bug, the maintainer's first
+# question is "does kv-calc still agree with measured reality?" — a calibration
+# failure means the projection model has drifted from the actual VRAM cost of a
+# compose, so any "predicted PASS" verdict can't be trusted. Surface the
+# verdict line + any FAIL rows here so a triage reply can immediately see
+# whether to trust kv-calc projections for this user's config.
+
+# Engine + model detection for kv-calc scoping (#168). Resolve the active
+# container (explicit --container wins; else first running club-3090 container),
+# then map it to a kv-calc engine family + model id via scripts/lib/report_calib.sh.
+_calib_container="${CONTAINER:-}"
+if [[ -z "$_calib_container" ]] && have docker && docker info >/dev/null 2>&1; then
+  _calib_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
+fi
+CALIB_ENGINE_KIND="${ENGINE_KIND:-$(calib_engine_for_container "$_calib_container")}"
+CALIB_MODEL_ID="$(calib_model_for_container "$_calib_container")"
+
+if have python3 && [[ -f tools/kv-calc.py ]]; then
+  section "KV math calibration"
+  # kv-calc is vLLM-memory-model-coupled; skip on the ggml engines (llama.cpp + ik_llama).
+  if [[ "$CALIB_ENGINE_KIND" == "llamacpp" ]]; then
+    echo "- _kv-calc calibration is vLLM-specific — skipped on the llama.cpp / ik_llama engine (ggml uses a different allocator)._"
+  elif ! python3 -c 'import yaml' 2>/dev/null; then
+    # Item 1: graceful-degrade when PyYAML is missing
+    echo "- _kv-calc calibration skipped — PyYAML not installed (\`pip install pyyaml\`)._"
+  else
+    # #168: scope to the running model by default; --full-calibration (or
+    # REPORT_FULL_CALIBRATION=1) restores the catalog-wide matrix. Falls back to
+    # the full matrix when the model can't be resolved.
+    calib_scope=""
+    if [[ "$FULL_CALIBRATION" != "1" && -n "$CALIB_MODEL_ID" ]]; then
+      calib_scope="$CALIB_MODEL_ID"
+      echo "- _Scoped to the running model \`${CALIB_MODEL_ID}\` — pass \`--full-calibration\` for all calibrated models._"
+    fi
+    calib_output=$(python3 tools/kv-calc.py --calibration 2>&1 | calib_filter_model_section "$calib_scope" || true)
+    overall=$(echo "$calib_output" | grep -E '^Overall:' | head -1)
+    fail_rows=$(echo "$calib_output" | grep -E '\bFAIL\b' || true)
+    {
+      if [[ -n "$overall" ]]; then
+        echo "- ${overall}"
+      else
+        echo "- _kv-calc --calibration produced no Overall line; see output below._"
+      fi
+      if [[ -n "$fail_rows" ]]; then
+        echo "- ⚠ Failing rows:"
+        echo '```'
+        echo "$fail_rows"
+        echo '```'
+        echo "- Math model is mis-calibrated against measured reality for the rows above. Any kv-calc projection on this checkout should be treated as suspect until the calibration anchors / formulas are reconciled."
+      else
+        echo "- No FAIL rows. kv-calc projections should agree with measured VRAM within the ±1.5 GB error band."
+      fi
+    } | redact
+    echo "$calib_output" | redact | details "Full kv-calc --calibration output"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Active container
 # ---------------------------------------------------------------------------
 
@@ -385,6 +560,7 @@ if [[ -z "$CONTAINER" ]] && have docker && docker info >/dev/null 2>&1; then
   CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=vllm-qwen36' 2>/dev/null | head -1)
   [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' 2>/dev/null | head -1)
   [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=llama-cpp-' 2>/dev/null | head -1)
+  [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=club3090-' 2>/dev/null | head -1)
 fi
 
 # Engine class — drives which probes run inside the container body. Inferred
@@ -395,22 +571,39 @@ case "${ENGINE_KIND:-}" in
     case "$CONTAINER" in
       vllm-*)      ENGINE_KIND="vllm" ;;
       llama-cpp-*) ENGINE_KIND="llamacpp" ;;
+      club3090-*)
+        container_image=$(docker ps --filter "name=$CONTAINER" --format '{{.Image}}' 2>/dev/null | head -1)
+        case "$container_image" in
+          *llama.cpp*|*llama-cpp*) ENGINE_KIND="llamacpp" ;;
+          *vllm*)                  ENGINE_KIND="vllm" ;;
+          *)                       ENGINE_KIND="unknown" ;;
+        esac ;;
       *)           ENGINE_KIND="unknown" ;;
     esac ;;
 esac
 
 if [[ -z "$CONTAINER" ]]; then
-  echo "_No vLLM or llama.cpp container running. Start one with \`bash scripts/launch.sh\` and re-run for the full report._"
+  echo "_No vLLM, llama.cpp, or estate container running. Start one with \`bash scripts/launch.sh\` and re-run for the full report._"
 else
   {
     status=$(docker ps --filter "name=$CONTAINER" --format '{{.Status}}' 2>/dev/null | head -1)
     ports=$(docker ps --filter "name=$CONTAINER" --format '{{.Ports}}' 2>/dev/null | head -1)
     image=$(docker ps --filter "name=$CONTAINER" --format '{{.Image}}' 2>/dev/null | head -1)
+    # Digest + OCI labels (load-bearing when tag is rolling, e.g. llama.cpp
+    # `:server-cuda`). Without these, a bug report can't reproduce the bytes.
+    image_digest=$(docker inspect "$CONTAINER" --format '{{.Image}}' 2>/dev/null | head -1)
+    image_revision=$(docker inspect "$CONTAINER" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null)
+    image_version=$(docker inspect "$CONTAINER" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null)
+    image_source=$(docker inspect "$CONTAINER" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' 2>/dev/null)
     echo "- **Name:** \`$CONTAINER\`"
     echo "- **Engine:** \`${ENGINE_KIND}\`"
     echo "- **Status:** ${status:-unknown}"
     echo "- **Ports:** ${ports:-unknown}"
     echo "- **Image:** \`${image:-unknown}\`"
+    [[ -n "$image_digest" ]]   && echo "- **Image digest:** \`${image_digest}\`"
+    [[ -n "$image_version"  && "$image_version"  != "<no value>" ]] && echo "- **Build tag (OCI version):** \`${image_version}\`"
+    [[ -n "$image_revision" && "$image_revision" != "<no value>" ]] && echo "- **Upstream commit (OCI revision):** \`${image_revision}\`"
+    [[ -n "$image_source"   && "$image_source"   != "<no value>" ]] && echo "- **Upstream source:** ${image_source}"
   } | redact
 
   # Engine-specific probes from this point. vLLM container has Python +
@@ -651,6 +844,7 @@ if [[ $DO_SOAK -eq 1 ]]; then
   if [[ -f scripts/soak-test.sh ]]; then
     soak_run_dir="results/report-soak-$(date +%Y%m%d-%H%M%S)"
     SOAK_MODE=continuous SOAK_SESSIONS=5 SOAK_TURNS=5 SOAK_OUTPUT="$soak_run_dir" \
+      SOAK_TIMEOUT_S="${SOAK_TIMEOUT_S:-1800}" \
       bash scripts/soak-test.sh 2>&1 | redact | details "soak-test stdout (5-session × 5-turn ramping conversation, ~25 min)"
     if [[ -f "$soak_run_dir/summary.md" ]]; then
       echo
@@ -676,6 +870,31 @@ if [[ $DO_BENCH -eq 1 ]]; then
   else
     echo "_scripts/bench.sh not found_"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# Soak-not-run reminder — fired when --bench (or partial) was used without
+# --soak/--full. Cross-rig bench rows want the soak verdict; without it we
+# can't say if Cliff 2b is open on this rig class.
+# ---------------------------------------------------------------------------
+
+if [[ $DO_BENCH -eq 1 && $DO_SOAK -eq 0 ]]; then
+  section "Soak status"
+  cat <<'EOF'
+> ⚠️ **Soak: not included in this report.**
+>
+> This run used `--bench` (or `--verify`/`--stress` only) — the soak-continuous
+> test was skipped. Cross-rig bench contributions on club-3090 want the soak
+> verdict so we can tell whether Cliff 2b is open on your rig class.
+>
+> Run soak separately and paste its output as a follow-up:
+>
+> ```bash
+> bash scripts/soak-test.sh --continuous   # auto-detects endpoint + container
+> ```
+>
+> Takes ~25 min. The `[soak]` summary block (verdict, max VRAM growth, silent-empty %, TPS retention) is what ends up in the bench-template's "Soak verdict" dropdown. See [docs/CLIFFS.md](https://github.com/noonghunna/club-3090/blob/master/docs/CLIFFS.md) for context.
+EOF
 fi
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@
 #   sudo bash scripts/power-cap-sweep.sh --load-mode decode-concurrent --concurrency 8 --bench-runs 3
 #   sudo bash scripts/power-cap-sweep.sh --load-mode prefill-heavy
 #   sudo bash scripts/power-cap-sweep.sh --no-reset               # leave at last cap (you reset manually)
+#   sudo bash scripts/power-cap-sweep.sh --include-commit         # stamp club-3090 git short SHA in report header
 #
 # Load modes:
 #   decode-single:
@@ -91,6 +92,36 @@
 #   - Per-cap bench logs at /tmp/power-cap-N{wattage}.log
 #   - Markdown summary at /tmp/power-cap-summary.md (paste into GitHub issue/discussion)
 #
+# Per-cap summary columns:
+#   Cap | Narr TPS | Code TPS | Actual W | Temp °C | SM clk | Mem clk | Pwr-throttle % | P-state | TPS/W
+#
+# - SM clk / Mem clk = median compute / memory clocks during in-load samples (MHz). Together
+#   they distinguish compute-bound vs bandwidth-bound regimes: if SM clock varies with cap
+#   while TPS plateaus → bandwidth-bound; if SM clock is pinned at max while TPS still climbs
+#   → compute-bound.
+# - Pwr-throttle % = % of in-load samples where firmware was actively capping draw at the
+#   set limit (sw_power_cap=Active). 100% means power is the binding constraint at that
+#   cap; <100% means workload undersupply or thermal-throttle taking over.
+# - P-state = dominant firmware power state during in-load samples (P0=max boost,
+#   P2=sustained-load pinned, higher numbers=idle). Boost-state plateaus appear when
+#   adjacent caps share a P-state and draw the same wattage despite different cap settings.
+#
+# Plateau auto-detection:
+#   At end of sweep, the script scans for 3+ consecutive caps with identical draw
+#   (within ±2W) and TPS (within ±1%) — a firmware boost-clock plateau where caps
+#   in the run are functionally equivalent. Detected plateaus are logged via
+#   [plateau detected] lines and added as a "Detected boost-clock plateau(s)"
+#   section in the summary file. Pick the LOWEST cap in a plateau to save power
+#   for free; raising past the plateau end-cap is the only way to escape.
+#
+# Recommended sweep chain (full workload-class characterization on your rig):
+#   Run two modes — decode and prefill sweet spots can differ. ~14 min total.
+#     1. sudo bash scripts/power-cap-sweep.sh --cooling <class> --load-mode decode-single
+#     2. sudo bash scripts/power-cap-sweep.sh --cooling <class> --load-mode prefill-heavy
+#   For multi-tenant rigs, also:
+#     3. sudo bash scripts/power-cap-sweep.sh --cooling <class> --load-mode decode-concurrent --concurrency auto
+#   See docs/HARDWARE.md > Power > "Recommended sweep chain" for the full rationale.
+#
 # Requires sudo for `nvidia-smi -pl`. Auto-detects running container + URL +
 # MODEL via the same logic as bench.sh.
 #
@@ -112,11 +143,25 @@ COOLING="unspecified" # air|water|aio|unspecified — affects how to read the da
 STEP_SIZE=10          # increment in W between caps when --caps not specified (10W matches @laurimyllari's resolution)
 LOAD_MODE="decode-single"   # decode-single | decode-concurrent | prefill-heavy
 CONCURRENCY=4         # parallel streams, or "auto", when LOAD_MODE=decode-concurrent
-BENCH_RUNS=1          # repeated measured batches for decode-concurrent/prefill-heavy (median reported)
+BENCH_RUNS=1          # repeated measured batches for decode-concurrent/prefill-heavy (median reported);
+                      # default stays one batch for sweep shape. Use --bench-runs 3 only for anchor data.
 MAX_CONCURRENCY_PROBE=16
 LOAD_TARGET=0.92      # target actual-power/cap ratio for --concurrency auto
 CONCURRENCY_STRETCH=0 # add N to auto-detected concurrency (probe headroom past plateau pick)
+TARGET_CAP_SECONDS=10 # decode-single time-bounded streaming bench seconds per direction
+                      # (narrative + code). This keeps per-cap wall stable
+                      # across card classes while giving the sampler >=10s
+                      # of util>50% data per cap.
+TARGET_PREFILL_SECONDS="${TARGET_PREFILL_SECONDS:-10}" # prefill-heavy prompt is calibrated at highest cap
+PREFILL_CALIBRATION_REPEATS="${PREFILL_CALIBRATION_REPEATS:-1000}"
+PREFILL_FILLER_REPEATS=""
+PREFILL_PROMPT_TOKENS=""
+DECODE_CONCURRENT_RUN_SECONDS=""
 CALIBRATION_NOTE=""
+INCLUDE_COMMIT=0      # --include-commit stamps the club-3090 git short SHA in
+                      # the report header. Off by default — `curl ... | bash`
+                      # users have no clone, and stamping "n/a" is confusing
+                      # (better to suppress the field entirely there).
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -130,6 +175,8 @@ while [ $# -gt 0 ]; do
     --max-concurrency-probe) MAX_CONCURRENCY_PROBE="$2"; shift 2 ;;
     --load-target) LOAD_TARGET="$2"; shift 2 ;;
     --concurrency-stretch) CONCURRENCY_STRETCH="$2"; shift 2 ;;
+    --target-cap-seconds) TARGET_CAP_SECONDS="$2"; shift 2 ;;
+    --include-commit) INCLUDE_COMMIT=1; shift ;;
     --no-reset)    RESET=0; shift ;;
     -h|--help)
       sed -n '1,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \?//'
@@ -168,6 +215,18 @@ if ! [[ "$CONCURRENCY_STRETCH" =~ ^[0-9]+$ ]]; then
 fi
 if [ "$CONCURRENCY_STRETCH" -gt 0 ] && [ "$CONCURRENCY_AUTO" -ne 1 ]; then
   echo "[error] --concurrency-stretch only applies with --concurrency auto" >&2
+  exit 1
+fi
+if ! [[ "$TARGET_CAP_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[error] --target-cap-seconds must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$TARGET_PREFILL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[error] TARGET_PREFILL_SECONDS must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$PREFILL_CALIBRATION_REPEATS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[error] PREFILL_CALIBRATION_REPEATS must be a positive integer" >&2
   exit 1
 fi
 if ! python3 - "$LOAD_TARGET" <<'PY' >/dev/null 2>&1
@@ -258,16 +317,351 @@ GPU_VRAM=$(nvidia-smi --query-gpu=memory.total          --format=csv,noheader,no
 
 SAMPLER_PID=""
 cleanup() {
+  # Avoid trap recursion if cleanup itself is interrupted
+  trap '' INT TERM EXIT
+
   if [ -n "${SAMPLER_PID:-}" ]; then
     kill "$SAMPLER_PID" 2>/dev/null || true
     wait "$SAMPLER_PID" 2>/dev/null || true
     SAMPLER_PID=""
   fi
+
+  # Kill any bench.sh / tee / curl children that might still be running.
+  # Without this, Ctrl+C or SIGTERM from a parent shell leaves orphaned
+  # subprocess writing to log files + holding the GPU cap setting.
+  # (SIGKILL bypasses this trap entirely — that's a kernel-level guarantee.)
+  pkill -TERM -P $$ 2>/dev/null || true
+
   if [ "${RESET:-1}" -eq 1 ] && [ -n "${STOCK_TDP:-}" ]; then
     nvidia-smi -pl "$STOCK_TDP" -i "$GPU_INDEX" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT INT TERM
+
+bench_decode_single_for_seconds() {
+  local kind="$1"
+  local seconds="$2"
+  local cap="$3"
+  local log_file="$4"
+  local req_file out_file start_ns end_ns wall_s tokens tps prompt max_time
+
+  req_file="/tmp/power-cap-N${cap}-${kind}.req.json"
+  out_file="/tmp/power-cap-N${cap}-${kind}.sse"
+  max_time="$seconds"
+
+  case "$kind" in
+    narrative) prompt="Write a detailed 800-word essay explaining transformer attention." ;;
+    code)      prompt="Implement quicksort in Python with detailed comments." ;;
+    *) echo "[error] unknown decode-single prompt kind: $kind" >&2; return 1 ;;
+  esac
+
+  python3 - "$req_file" "$MODEL" "$prompt" <<'PY'
+import json
+import sys
+
+path, model, prompt = sys.argv[1:4]
+body = {
+    "model": model,
+    "messages": [{"role": "user", "content": prompt}],
+    "max_tokens": 99999,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "stream": True,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(body, f)
+PY
+
+  start_ns=$(date +%s%N)
+  # curl exits 28 when --max-time cuts the stream. That is expected here: the
+  # wall clock is the benchmark boundary, not a completed max_tokens response.
+  curl -sS --no-buffer --max-time "$max_time" "${URL}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "@${req_file}" \
+    -o "$out_file" 2>>"$log_file" || true
+  end_ns=$(date +%s%N)
+
+  wall_s=$(python3 - "$start_ns" "$end_ns" <<'PY'
+import sys
+start, end = map(int, sys.argv[1:3])
+print(f"{(end - start) / 1e9:.3f}")
+PY
+)
+  tokens=$(python3 - "$out_file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+chunks = 0
+usage_tokens = None
+chars = 0
+
+try:
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                obj = json.loads(data)
+            except Exception:
+                continue
+            usage = obj.get("usage")
+            if isinstance(usage, dict):
+                completion = usage.get("completion_tokens")
+                if isinstance(completion, int) and completion > 0:
+                    usage_tokens = completion
+            for choice in obj.get("choices", []):
+                text = ""
+                delta = choice.get("delta")
+                if isinstance(delta, dict):
+                    # Sum content + reasoning_content + reasoning fields. Servers route
+                    # thinking tokens to different field paths depending on config:
+                    #   delta.content           — standard OpenAI chat-completions path
+                    #   delta.reasoning_content — vLLM with --reasoning-parser qwen3 (most common)
+                    #   delta.reasoning         — some vLLM versions / DeepSeek convention
+                    # Counting only content silently produces 0 TPS readings even though
+                    # the GPU is generating fine. See:
+                    #   - disc club-3090#62 (laurimyllari 4090 sweep, 2026-05-08) — added reasoning_content
+                    #   - issue club-3090#104 (alexpolo1 dual 3090 sweep, 2026-05-08) — added reasoning
+                    text = (
+                        (delta.get("content") or "")
+                        + (delta.get("reasoning_content") or "")
+                        + (delta.get("reasoning") or "")
+                    )
+                if not text:
+                    text = choice.get("text") or ""
+                if text:
+                    chunks += 1
+                    chars += len(text)
+except FileNotFoundError:
+    pass
+
+if usage_tokens:
+    print(usage_tokens)
+elif chunks:
+    print(chunks)
+elif chars:
+    print(max(1, round(chars / 4)))
+else:
+    print(0)
+PY
+)
+  tps=$(python3 - "$tokens" "$wall_s" <<'PY'
+import sys
+tokens = int(sys.argv[1])
+wall = float(sys.argv[2])
+print(f"{tokens / max(wall, 0.001):.2f}")
+PY
+)
+
+  echo "[$kind] ${tokens} streamed token-chunks in ${wall_s}s -> ${tps} TPS" | tee -a "$log_file"
+  printf "%s\n" "$tps"
+}
+
+bench_decode_concurrent_for_seconds() {
+  local kind="$1"
+  local seconds="$2"
+  local cap="$3"
+  local run_idx="$4"
+  local log_file="$5"
+  local req_file out_file start_ns end_ns wall_s total_tokens tps prompt max_time
+  local pids=()
+
+  max_time="$seconds"
+  case "$kind" in
+    narrative) prompt="Write a detailed 800-word essay explaining transformer attention." ;;
+    code)      prompt="Implement quicksort in Python with detailed comments." ;;
+    *) echo "[error] unknown decode-concurrent prompt kind: $kind" >&2; return 1 ;;
+  esac
+
+  start_ns=$(date +%s%N)
+  for i in $(seq 1 "$CONCURRENCY"); do
+    req_file="/tmp/power-cap-N${cap}-r${run_idx}-${kind}-${i}.req.json"
+    out_file="/tmp/power-cap-N${cap}-r${run_idx}-${kind}-${i}.sse"
+    python3 - "$req_file" "$MODEL" "$prompt" "$run_idx" "$i" <<'PY'
+import json
+import sys
+import time
+
+path, model, prompt, run_idx, stream_idx = sys.argv[1:6]
+nonce = f"power-cap concurrent timed nonce {time.time_ns()} run={run_idx} stream={stream_idx}. "
+body = {
+    "model": model,
+    "messages": [{"role": "user", "content": nonce + prompt}],
+    "max_tokens": 99999,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "stream": True,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(body, f)
+PY
+    curl -sS --no-buffer --max-time "$max_time" "${URL}/v1/chat/completions" \
+      -H 'Content-Type: application/json' \
+      -d "@${req_file}" \
+      -o "$out_file" 2>>"$log_file" &
+    pids+=("$!")
+  done
+
+  for pid in "${pids[@]}"; do
+    wait "$pid" || true
+  done
+  end_ns=$(date +%s%N)
+
+  wall_s=$(python3 - "$start_ns" "$end_ns" <<'PY'
+import sys
+start, end = map(int, sys.argv[1:3])
+print(f"{(end - start) / 1e9:.3f}")
+PY
+)
+  total_tokens=0
+  for i in $(seq 1 "$CONCURRENCY"); do
+    out_file="/tmp/power-cap-N${cap}-r${run_idx}-${kind}-${i}.sse"
+    local stream_tokens
+    stream_tokens=$(python3 - "$out_file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+chunks = 0
+usage_tokens = None
+chars = 0
+try:
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                obj = json.loads(data)
+            except Exception:
+                continue
+            usage = obj.get("usage")
+            if isinstance(usage, dict):
+                completion = usage.get("completion_tokens")
+                if isinstance(completion, int) and completion > 0:
+                    usage_tokens = completion
+            for choice in obj.get("choices", []):
+                text = ""
+                delta = choice.get("delta")
+                if isinstance(delta, dict):
+                    # Sum content + reasoning_content + reasoning fields. Servers route
+                    # thinking tokens to different field paths depending on config:
+                    #   delta.content           — standard OpenAI chat-completions path
+                    #   delta.reasoning_content — vLLM with --reasoning-parser qwen3 (most common)
+                    #   delta.reasoning         — some vLLM versions / DeepSeek convention
+                    # Counting only content silently produces 0 TPS readings even though
+                    # the GPU is generating fine. See:
+                    #   - disc club-3090#62 (laurimyllari 4090 sweep, 2026-05-08) — added reasoning_content
+                    #   - issue club-3090#104 (alexpolo1 dual 3090 sweep, 2026-05-08) — added reasoning
+                    text = (
+                        (delta.get("content") or "")
+                        + (delta.get("reasoning_content") or "")
+                        + (delta.get("reasoning") or "")
+                    )
+                if not text:
+                    text = choice.get("text") or ""
+                if text:
+                    chunks += 1
+                    chars += len(text)
+except FileNotFoundError:
+    pass
+
+if usage_tokens:
+    print(usage_tokens)
+elif chunks:
+    print(chunks)
+elif chars:
+    print(max(1, round(chars / 4)))
+else:
+    print(0)
+PY
+)
+    total_tokens=$((total_tokens + stream_tokens))
+  done
+  tps=$(python3 - "$total_tokens" "$wall_s" <<'PY'
+import sys
+tokens = int(sys.argv[1])
+wall = float(sys.argv[2])
+print(f"{tokens / max(wall, 0.001):.2f}")
+PY
+)
+
+  echo "[$kind r${run_idx}] ${CONCURRENCY} streams, ${total_tokens} streamed token-chunks in ${wall_s}s -> aggregate ${tps} TPS" | tee -a "$log_file"
+  printf "%s\n" "$tps"
+}
+
+bench_prefill_once() {
+  local repeats="$1"
+  local cap="$2"
+  local run_idx="$3"
+  local log_file="$4"
+  local max_time="${5:-180}"
+  local req_file out_file start_ns end_ns wall_s prompt_tokens tps
+
+  req_file="/tmp/power-cap-N${cap}-r${run_idx}-prefill.req.json"
+  out_file="/tmp/power-cap-N${cap}-r${run_idx}-prefill.json"
+  python3 - "$req_file" "$MODEL" "$repeats" <<'PY'
+import json
+import sys
+import time
+
+path, model = sys.argv[1:3]
+filler_repeats = int(sys.argv[3])
+filler = "The quick brown fox jumps over the lazy dog. " * filler_repeats
+nonce = f" Unique power-cap sweep nonce: {time.time_ns()}."
+body = {
+    "model": model,
+    "messages": [{"role": "user", "content": nonce + " " + filler + " Summarize."}],
+    "max_tokens": 10,
+    "temperature": 0,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(body, f)
+PY
+  start_ns=$(date +%s%N)
+  if ! curl -sS -f --max-time "$max_time" "${URL}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "@${req_file}" \
+    -o "$out_file" 2>>"$log_file"; then
+    echo "[warn] prefill-heavy run ${run_idx} curl failed at ${cap}W" | tee -a "$log_file" >&2
+  fi
+  end_ns=$(date +%s%N)
+  wall_s=$(python3 - "$start_ns" "$end_ns" <<'PY'
+import sys
+start, end = map(int, sys.argv[1:3])
+print(f"{(end - start) / 1e9:.3f}")
+PY
+)
+  prompt_tokens=$(python3 - "$out_file" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        print(json.load(f).get("usage", {}).get("prompt_tokens", 0))
+except Exception:
+    print(0)
+PY
+)
+  tps=$(python3 - "$prompt_tokens" "$wall_s" <<'PY'
+import sys
+tokens = int(sys.argv[1])
+wall = float(sys.argv[2])
+print(f"{tokens / max(wall, 0.001):.2f}")
+PY
+)
+  echo "[prefill r${run_idx}] ${prompt_tokens} prompt tokens in ${wall_s}s -> ${tps} prefill TPS" | tee -a "$log_file" >&2
+  printf "%s %s %s\n" "$tps" "$prompt_tokens" "$wall_s"
+}
 
 run_concurrency_probe() {
   local n="$1"
@@ -391,9 +785,19 @@ if [ -z "$CAPS" ]; then
   CAPS=$(python3 -c "
 min_l = int(float('${MIN_LIMIT%.*}'))
 max_l = int(float('${MAX_LIMIT%.*}'))
+stock = int(float('${STOCK_TDP%.*}'))
 step = max(1, int('${STEP_SIZE}'))
-# Round min UP to nearest step boundary, max DOWN — keeps caps clean multiples of step.
-start = ((min_l + step - 1) // step) * step
+# Smart floor: max(firmware-min, 50% of stock TDP). Below 50% of stock TDP,
+# the GPU is so throttled that bench takes 3-5× longer per cap and produces
+# uselessly low TPS. Skip that region by default. Override via --caps if you
+# explicitly want sub-50%-stock data.
+# Examples:
+#   3090  (firmware 100W, stock 370W) → floor max(100, 185) = 185W
+#   4090  (firmware 150W, stock 450W) → floor max(150, 225) = 225W
+#   5090  (firmware 250W, stock 600W) → floor max(250, 300) = 300W
+floor = max(min_l, int(stock * 0.5))
+# Round floor UP to nearest step boundary, max DOWN — keeps caps clean multiples of step.
+start = ((floor + step - 1) // step) * step
 end   = (max_l // step) * step
 caps = list(range(start, end + 1, step))
 # Always include the exact max_limit at the end if rounding clipped it (so we
@@ -407,8 +811,21 @@ else
   AUTO_DERIVED=0
 fi
 NUM_CAPS=$(echo "$CAPS" | tr ',' '\n' | wc -l | tr -d ' ')
-# ~30s/cap including settle + bench (1 warmup + 2 runs × 500+400 tokens).
-EST_MIN=$(( (NUM_CAPS * 30 + 59) / 60 ))
+if [ "$LOAD_MODE" = "decode-single" ]; then
+  EST_MIN=$(( (NUM_CAPS * (TARGET_CAP_SECONDS * 2 + 5) + 59) / 60 ))
+  EST_MAX=$(( (NUM_CAPS * (TARGET_CAP_SECONDS * 2 + 10) + 59) / 60 ))
+elif [ "$LOAD_MODE" = "decode-concurrent" ]; then
+  DECODE_CONCURRENT_RUN_SECONDS=$(( (TARGET_CAP_SECONDS + BENCH_RUNS - 1) / BENCH_RUNS ))
+  [ "$DECODE_CONCURRENT_RUN_SECONDS" -lt 3 ] && DECODE_CONCURRENT_RUN_SECONDS=3
+  EST_MIN=$(( (NUM_CAPS * (BENCH_RUNS * DECODE_CONCURRENT_RUN_SECONDS * 2 + 5) + 59) / 60 ))
+  EST_MAX=$(( (NUM_CAPS * (BENCH_RUNS * DECODE_CONCURRENT_RUN_SECONDS * 2 + 10) + 59) / 60 ))
+elif [ "$LOAD_MODE" = "prefill-heavy" ]; then
+  EST_MIN=$(( (NUM_CAPS * BENCH_RUNS * (TARGET_PREFILL_SECONDS + 5) + 59) / 60 ))
+  EST_MAX=$(( (NUM_CAPS * BENCH_RUNS * (TARGET_PREFILL_SECONDS * 3 + 10) + 59) / 60 ))
+else
+  EST_MIN=$(( (NUM_CAPS * 30 + 59) / 60 ))
+  EST_MAX=$(( EST_MIN * 3 ))
+fi
 HIGHEST_CAP=$(python3 - "$CAPS" <<'PY'
 import sys
 print(max(int(float(x.strip())) for x in sys.argv[1].split(",") if x.strip()))
@@ -538,6 +955,77 @@ PY
   echo
 fi
 
+if [ "$LOAD_MODE" = "prefill-heavy" ]; then
+  if [ -n "${BENCH_PREFILL_FILLER_REPEATS:-}" ]; then
+    PREFILL_FILLER_REPEATS="$BENCH_PREFILL_FILLER_REPEATS"
+    CALIBRATION_NOTE="prefill filler_repeats=${PREFILL_FILLER_REPEATS} from BENCH_PREFILL_FILLER_REPEATS override"
+  else
+    # Detect model's max context window for prompt-size clamping. If the
+    # calibrated target prompt exceeds the context, llama.cpp truncates
+    # silently → wall time becomes meaningless → bogus TPS readings.
+    # Prefer llama.cpp's /props endpoint (exposes n_ctx); fall back to
+    # vLLM's /v1/models (exposes max_model_len). 0 = unable to detect,
+    # skip the clamp (preserve existing behavior).
+    MODEL_MAX_CTX=$(
+      curl -sf --max-time 5 "${URL}/props" 2>/dev/null \
+        | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('default_generation_settings',{}).get('n_ctx',0))" 2>/dev/null \
+        || curl -sf --max-time 5 "${URL}/v1/models" 2>/dev/null \
+        | python3 -c "import json,sys; d=json.load(sys.stdin); m=d.get('data',[{}])[0]; print(m.get('max_model_len', m.get('context_length',0)))" 2>/dev/null \
+        || echo 0
+    )
+    MODEL_MAX_CTX="${MODEL_MAX_CTX:-0}"
+    if [ "$MODEL_MAX_CTX" -gt 0 ]; then
+      echo "[calibrate] detected model context: ${MODEL_MAX_CTX} tokens (will clamp prompt to 90%)"
+    else
+      echo "[calibrate] could not detect model context — proceeding without clamp (set MODEL_MAX_CTX env if needed)"
+    fi
+    echo "[calibrate] prefill-heavy: sizing prompt at ${HIGHEST_CAP}W cap for ~${TARGET_PREFILL_SECONDS}s at the fastest cap"
+    nvidia-smi -pl "$HIGHEST_CAP" -i "$GPU_INDEX" >/dev/null
+    sleep 2
+    CAL_LOG="/tmp/power-cap-prefill-calibration.log"
+    : > "$CAL_LOG"
+    read -r PROBE_TPS PROBE_TOKENS PROBE_WALL < <(
+      bench_prefill_once "$PREFILL_CALIBRATION_REPEATS" "$HIGHEST_CAP" calibration "$CAL_LOG" 90
+    )
+    if ! [[ "$PROBE_TPS" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$PROBE_TOKENS" =~ ^[0-9]+$ ]] || [ "$PROBE_TOKENS" -le 0 ]; then
+      echo "[error] prefill calibration failed; see $CAL_LOG" >&2
+      exit 1
+    fi
+    read -r PREFILL_FILLER_REPEATS PREFILL_PROMPT_TOKENS PREFILL_CLAMPED < <(python3 - "$PROBE_TPS" "$PROBE_TOKENS" "$TARGET_PREFILL_SECONDS" "$PREFILL_CALIBRATION_REPEATS" "$MODEL_MAX_CTX" <<'PY'
+import math
+import sys
+
+tps = float(sys.argv[1])
+probe_tokens = int(sys.argv[2])
+target_seconds = int(sys.argv[3])
+tokens_per_repeat = max(probe_tokens / float(sys.argv[4]), 1.0)
+max_ctx = int(sys.argv[5])
+target_tokens = max(1000, int(round(tps * target_seconds)))
+clamped = 0
+if max_ctx > 0:
+    safe_max = int(max_ctx * 0.9)
+    # Subtract some headroom for the chat template + max_tokens overhead
+    safe_max = max(1000, safe_max - 256)
+    if target_tokens > safe_max:
+        target_tokens = safe_max
+        clamped = 1
+repeats = max(1, int(math.floor(target_tokens / tokens_per_repeat)))
+print(repeats, int(round(repeats * tokens_per_repeat)), clamped)
+PY
+)
+    if [ "${PREFILL_CLAMPED:-0}" = "1" ]; then
+      EFFECTIVE_SECONDS=$(awk "BEGIN{printf \"%.1f\", ${PREFILL_PROMPT_TOKENS} / ${PROBE_TPS}}")
+      CALIBRATION_NOTE="prefill probe at ${HIGHEST_CAP}W: ${PROBE_TOKENS} tok in ${PROBE_WALL}s = ${PROBE_TPS} TPS; target=${TARGET_PREFILL_SECONDS}s would have needed >${MODEL_MAX_CTX}-token prompt, clamped to 90% of model ctx → filler_repeats=${PREFILL_FILLER_REPEATS} (~${PREFILL_PROMPT_TOKENS} prompt tok, ~${EFFECTIVE_SECONDS}s effective at high cap)"
+      echo "[calibrate] ⚠️  clamped: ${CALIBRATION_NOTE}"
+      echo "[calibrate] note: per-cap walls at the high end will be < ${TARGET_PREFILL_SECONDS}s. For longer wall, restart engine with bigger context (e.g. -c $((MODEL_MAX_CTX * 2))) or lower --target-prefill-seconds."
+    else
+      CALIBRATION_NOTE="prefill probe at ${HIGHEST_CAP}W: ${PROBE_TOKENS} tok in ${PROBE_WALL}s = ${PROBE_TPS} TPS; target=${TARGET_PREFILL_SECONDS}s -> filler_repeats=${PREFILL_FILLER_REPEATS} (~${PREFILL_PROMPT_TOKENS} prompt tok)"
+      echo "[calibrate] ${CALIBRATION_NOTE}"
+    fi
+    echo
+  fi
+fi
+
 echo "[setup] GPU $GPU_INDEX: $GPU_NAME ($GPU_VRAM MiB)"
 echo "[setup] power envelope: ${MIN_LIMIT}W (min) → ${STOCK_TDP}W (default) → ${MAX_LIMIT}W (max)"
 echo "[setup] cooling:   $COOLING"
@@ -548,10 +1036,25 @@ else
   echo "[setup] sweep caps: $NUM_CAPS caps (user-specified)"
   echo "[setup]            $CAPS W"
 fi
-echo "[setup] load mode: $LOAD_MODE$([ "$LOAD_MODE" = "decode-concurrent" ] && echo " (concurrency=$CONCURRENCY)")$([ "$LOAD_MODE" != "decode-single" ] && echo " (bench-runs=$BENCH_RUNS)")"
+echo "[setup] load mode: $LOAD_MODE$([ "$LOAD_MODE" = "decode-single" ] && echo " (${TARGET_CAP_SECONDS}s × 2 timed streams)")$([ "$LOAD_MODE" = "decode-concurrent" ] && echo " (concurrency=$CONCURRENCY, ${DECODE_CONCURRENT_RUN_SECONDS}s/run × ${BENCH_RUNS} runs × 2 timed batches)")$([ "$LOAD_MODE" = "prefill-heavy" ] && echo " (target-prefill=${TARGET_PREFILL_SECONDS}s, filler_repeats=${PREFILL_FILLER_REPEATS})")$([ "$LOAD_MODE" != "decode-single" ] && echo " (bench-runs=$BENCH_RUNS)")"
 [ -n "$CALIBRATION_NOTE" ] && echo "[setup] calibration: $CALIBRATION_NOTE"
-echo "[setup] estimated runtime: ~${EST_MIN} min (${NUM_CAPS} caps × ~30s/cap)"
+echo "[setup] estimated runtime: ${EST_MIN}-${EST_MAX} min (${NUM_CAPS} caps; range varies with cap throttle + bench shape)"
 echo "[setup] reset at end: $([ $RESET -eq 1 ] && echo yes || echo no)"
+
+# Warn on configurations known to produce biased data
+if [ "${BENCH_WARMUPS:-1}" = "0" ]; then
+  echo "[warn] BENCH_WARMUPS=0: the FIRST cap of the sweep will have cold-cache bias"
+  echo "[warn]   (model weights not warm in any sense — narrative bench runs first,"
+  echo "[warn]    so first 250-500 narrative tokens absorb cold-start cost)."
+  echo "[warn]   Subsequent caps are fine (cache warm from previous cap)."
+  echo "[warn]   Recommend BENCH_WARMUPS=1 minimum unless you can discard first-cap data."
+fi
+
+if [ "$LOAD_MODE" != "decode-single" ] && [ "$BENCH_RUNS" -gt 1 ]; then
+  echo "[warn] --bench-runs=${BENCH_RUNS}: this is anchor-grade mode, not the fast default."
+  echo "[warn]   Sweep time scales linearly with --bench-runs; use --bench-runs 1 for ≤15 min full sweeps."
+fi
+
 echo
 
 if [ "$LOAD_MODE" = "decode-concurrent" ]; then
@@ -621,9 +1124,19 @@ RESULTS_FILE=/tmp/power-cap-summary.md
   echo ""
   echo "**GPU:** $GPU_NAME &nbsp; **VRAM:** ${GPU_VRAM} MiB &nbsp; **Stock TDP:** ${STOCK_TDP}W &nbsp; **Cooling:** ${COOLING}"
   echo "**Model:** \`${MODEL}\` &nbsp; **Engine:** \`${CONTAINER}\` &nbsp; **Endpoint:** ${URL}"
-  echo "**Load mode:** \`${LOAD_MODE}\`$([ "$LOAD_MODE" = "decode-concurrent" ] && echo " (concurrency=${CONCURRENCY})")$([ "$LOAD_MODE" != "decode-single" ] && echo " (bench-runs=${BENCH_RUNS})")"
+  echo "**Load mode:** \`${LOAD_MODE}\`$([ "$LOAD_MODE" = "decode-single" ] && echo " (${TARGET_CAP_SECONDS}s × 2 timed streams)")$([ "$LOAD_MODE" = "decode-concurrent" ] && echo " (concurrency=${CONCURRENCY}, ${DECODE_CONCURRENT_RUN_SECONDS}s/run × ${BENCH_RUNS} runs × 2 timed batches)")$([ "$LOAD_MODE" = "prefill-heavy" ] && echo " (target-prefill=${TARGET_PREFILL_SECONDS}s, filler_repeats=${PREFILL_FILLER_REPEATS})")$([ "$LOAD_MODE" != "decode-single" ] && echo " (bench-runs=${BENCH_RUNS})")"
   [ -n "$CALIBRATION_NOTE" ] && echo "**Calibration:** ${CALIBRATION_NOTE}"
-  echo "**Date:** $(date -u +%Y-%m-%dT%H:%M:%S)Z"
+  # --include-commit: stamp club-3090 git short SHA next to the date if requested.
+  # Suppress entirely (rather than show "n/a") when run from a non-clone or
+  # when git isn't reachable — closes the curl-pipe-from-docs UX hole.
+  COMMIT_FRAGMENT=""
+  if [ "${INCLUDE_COMMIT:-0}" = "1" ]; then
+    COMMIT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)
+    if [ -n "$COMMIT_SHA" ]; then
+      COMMIT_FRAGMENT=" &nbsp; **club-3090 commit:** \`${COMMIT_SHA}\`"
+    fi
+  fi
+  echo "**Date:** $(date -u +%Y-%m-%dT%H:%M:%S)Z${COMMIT_FRAGMENT}"
   echo ""
   if [ "$COOLING" = "unspecified" ]; then
     echo "> ⚠️  Cooling class not specified at run time. Add **air / water / AIO** when posting"
@@ -636,15 +1149,18 @@ RESULTS_FILE=/tmp/power-cap-summary.md
   echo "> MTP at 100 TPS). The *shape* of the efficiency knee is the cross-rig signal; absolute"
   echo "> numbers only compare like-to-like."
   echo ""
-  echo "| Cap (W) | Narr wall TPS | Code wall TPS | Actual power (W) | GPU temp (°C) | TPS/W (narr) |"
-  echo "|--------:|--------------:|--------------:|-----------------:|--------------:|-------------:|"
+  echo "| Cap (W) | Narr wall TPS | Code wall TPS | Actual power (W) | GPU temp (°C) | SM clk (MHz) | Mem clk (MHz) | Pwr-throttle % | P-state | TPS/W (narr) |"
+  echo "|--------:|--------------:|--------------:|-----------------:|--------------:|-------------:|--------------:|---------------:|:-------:|-------------:|"
 } > "$RESULTS_FILE"
 
 IFS=',' read -ra CAP_ARRAY <<< "$CAPS"
+
 for CAP in "${CAP_ARRAY[@]}"; do
   CAP=$(echo "$CAP" | tr -d ' ')
+  CAP_START_NS=$(date +%s%N)
+  CAP_START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "================================================"
-  echo "=== Cap: ${CAP}W (GPU $GPU_INDEX) ==="
+  echo "=== Cap: ${CAP}W (GPU $GPU_INDEX) @ ${CAP_START_UTC} ==="
   echo "================================================"
 
   # Apply cap
@@ -670,7 +1186,7 @@ for CAP in "${CAP_ARRAY[@]}"; do
   SAMPLE_FILE="/tmp/power-cap-N${CAP}-samples.csv"
   (
     while true; do
-      nvidia-smi --query-gpu=index,utilization.gpu,power.draw,temperature.gpu \
+      nvidia-smi --query-gpu=index,utilization.gpu,power.draw,temperature.gpu,clocks.current.sm,clocks.current.memory,pstate,clocks_throttle_reasons.sw_power_cap,clocks_throttle_reasons.hw_thermal_slowdown \
         --format=csv,noheader,nounits -i "$GPU_INDEX" 2>/dev/null | head -1
       sleep 0.5
     done
@@ -689,164 +1205,56 @@ for CAP in "${CAP_ARRAY[@]}"; do
   LOG_FILE="/tmp/power-cap-N${CAP}.log"
   case "$LOAD_MODE" in
     decode-single)
-      # Single-stream: original bench.sh path. Captures decode-bottleneck on
-      # cards where compute is the limit (3090, 4090); shows flat curve on
-      # cards over-provisioned for the workload (5090 + small models).
-      echo "[bench] decode-single @ ${CAP}W cap (output: $LOG_FILE)"
-      if ! WARMUPS=1 RUNS=2 MAX_TOKENS_NARR=500 MAX_TOKENS_CODE=400 \
-           bash "$BENCH" 2>&1 | tee "$LOG_FILE" | tail -8; then
+      # Single-stream decode is time-bounded instead of token-bounded. Fixed
+      # token counts make low caps take 2-4× longer than high caps; fixed wall
+      # seconds keep sweep runtime portable across 3090/4090/5090/A-series while
+      # still providing sustained under-load samples for the power median.
+      echo "[bench] decode-single @ ${CAP}W cap (${TARGET_CAP_SECONDS}s narrative + ${TARGET_CAP_SECONDS}s code, output: $LOG_FILE)"
+      : > "$LOG_FILE"
+      if ! NARR_TPS=$(bench_decode_single_for_seconds narrative "$TARGET_CAP_SECONDS" "$CAP" "$LOG_FILE"); then
         kill $SAMPLER_PID 2>/dev/null || true
         wait $SAMPLER_PID 2>/dev/null || true
         SAMPLER_PID=""
-        echo "[warn] bench.sh failed at ${CAP}W"
+        echo "[warn] narrative timed bench failed at ${CAP}W"
         continue
       fi
+      NARR_TPS=$(echo "$NARR_TPS" | tail -1)
+      if ! CODE_TPS=$(bench_decode_single_for_seconds code "$TARGET_CAP_SECONDS" "$CAP" "$LOG_FILE"); then
+        kill $SAMPLER_PID 2>/dev/null || true
+        wait $SAMPLER_PID 2>/dev/null || true
+        SAMPLER_PID=""
+        echo "[warn] code timed bench failed at ${CAP}W"
+        continue
+      fi
+      CODE_TPS=$(echo "$CODE_TPS" | tail -1)
       kill $SAMPLER_PID 2>/dev/null || true
       wait $SAMPLER_PID 2>/dev/null || true
       SAMPLER_PID=""
       echo
-
-      # Extract from bench summary lines
-      NARR_TPS=$(grep -A1 "summary \[narrative\]" "$LOG_FILE" | grep "wall_TPS" | head -1 | grep -oE 'mean= *[0-9]+\.[0-9]+' | head -1 | grep -oE '[0-9]+\.[0-9]+' || echo "?")
-      CODE_TPS=$(grep -A1 "summary \[code\]"      "$LOG_FILE" | grep "wall_TPS" | head -1 | grep -oE 'mean= *[0-9]+\.[0-9]+' | head -1 | grep -oE '[0-9]+\.[0-9]+' || echo "?")
       ;;
 
     decode-concurrent)
-      # Concurrent decode: spawn $CONCURRENCY parallel chat-completions.
-      # Aggregates under vLLM's continuous batching → higher compute pressure
-      # than single-stream → exposes compute-knee on cards that are
-      # over-provisioned for single-stream (5090 + Qwen3.6-27B). Reports
-      # AGGREGATE TPS (sum across all streams) so the column is directly
-      # comparable across caps but NOT directly comparable to decode-single
-      # numbers (different metric).
-      echo "[bench] decode-concurrent @ ${CAP}W cap, N=${CONCURRENCY}, runs=${BENCH_RUNS} (output: $LOG_FILE)"
+      # Concurrent decode is time-bounded like decode-single: each measured
+      # batch runs N streaming requests until curl's wall timer cuts them off.
+      # Aggregate TPS is total streamed token-chunks across all streams divided
+      # by batch wall time.
+      echo "[bench] decode-concurrent @ ${CAP}W cap, N=${CONCURRENCY}, runs=${BENCH_RUNS}, ${DECODE_CONCURRENT_RUN_SECONDS}s/run narrative + ${DECODE_CONCURRENT_RUN_SECONDS}s/run code (output: $LOG_FILE)"
       : > "$LOG_FILE"
       NARR_TPS_VALUES=()
       CODE_TPS_VALUES=()
       for RUN_IDX in $(seq 1 "$BENCH_RUNS"); do
-        # Narrative: spawn N parallel curls, each generating 500 tokens.
-        # Track curl PIDs explicitly. Plain `wait` would also wait on the
-        # infinite power sampler and hang forever.
-        CURL_PIDS=()
-        START_NS_NARR=$(date +%s%N)
-        for i in $(seq 1 "$CONCURRENCY"); do
-          REQ_FILE="/tmp/power-cap-N${CAP}-r${RUN_IDX}-narr-${i}.req.json"
-          python3 - "$REQ_FILE" "$MODEL" <<'PY'
-import json
-import sys
-
-path, model = sys.argv[1:3]
-body = {
-    "model": model,
-    "messages": [{
-        "role": "user",
-        "content": "Write a detailed 800-word essay explaining transformer attention.",
-    }],
-    "max_tokens": 500,
-    "temperature": 0.6,
-}
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(body, f)
-PY
-          curl -sS -f --max-time 120 "${URL}/v1/chat/completions" \
-            -H 'Content-Type: application/json' \
-            -d "@${REQ_FILE}" \
-            -o "/tmp/power-cap-N${CAP}-r${RUN_IDX}-narr-${i}.json" 2>>"$LOG_FILE" &
-          CURL_PIDS+=("$!")
-        done
-        CURL_FAILS=0
-        for pid in "${CURL_PIDS[@]}"; do
-          if ! wait "$pid"; then
-            CURL_FAILS=$((CURL_FAILS + 1))
-          fi
-        done
-        END_NS_NARR=$(date +%s%N)
-        if [ "$CURL_FAILS" -gt 0 ]; then
-          echo "[warn] narrative run ${RUN_IDX} concurrent curl failures: $CURL_FAILS / $CONCURRENCY" | tee -a "$LOG_FILE"
+        if ! NARR_RUN_TPS=$(bench_decode_concurrent_for_seconds narrative "$DECODE_CONCURRENT_RUN_SECONDS" "$CAP" "$RUN_IDX" "$LOG_FILE"); then
+          echo "[warn] narrative timed concurrent run ${RUN_IDX} failed at ${CAP}W" | tee -a "$LOG_FILE"
+          continue
         fi
-        NARR_WALL_S=$(python3 - "$START_NS_NARR" "$END_NS_NARR" <<'PY'
-import sys
-start, end = map(int, sys.argv[1:3])
-print((end - start) / 1e9)
-PY
-)
-        NARR_TOTAL_TOKENS=0
-        for i in $(seq 1 "$CONCURRENCY"); do
-          if [ -s "/tmp/power-cap-N${CAP}-r${RUN_IDX}-narr-${i}.json" ]; then
-            T=$(python3 -c "import json; print(json.load(open('/tmp/power-cap-N${CAP}-r${RUN_IDX}-narr-${i}.json')).get('usage',{}).get('completion_tokens',0))" 2>/dev/null || echo 0)
-            NARR_TOTAL_TOKENS=$((NARR_TOTAL_TOKENS + T))
-          fi
-        done
-        NARR_RUN_TPS=$(python3 - "$NARR_TOTAL_TOKENS" "$NARR_WALL_S" <<'PY'
-import sys
-tokens = int(sys.argv[1])
-wall = float(sys.argv[2])
-print(f"{tokens / max(wall, 0.001):.2f}")
-PY
-)
+        NARR_RUN_TPS=$(echo "$NARR_RUN_TPS" | tail -1)
         NARR_TPS_VALUES+=("$NARR_RUN_TPS")
-        echo "[narr r${RUN_IDX}/${BENCH_RUNS}] $CONCURRENCY streams × ~500 tok = $NARR_TOTAL_TOKENS tok in ${NARR_WALL_S}s → aggregate $NARR_RUN_TPS TPS" | tee -a "$LOG_FILE"
-
-        # Code: same shape, code prompt
-        CURL_PIDS=()
-        START_NS_CODE=$(date +%s%N)
-        for i in $(seq 1 "$CONCURRENCY"); do
-          REQ_FILE="/tmp/power-cap-N${CAP}-r${RUN_IDX}-code-${i}.req.json"
-          python3 - "$REQ_FILE" "$MODEL" <<'PY'
-import json
-import sys
-
-path, model = sys.argv[1:3]
-body = {
-    "model": model,
-    "messages": [{
-        "role": "user",
-        "content": "Implement quicksort in Python with detailed comments.",
-    }],
-    "max_tokens": 400,
-    "temperature": 0.6,
-}
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(body, f)
-PY
-          curl -sS -f --max-time 120 "${URL}/v1/chat/completions" \
-            -H 'Content-Type: application/json' \
-            -d "@${REQ_FILE}" \
-            -o "/tmp/power-cap-N${CAP}-r${RUN_IDX}-code-${i}.json" 2>>"$LOG_FILE" &
-          CURL_PIDS+=("$!")
-        done
-        CURL_FAILS=0
-        for pid in "${CURL_PIDS[@]}"; do
-          if ! wait "$pid"; then
-            CURL_FAILS=$((CURL_FAILS + 1))
-          fi
-        done
-        END_NS_CODE=$(date +%s%N)
-        if [ "$CURL_FAILS" -gt 0 ]; then
-          echo "[warn] code run ${RUN_IDX} concurrent curl failures: $CURL_FAILS / $CONCURRENCY" | tee -a "$LOG_FILE"
+        if ! CODE_RUN_TPS=$(bench_decode_concurrent_for_seconds code "$DECODE_CONCURRENT_RUN_SECONDS" "$CAP" "$RUN_IDX" "$LOG_FILE"); then
+          echo "[warn] code timed concurrent run ${RUN_IDX} failed at ${CAP}W" | tee -a "$LOG_FILE"
+          continue
         fi
-        CODE_WALL_S=$(python3 - "$START_NS_CODE" "$END_NS_CODE" <<'PY'
-import sys
-start, end = map(int, sys.argv[1:3])
-print((end - start) / 1e9)
-PY
-)
-        CODE_TOTAL_TOKENS=0
-        for i in $(seq 1 "$CONCURRENCY"); do
-          if [ -s "/tmp/power-cap-N${CAP}-r${RUN_IDX}-code-${i}.json" ]; then
-            T=$(python3 -c "import json; print(json.load(open('/tmp/power-cap-N${CAP}-r${RUN_IDX}-code-${i}.json')).get('usage',{}).get('completion_tokens',0))" 2>/dev/null || echo 0)
-            CODE_TOTAL_TOKENS=$((CODE_TOTAL_TOKENS + T))
-          fi
-        done
-        CODE_RUN_TPS=$(python3 - "$CODE_TOTAL_TOKENS" "$CODE_WALL_S" <<'PY'
-import sys
-tokens = int(sys.argv[1])
-wall = float(sys.argv[2])
-print(f"{tokens / max(wall, 0.001):.2f}")
-PY
-)
+        CODE_RUN_TPS=$(echo "$CODE_RUN_TPS" | tail -1)
         CODE_TPS_VALUES+=("$CODE_RUN_TPS")
-        echo "[code r${RUN_IDX}/${BENCH_RUNS}] $CONCURRENCY streams × ~400 tok = $CODE_TOTAL_TOKENS tok in ${CODE_WALL_S}s → aggregate $CODE_RUN_TPS TPS" | tee -a "$LOG_FILE"
       done
 
       NARR_TPS=$(python3 - "${NARR_TPS_VALUES[@]}" <<'PY'
@@ -872,61 +1280,22 @@ PY
       ;;
 
     prefill-heavy)
-      # Prefill-heavy: send a single ~50K-token prompt with max_tokens=10.
+      # Prefill-heavy: send a calibrated prompt with max_tokens=10.
       # Prefill is compute-bound by definition (single forward pass through
       # all layers on the entire prompt). Exposes compute-knee on any card,
       # since prefill TPS scales directly with tensor-core throughput.
       # Less commonly useful than decode-concurrent for "real workload"
       # framing, but produces a clean compute-only curve for diagnostic.
-      echo "[bench] prefill-heavy @ ${CAP}W cap, runs=${BENCH_RUNS} (output: $LOG_FILE)"
+      echo "[bench] prefill-heavy @ ${CAP}W cap, runs=${BENCH_RUNS}, filler_repeats=${PREFILL_FILLER_REPEATS}, target-fast-cap=${TARGET_PREFILL_SECONDS}s (output: $LOG_FILE)"
       : > "$LOG_FILE"
       PREFILL_TPS_VALUES=()
       for RUN_IDX in $(seq 1 "$BENCH_RUNS"); do
-        REQ_FILE="/tmp/power-cap-N${CAP}-r${RUN_IDX}-prefill.req.json"
-        # Generate request JSON in Python so the ~50K-token filler is escaped
-        # correctly and never crosses shell argument-size limits.
-        python3 - "$REQ_FILE" "$MODEL" <<'PY'
-import json
-import sys
-import time
-
-path, model = sys.argv[1:3]
-filler = "The quick brown fox jumps over the lazy dog. " * 6500
-nonce = f" Unique power-cap sweep nonce: {time.time_ns()}."
-body = {
-    "model": model,
-    "messages": [{"role": "user", "content": nonce + " " + filler + " Summarize."}],
-    "max_tokens": 10,
-    "temperature": 0,
-}
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(body, f)
-PY
-        START_NS=$(date +%s%N)
-        if ! curl -sS -f --max-time 300 "${URL}/v1/chat/completions" \
-          -H 'Content-Type: application/json' \
-          -d "@${REQ_FILE}" \
-          -o "/tmp/power-cap-N${CAP}-r${RUN_IDX}-prefill.json" 2>>"$LOG_FILE"; then
-          echo "[warn] prefill-heavy run ${RUN_IDX} curl failed at ${CAP}W" | tee -a "$LOG_FILE"
+        if ! PREFILL_RESULT=$(bench_prefill_once "$PREFILL_FILLER_REPEATS" "$CAP" "$RUN_IDX" "$LOG_FILE" 180); then
+          echo "[warn] prefill-heavy run ${RUN_IDX} failed at ${CAP}W" | tee -a "$LOG_FILE"
+          continue
         fi
-        END_NS=$(date +%s%N)
-        WALL_S=$(python3 - "$START_NS" "$END_NS" <<'PY'
-import sys
-start, end = map(int, sys.argv[1:3])
-print((end - start) / 1e9)
-PY
-)
-        PROMPT_TOKENS=$(python3 -c "import json; print(json.load(open('/tmp/power-cap-N${CAP}-r${RUN_IDX}-prefill.json')).get('usage',{}).get('prompt_tokens',0))" 2>/dev/null || echo 0)
-        # Prefill TPS = prompt_tokens / wall (excludes the small max_tokens decode tail)
-        PREFILL_RUN_TPS=$(python3 - "$PROMPT_TOKENS" "$WALL_S" <<'PY'
-import sys
-tokens = int(sys.argv[1])
-wall = float(sys.argv[2])
-print(f"{tokens / max(wall, 0.001):.2f}")
-PY
-)
+        PREFILL_RUN_TPS=$(echo "$PREFILL_RESULT" | awk '{print $1}')
         PREFILL_TPS_VALUES+=("$PREFILL_RUN_TPS")
-        echo "[prefill r${RUN_IDX}/${BENCH_RUNS}] $PROMPT_TOKENS tokens in ${WALL_S}s → $PREFILL_RUN_TPS prefill TPS" | tee -a "$LOG_FILE"
       done
       NARR_TPS=$(python3 - "${PREFILL_TPS_VALUES[@]}" <<'PY'
 import statistics
@@ -955,28 +1324,55 @@ PY
   if [ -s "$SAMPLE_FILE" ]; then
     UNDER_LOAD_STATS=$(python3 -c "
 import sys
+from collections import Counter
 samples = []
 with open('$SAMPLE_FILE') as f:
     for line in f:
         try:
-            idx, util, power, temp = [x.strip() for x in line.strip().split(',')]
+            parts = [x.strip() for x in line.strip().split(',')]
+            if len(parts) < 9:
+                continue
+            idx, util, power, temp, sm_clk, mem_clk, pstate, pwr_thr, therm_thr = parts
             if int(util) > 50:
-                samples.append((float(power), int(temp)))
+                samples.append((
+                    float(power),
+                    int(temp),
+                    int(sm_clk),
+                    int(mem_clk),
+                    pstate,
+                    pwr_thr == 'Active',
+                    therm_thr == 'Active',
+                ))
         except Exception:
             continue
 if not samples:
-    print('? ?')
+    print('? ? ? ? ? ? ?')
 else:
     powers = sorted(s[0] for s in samples)
     temps  = [s[1] for s in samples]
+    sm_clks = sorted(s[2] for s in samples)
+    mem_clks = sorted(s[3] for s in samples)
+    pstates = [s[4] for s in samples]
+    n = len(samples)
+    pwr_thr_pct = sum(1 for s in samples if s[5]) / n * 100
+    therm_thr_pct = sum(1 for s in samples if s[6]) / n * 100
     median_power = powers[len(powers)//2]
     peak_temp    = max(temps)
-    print(f'{median_power:.2f} {peak_temp}')
-" 2>/dev/null || echo "? ?")
+    median_sm    = sm_clks[len(sm_clks)//2]
+    median_mem   = mem_clks[len(mem_clks)//2]
+    dom_pstate   = Counter(pstates).most_common(1)[0][0]
+    print(f'{median_power:.2f} {peak_temp} {median_sm} {median_mem} {dom_pstate} {pwr_thr_pct:.0f} {therm_thr_pct:.0f}')
+" 2>/dev/null || echo "? ? ? ? ? ? ?")
     ACTUAL_POWER=$(echo "$UNDER_LOAD_STATS" | awk '{print $1}')
     GPU_TEMP=$(echo "$UNDER_LOAD_STATS"      | awk '{print $2}')
+    SM_CLK=$(echo "$UNDER_LOAD_STATS"        | awk '{print $3}')
+    MEM_CLK=$(echo "$UNDER_LOAD_STATS"       | awk '{print $4}')
+    PSTATE=$(echo "$UNDER_LOAD_STATS"        | awk '{print $5}')
+    PWR_THR_PCT=$(echo "$UNDER_LOAD_STATS"   | awk '{print $6}')
+    THERM_THR_PCT=$(echo "$UNDER_LOAD_STATS" | awk '{print $7}')
   else
     ACTUAL_POWER="?"; GPU_TEMP="?"
+    SM_CLK="?"; MEM_CLK="?"; PSTATE="?"; PWR_THR_PCT="?"; THERM_THR_PCT="?"
   fi
 
   # Fallback to bench.sh GPU-state line if sampler returned ?
@@ -993,13 +1389,109 @@ else:
     EFFICIENCY="?"
   fi
 
-  printf "[result] %sW cap → %s narr / %s code TPS @ %sW actual draw, %s°C, eff %s TPS/W\n\n" \
-    "$CAP" "$NARR_TPS" "$CODE_TPS" "$ACTUAL_POWER" "$GPU_TEMP" "$EFFICIENCY"
+  CAP_END_NS=$(date +%s%N)
+  CAP_END_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  CAP_WALL_S=$(python3 - "$CAP_START_NS" "$CAP_END_NS" <<'PY'
+import sys
+start, end = map(int, sys.argv[1:3])
+print(f"{(end - start) / 1e9:.1f}")
+PY
+)
 
-  printf "| %s | %s | %s | %s | %s | %s |\n" \
-    "$CAP" "$NARR_TPS" "$CODE_TPS" "$ACTUAL_POWER" "$GPU_TEMP" "$EFFICIENCY" \
+  printf "[result] cap=%sW actual_W=%s temp=%s sm_clk=%s mem_clk=%s pstate=%s throttle_pwr=%s throttle_thermal=%s narr=%s code=%s tps_per_w=%s\n" \
+    "$CAP" "$ACTUAL_POWER" "$GPU_TEMP" "$SM_CLK" "$MEM_CLK" "$PSTATE" "$PWR_THR_PCT" "$THERM_THR_PCT" "$NARR_TPS" "$CODE_TPS" "$EFFICIENCY"
+  printf "[time] %sW cap wall=%ss start=%s end=%s\n\n" \
+    "$CAP" "$CAP_WALL_S" "$CAP_START_UTC" "$CAP_END_UTC"
+
+  printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
+    "$CAP" "$NARR_TPS" "$CODE_TPS" "$ACTUAL_POWER" "$GPU_TEMP" "$SM_CLK" "$MEM_CLK" "$PWR_THR_PCT" "$PSTATE" "$EFFICIENCY" \
     >> "$RESULTS_FILE"
 done
+
+# Detect boost-clock plateaus from the captured data.
+# A plateau is 3+ consecutive caps where SM clock is identical, actual draw is
+# within ±2W, and TPS is within ±1%. This pattern signals firmware boost-state
+# locking — raising the cap doesn't push past until the firmware decides to
+# step to a new operating point. See learnings/qwen3.6-35b-a3b.md for examples.
+PLATEAU_LINES=$(python3 - "$RESULTS_FILE" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+rows = []
+row_re = re.compile(
+    r'^\|\s*(\d+)\s*'                         # cap
+    r'\|\s*([\d.?]+)\s*'                      # narr TPS
+    r'\|\s*([\d.?]+)\s*'                      # code TPS
+    r'\|\s*([\d.?]+)\s*'                      # actual_W
+    r'\|\s*(\d+|\?)\s*'                       # temp
+    r'\|\s*(\d+|\?)\s*'                       # sm_clk
+    r'\|\s*(\d+|\?)\s*'                       # mem_clk
+    r'\|\s*([\d.?]+)\s*'                      # pwr_throttle %
+    r'\|\s*([P\d?]+)\s*'                      # pstate
+    r'\|\s*([\d.?]+)\s*\|\s*$'                # tps/w
+)
+
+with open(path) as f:
+    for line in f:
+        m = row_re.match(line.strip())
+        if not m:
+            continue
+        try:
+            cap = int(m.group(1))
+            narr = float(m.group(2))
+            draw = float(m.group(4))
+            sm = int(m.group(6))
+            rows.append((cap, narr, draw, sm))
+        except ValueError:
+            continue
+
+# A plateau is a run where draw and TPS are functionally identical (within ±2W
+# and ±1% TPS) regardless of cap. SM clock often locks to a single value across
+# the plateau, but firmware can use slightly different SM setpoints (e.g. 1605
+# vs 1620 MHz) within the same operating-point envelope — so we report SM as a
+# range when it varies, single value when locked.
+plateaus = []
+i = 0
+while i < len(rows):
+    j = i + 1
+    base_draw = rows[i][2]
+    base_tps = rows[i][1]
+    sm_min = sm_max = rows[i][3]
+    while j < len(rows):
+        draw_match = abs(rows[j][2] - base_draw) <= 2.0
+        tps_match = abs(rows[j][1] - base_tps) / max(base_tps, 0.1) <= 0.01
+        if draw_match and tps_match:
+            sm_min = min(sm_min, rows[j][3])
+            sm_max = max(sm_max, rows[j][3])
+            j += 1
+        else:
+            break
+    if j - i >= 3:
+        sm_label = str(sm_min) if sm_min == sm_max else f"{sm_min}-{sm_max}"
+        plateaus.append((rows[i][0], rows[j-1][0], sm_label, base_draw, base_tps))
+        i = j
+    else:
+        i += 1
+
+for start, end, sm, draw, tps in plateaus:
+    # tab-separated so "1605-1620" stays as one field
+    print(f"{start}\t{end}\t{sm}\t{draw:.2f}\t{tps:.2f}")
+PY
+)
+
+if [ -n "$PLATEAU_LINES" ]; then
+  echo "================================================"
+  echo "Boost-clock plateau(s) detected"
+  echo "================================================"
+  while IFS=$'\t' read -r START END SM DRAW TPS; do
+    [ -z "$START" ] && continue
+    SPAN=$((END - START))
+    printf "[plateau detected] caps %sW–%sW (%dW span) → SM %s MHz, %sW draw, %s TPS — firmware boost-clock lock; raise cap past %sW to escape\n" \
+      "$START" "$END" "$SPAN" "$SM" "$DRAW" "$TPS" "$END"
+  done <<< "$PLATEAU_LINES"
+  echo
+fi
 
 # Reset
 if [ "$RESET" -eq 1 ]; then
@@ -1012,17 +1504,28 @@ fi
 # Append context to results file
 {
   echo ""
+  if [ -n "$PLATEAU_LINES" ]; then
+    echo "**Detected boost-clock plateau(s):**"
+    echo ""
+    while IFS=$'\t' read -r START END SM DRAW TPS; do
+      [ -z "$START" ] && continue
+      SPAN=$((END - START))
+      echo "- Caps **${START}W–${END}W** (${SPAN}W span) → SM **${SM} MHz**, **${DRAW}W** draw, **${TPS} TPS** — firmware boost-clock plateau. Caps in this range are functionally equivalent; raise past **${END}W** to step to the next firmware operating point."
+    done <<< "$PLATEAU_LINES"
+    echo ""
+  fi
   echo "**Reset:** $([ $RESET -eq 1 ] && echo "auto-reset to ${STOCK_TDP}W stock" || echo "left at last cap (--no-reset)")"
   echo ""
   echo "**Notes:**"
   case "$LOAD_MODE" in
     decode-single)
-      echo "- Load mode: \`decode-single\` — original bench.sh path, 1 warm + 2 measured runs of canonical narr (500-token essay) + code (400-token quicksort)."
-      echo "- TPS columns are per-request wall TPS from bench.sh summaries."
+      echo "- Load mode: \`decode-single\` — time-bounded streaming requests: ${TARGET_CAP_SECONDS}s narrative + ${TARGET_CAP_SECONDS}s code per cap."
+      echo "- TPS columns are streamed token-chunks / wall seconds. If an engine emits final streaming usage before timeout, completion_tokens is used instead."
       ;;
     decode-concurrent)
-      echo "- Load mode: \`decode-concurrent\` — ${CONCURRENCY} parallel chat completions for narr, then ${CONCURRENCY} parallel chat completions for code."
-      echo "- TPS columns are **median aggregate** throughput across ${BENCH_RUNS} measured batch(es): total completion tokens across streams / batch wall time."
+      echo "- Load mode: \`decode-concurrent\` — ${CONCURRENCY} parallel streaming chat completions for ${DECODE_CONCURRENT_RUN_SECONDS}s/run narr, then ${CONCURRENCY} for ${DECODE_CONCURRENT_RUN_SECONDS}s/run code."
+      echo "- \`--target-cap-seconds=${TARGET_CAP_SECONDS}\` is treated as the per-direction budget across \`--bench-runs\`; each run gets at least 3s."
+      echo "- TPS columns are **median aggregate** throughput across ${BENCH_RUNS} measured timed batch(es): total streamed token-chunks across streams / batch wall time."
       echo "- ⚠️ **Variance caveat**: with \`--bench-runs 1\`, each cap is a **single batch of ${CONCURRENCY} concurrent requests**."
       echo "  Aggregate TPS can vary 10-30% between back-to-back runs at the same cap because vLLM's"
       echo "  continuous-batching window is timing-sensitive — adjacent caps may show TPS going the"
@@ -1031,12 +1534,21 @@ fi
       echo "  and/or bump \`--concurrency\` to 8 or 16 so per-stream noise averages out."
       ;;
     prefill-heavy)
-      echo "- Load mode: \`prefill-heavy\` — one large prompt with \`max_tokens=10\`; both TPS columns show prompt prefill TPS."
+      echo "- Load mode: \`prefill-heavy\` — prompt size calibrated at the highest cap for ~${TARGET_PREFILL_SECONDS}s, then reused across all caps with \`max_tokens=10\`; both TPS columns show prompt prefill TPS."
       echo "- Prefill TPS = median of ${BENCH_RUNS} run(s), each computed as response \`usage.prompt_tokens\` / request wall time."
       ;;
   esac
   echo "- Actual power = **median** of 0.5s samples taken DURING the workload where util > 50% (i.e. under-load)."
   echo "- GPU temp = **peak** during workload (not a single post-bench point sample)."
+  echo "- **SM clk / Mem clk** = **median** clock speeds during in-load samples. SM clock is the compute-tier clock; memory clock is the HBM/GDDR clock."
+  echo "  - If SM clock varies with cap while TPS plateaus → workload is **bandwidth-bound** (more compute headroom unused)."
+  echo "  - If SM clock is pinned at max (~1.9 GHz on 3090, ~2.5+ GHz on 4090/5090) while TPS still climbs → workload is **compute-bound**."
+  echo "  - Memory clock should normally pin at the card's spec max (9501 MHz on 3090, 10501 MHz on 4090, 14001 MHz on 5090). If it drops, that's a memory power-state transition worth investigating."
+  echo "- **Pwr-throttle %** = % of in-load samples where firmware was actively capping draw at the set limit (\`clocks_throttle_reasons.sw_power_cap=Active\`)."
+  echo "  - **100%** → power is the binding constraint at this cap; raising the cap would draw more and produce more TPS."
+  echo "  - **<100%** → either workload is undersupplying the card (lift via concurrency/prefill), or thermal-throttle is taking over (check temp + cooling)."
+  echo "- **P-state** = dominant firmware power state during in-load samples. P0 = max boost, P2 = sustained-load pinned, higher numbers = idle/low-load."
+  echo "  - Boost-state plateaus appear when several adjacent caps all sit in the same P-state and draw identical wattage despite different cap settings (e.g. 3090s pin P2 across ~340-370W, then escape to P0 at 380W cap)."
   echo "- TPS/W efficiency lets you spot the knee — typically the highest cap before efficiency drops."
   echo "- If actual power < cap consistently and TPS is flat, the workload is **under-loading** this hardware:"
   echo "  the card can't use the extra power because it's not the bottleneck (smaller models on bigger"

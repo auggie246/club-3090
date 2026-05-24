@@ -557,15 +557,21 @@ def cmd_run(endpoint, req_path, timeout_s, metrics_path):
                 choices = chunk.get("choices") or []
                 if choices:
                     delta = choices[0].get("delta") or {}
-                    if ttft is None and (delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")):
+                    # vLLM emits reasoning under either `delta.reasoning_content`
+                    # (older qwen3 reasoner path) or `delta.reasoning` (current
+                    # nightly as of vllm-0.20.2rc1+; legacy field name). Watch
+                    # both so the soak harness doesn't go silent when the
+                    # underlying field name shifts under us.
+                    reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning")
+                    if ttft is None and (delta.get("content") or reasoning_delta or delta.get("tool_calls")):
                         ttft = time.time() - t0
                     # Accumulate streamed parts. vLLM splits content/reasoning
                     # across many small deltas; tool_calls stream as indexed
                     # objects whose fields (name, arguments) arrive in pieces.
                     if delta.get("content"):
                         content_parts.append(delta["content"])
-                    if delta.get("reasoning_content"):
-                        reasoning_parts.append(delta["reasoning_content"])
+                    if reasoning_delta:
+                        reasoning_parts.append(reasoning_delta)
                     for tc in (delta.get("tool_calls") or []):
                         idx = tc.get("index", 0)
                         slot = tool_calls_acc.setdefault(idx, {"id": "", "type": "function", "name": "", "args": ""})
@@ -822,6 +828,11 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
             print(f"[soak] {label}:")
             for item in items:
                 print(f"[soak]   - {item}")
+    if verdict == "PASS":
+        print("[soak]   note                 PASS = no failure signal on this sample;")
+        print("[soak]                        not patch validation (topology alone can")
+        print("[soak]                        sidestep what overlays target). See")
+        print("[soak]                        scripts/soak-test.sh --help and docs/CLIFFS.md.")
     sys.exit(exit_code)
 
 

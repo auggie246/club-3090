@@ -4,8 +4,10 @@ You have **3 or more GPUs** and want to know if club-3090 applies. Short
 answer: yes. We ship one community-validated 4×3090 baseline and keep
 other 3+ GPU configs as derivation recipes until someone measures them.
 This page explains what scales (and what doesn't) when going beyond TP=2,
-the constraints to know, and how to derive your own compose when `dual4.yml`
+the constraints to know, and how to derive your own compose when `multi4.yml`
 isn't your topology.
+
+> **Model not in the configs here / want any HF safetensors repo?** → [`docs/PULL.md`](PULL.md): `scripts/pull.sh` evaluates any model against the KV math (honest, no download) and boots it if it passes. The recipes on this page are the measured/derivation path; both work.
 
 > **Validation note:** the maintainer rig is **2× RTX 3090 PCIe**, but
 > Whamp's 4× RTX 3090 PCIe rig validated the TP=4 fp8/MTP baseline in
@@ -39,6 +41,57 @@ isn't your topology.
    overhead grows with TP count; per-stream decode at TP=4 may be
    *lower* than TP=2. Aggregate concurrent throughput still scales, but
    you don't get faster single-stream answers from more PCIe cards.
+
+---
+
+## Topology classification
+
+The launcher classifies your selected hardware and emits strategy guidance
+when the cards are not matched. You can run the classifier without booting
+anything:
+
+```bash
+bash scripts/launch.sh --topology
+```
+
+Use `--gpus 0,1` or `--cards 2` with `--topology` if you only want advice
+for a subset.
+
+| Class | What it means | Example | Recommended |
+|---|---|---|---|
+| `single_card` | 1 GPU detected | 1x RTX 3090 | Use the largest single-card compose that fits (`vllm/default`, `vllm/long-text`, `llamacpp/default`). |
+| `homogeneous` | All cards have matched VRAM and matched SM | 2x RTX 3090 | TP=N is the optimal default; use the shipped `vllm/dual*` or `vllm/dual4*` composes. |
+| `vram_matched_compute_mismatched` | Same VRAM, different compute tier | RTX 3090 + RTX 4090 | TP=N works correctly, but faster cards wait at NCCL allreduce. Estate planner is better for multi-model workloads. |
+| `vram_mismatched` | Different VRAM sizes | RTX 3060 12 GB + RTX 3090 24 GB | Prefer llama.cpp `--tensor-split`, manual PP=N experiments, or estate planner. Avoid TP=N across the full mismatched set. |
+| `heterogeneous_mixed` | Multiple VRAM and compute tiers | RTX 3060 + RTX 3090 + RTX 4090 | Manual selection. Run one model on the largest matched subset or use estate planner for separate endpoints. |
+
+### Why TP=N is poor on VRAM-mismatched cards
+
+Tensor parallelism splits weights evenly across cards. If one card has 24 GB
+and another has 12 GB, TP=2 still puts roughly half the model on each card.
+The smaller card becomes the hard ceiling for weights, KV cache, activations,
+and fragmentation. For Qwen 3.6 27B INT4, that usually leaves too little KV
+headroom to be useful.
+
+For mismatched VRAM, the practical paths are:
+
+- llama.cpp `--tensor-split` for weighted layer placement.
+- PP=N as a manual vLLM flag flip (`--pipeline-parallel-size N`) when you are
+  deliberately experimenting. club-3090 does not ship a PP compose today.
+- Estate planner: `bash scripts/launch.sh --estate` runs different models on
+  different card subsets without forcing one model across uneven VRAM.
+
+### When compute-mismatched TP is fine
+
+Matched VRAM with different SM, such as RTX 3090 + RTX 4090, is a different
+trade-off. TP=2 works because both cards have enough memory for the same model
+shard and KV budget. The cost is throughput: the faster card waits at NCCL
+allreduce barriers, so effective pair speed caps near the slower card. You
+preserve per-card VRAM capacity, but waste some compute on the faster card.
+
+That is acceptable for one-model serving. If your goal is maximum aggregate
+throughput from two different cards, estate planner usually wins because each
+card runs its own model at full speed.
 
 ---
 
@@ -120,7 +173,7 @@ For 4× RTX 3090 PCIe, start with the measured fp8/MTP compose:
 bash scripts/switch.sh vllm/dual4
 ```
 
-`docker-compose.dual4.yml` keeps the `dual.yml` fp8/MTP feature set and
+`multi4/docker-compose.yml` keeps the `dual.yml` fp8/MTP feature set and
 changes TP/streams from 2 → 4. Validation on Whamp's 4× 3090 PCIe rig:
 
 - boots at `max_model_len=262144`, `max_num_seqs=4`
@@ -137,7 +190,7 @@ WITH_DFLASH_DRAFT=1 bash scripts/setup.sh qwen3.6-27b
 bash scripts/switch.sh vllm/dual4-dflash
 ```
 
-`docker-compose.dual4-dflash.yml` keeps full 262K context but uses FP16 KV
+`multi4/dflash.yml` keeps full 262K context but uses FP16 KV
 and admits two full-context streams:
 
 - boots at `max_model_len=262144`, `max_num_seqs=2`
@@ -153,7 +206,7 @@ streams — not as a replacement for the fastest 2-card short-prompt DFlash path
 
 ## Recipe — derive your own config from `dual.yml`
 
-`dual.yml` is the tested 2-card baseline and `dual4.yml` is the measured
+`dual.yml` is the tested 2-card baseline and `multi4.yml` is the measured
 4-card baseline. To scale to another TP=N, copy one of those and change
 **three lines**:
 
@@ -181,7 +234,7 @@ Everything else stays the same:
   needed, not less
 
 Container name + port: pick something distinct so it doesn't collide
-with your other variants. `dual4.yml` uses `vllm-qwen36-27b-dual4` and
+with your other variants. `multi4.yml` uses `vllm-qwen36-27b-multi4` and
 port `8015`; reserve a different name/port for further experiments:
 
 ```yaml
@@ -271,7 +324,7 @@ Specifically interested in:
 
 ## Why we ship only one pre-baked 4-card config
 
-We now ship `dual4.yml` because a community rig validated that exact
+We now ship `multi4.yml` because a community rig validated that exact
 4× RTX 3090 PCIe topology with `verify-full.sh`, `verify-stress.sh`, and
 `bench.sh`. We still avoid a broad matrix of untested 4+ GPU composes:
 

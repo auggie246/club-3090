@@ -1,6 +1,10 @@
 # Dual 3090 — what changes when you add the second card
 
-You have **2× RTX 3090s, PCIe-only (no NVLink)**. This page is the front door for picking a config and knowing what dual-card unlocks vs single. Model-specific deep dives (quants, Genesis, engine internals) live in the model directory — links at the bottom.
+You have **2× RTX 3090s**. This page is the front door for picking a config and knowing what dual-card unlocks vs single. Model-specific deep dives (quants, Genesis, engine internals) live in the model directory — links at the bottom.
+
+> **Model not in the configs below / want any HF safetensors repo?** → [`docs/PULL.md`](PULL.md): `scripts/pull.sh` evaluates any model against the KV math (honest, no download) and boots it if it passes. The curated configs on this page are the measured path; both work.
+
+**NVLink auto-detection** (since 2026-05-14): the dual-card composes now auto-detect whether an NVLink bridge is present. If you have one, you get the NVLink-optimized path automatically. If not, PCIe mode is used. Override with `NVLINK_MODE=force_on|force_off` in your `.env`. See the "NVLink auto-detection" section below.
 
 > **Have 3+ GPUs?** See [`MULTI_CARD.md`](MULTI_CARD.md) — derivation of TP=4 / TP=8 configs from `dual.yml`, valid TP values for Qwen3.6-27B (1, 2, 4, 5, 8, 10), and what scales vs what doesn't.
 
@@ -8,13 +12,26 @@ You have **2× RTX 3090s, PCIe-only (no NVLink)**. This page is the front door f
 
 ## TL;DR — pick by workload
 
+### Qwen3.6-27B (default model, also runs single-card)
+
 | What you're doing | Compose | Max ctx | Narr / Code TPS | VRAM per card | Why |
 |---|---|---|---|---|---|
-| **Hermes agentic fine-tune** (Carnice tool specialization) | [`carnice-bf16mtp.yml`](../models/qwen3.6-27b/vllm/compose/docker-compose.carnice-bf16mtp.yml) | **262K** | **72 / 80** | ~22.3 / 24 GB | BF16 MTP overlay. Hermes-style assistant. Available on HF: [wasifb/Carnice_V2_27B_INT4_BF16MTP](https://huggingface.co/wasifb/Carnice_V2_27B_INT4_BF16MTP) |
-| General-purpose default (vision + tools + long ctx) | [`dual.yml`](../models/qwen3.6-27b/vllm/compose/docker-compose.dual.yml) ⭐ | **262K** (237K single-prompt verified) | **69 / 89** | ~23.6 / 24 GB | fp8 KV, 2 streams, full feature set |
-| Multi-tenant (4 concurrent agents at full ctx) | [`dual-turbo.yml`](../models/qwen3.6-27b/vllm/compose/docker-compose.dual-turbo.yml) | **262K** | **58 / 76** per-stream (269 TPS aggregate at 4 streams) | ~19.8 / 24 GB | TQ3 KV (3 bits/token) + full v7.69 PROD env-var stack — 4.67× concurrency. **20 GB Ampere users:** override `--kv-cache-dtype turboquant_3bit_nc` → `fp8_e5m2`; see [HARDWARE.md](HARDWARE.md#note-for-sub-24-gb-cards) + [#47](https://github.com/noonghunna/club-3090/issues/47). |
-| Peak code TPS with vision | [`dual-dflash.yml`](../models/qwen3.6-27b/vllm/compose/docker-compose.dual-dflash.yml) | **185K** | **82 / 125** | ~23.6 / 24 GB | DFlash N=5 + 1.75 GB draft per card, AL ~4.4 (vs MTP's 3.4) |
-| Peak code TPS, no vision | [`dual-dflash-noviz.yml`](../models/qwen3.6-27b/vllm/compose/docker-compose.dual-dflash-noviz.yml) | **200K** | **78 / 127** | ~23.8 / 24 GB | DFlash + no vision, +15K ctx vs dual-dflash |
+| **Hermes agentic fine-tune** (Carnice tool specialization) | [`carnice-bf16mtp.yml`](../models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp.yml) | **262K** | **72 / 80** | ~22.3 / 24 GB | BF16 MTP overlay. Hermes-style assistant. Available on HF: [wasifb/Carnice_V2_27B_INT4_BF16MTP](https://huggingface.co/wasifb/Carnice_V2_27B_INT4_BF16MTP) |
+| General-purpose default (vision + tools + long ctx) | [`dual.yml`](../models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml) ⭐ | **262K** (237K single-prompt verified) | **69 / 89** | ~23.6 / 24 GB | fp8 KV, 2 streams, full feature set |
+| Multi-tenant (4 concurrent agents at full ctx) | [`dual-turbo.yml`](../models/qwen3.6-27b/vllm/compose/dual/turbo.yml) | **262K** | **58 / 76** per-stream (269 TPS aggregate at 4 streams) | ~19.8 / 24 GB | TQ3 KV (3 bits/token) + full v7.69 PROD env-var stack — 4.67× concurrency. **20 GB Ampere users:** override `--kv-cache-dtype turboquant_3bit_nc` → `fp8_e5m2`; see [HARDWARE.md](HARDWARE.md#note-for-sub-24-gb-cards) + [#47](https://github.com/noonghunna/club-3090/issues/47). |
+| Peak code TPS with vision | [`dual-dflash.yml`](../models/qwen3.6-27b/vllm/compose/dual/dflash.yml) | **185K** | **82 / 125** | ~23.6 / 24 GB | DFlash N=5 + 1.75 GB draft per card, AL ~4.4 (vs MTP's 3.4) |
+| Peak code TPS, no vision | [`dual-dflash-noviz.yml`](../models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml) | **200K** | **78 / 127** | ~23.8 / 24 GB | DFlash + no vision, +15K ctx vs dual-dflash |
+
+### Gemma 4 31B (dual-card only on Ampere 24 GB ¹)
+
+| What you're doing | Compose | Max ctx | Narr / Code TPS | VRAM per card | Why |
+|---|---|---|---|---|---|
+| General-purpose default (vision + tools + 32K ctx) | [`dual.yml`](../models/gemma-4-31b/vllm/compose/dual/docker-compose.yml) ⭐ | 32K | **106 / 141** | ~22 / 24 GB | bf16 KV, MTP n=3 (Google's official `gemma-4-31B-it-assistant` drafter). PR [#41745](https://github.com/vllm-project/vllm/pull/41745) merged upstream. |
+| Long-context default (262K ctx, balanced TPS) | [`dual-int8.yml`](../models/gemma-4-31b/vllm/compose/dual/int8.yml) | **262K** | **95 / 126** | ~22.1 / 24 GB | INT8 PTH KV via vendored PR [#40391](https://github.com/vllm-project/vllm/pull/40391) overlay. **8.2× context lift** for ~10% TPS cost. NIAH PASS at 137K. |
+| Multi-stream long-context (3.6× concurrency at 98K) | [`dual-int8.yml`](../models/gemma-4-31b/vllm/compose/dual/int8.yml) (override `MAX_NUM_SEQS=4`) | 98K | **96 / 127** per-stream | ~22.2 / 24 GB | INT8 PTH KV pool 354K tokens → 3.6× concurrency. |
+| Peak code TPS with vision | [`dual-dflash.yml`](../models/gemma-4-31b/vllm/compose/dual/dflash.yml) | 32K | **105 / 177** | ~22.3 / 24 GB | z-lab Gemma 4 DFlash drafter, n=7. **+18% code TPS over MTP** (177 vs 141). bf16 KV. |
+
+¹ Single-card boot OOMs on Ampere 24 GB regardless of KV format. Single-card Gemma 4 is feasible on 32 GB+ GPUs (validated on RTX 5090 32 GB by [@apnar](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042) — 160/215 TPS at 32K MTP, 150/261 at 12K DFlash). Tracked in [`docs/UPSTREAM.md`](UPSTREAM.md) row 78 + [#67](https://github.com/noonghunna/club-3090/discussions/67).
 
 > **VRAM column is per-card** under TP=2 (each card holds half the weights + half the KV; both cards' totals are nearly identical). For a 2× 20 GB rig (e.g. 2× 3080-20GB / 40 GB combined), `dual.yml` and `dual-turbo` should fit; `dual-dflash*` won't (FP16 KV + DFlash draft pushes per-card past 20 GB). Component breakdown in [`tools/charts/gen-vram.py`](../tools/charts/gen-vram.py).
 
@@ -61,6 +78,8 @@ For the single-card picture, see [`SINGLE_CARD.md`](SINGLE_CARD.md).
 262K + **TurboQuant 3-bit KV** + Genesis v7.69 PROD env-var stack + 4 streams. TQ3 packs each KV slot to ~3 bits/token (vs fp8's ~8 bits), which is what makes 4 × 262K pools fit on 2 cards. KV pool 1.52M tokens, max concurrency **4.67×**. Per-stream TPS lands at **58 narr / 76 code** (n=5, CV 3-5%), AL 3.39-3.51, MTP avg accept 79-84%, VRAM 19.8 GB / card.
 
 **Concurrent throughput** (n=4 streams of the canonical code prompt, 2026-05-01 PM, vLLM v0.20 + Genesis v7.65 dev tip — re-bench against v7.69 pending but decode TPS regime unchanged by the bump): aggregate code TPS 269 across 4 streams (3.63× speedup over single-stream 74 TPS), per-stream mean 74 (CV 3.1%) — true parallel decoding, not interleaved. See `results/v0.20-migration/dual-turbo-concurrent.summary` for the run-by-run.
+
+> ⚠️ **Decode-concurrent ≠ long-prefill-overlap** (see [#208](https://github.com/noonghunna/club-3090/discussions/208)). The 269-TPS figure above is *decode-concurrent* — N short-prompt streams decoding together. A **different** regime, a **long prefill** (big tool result, file read, accumulated context) entering while another stream is *already decoding*, can **starve decode** to ~0.1–0.9 TPS until the prefill clears: chunked-prefill co-batches the heavy GDN/Mamba prefill chunk with the decode token into one forward step, and the `align` block floors the chunk at **1568 tokens** so it can't be tuned to zero. Observed on `dual.yml` (fp8); it's architectural to the hybrid model, so expect it on any dual-card chunked-prefill config. **So read 269 TPS as aggregate *throughput*, not a *latency* guarantee under agentic traffic.** Mitigations: lower `--max-num-batched-tokens` toward the 1568 floor to soften it (doesn't eliminate it); **proxy-level admission control** — gate large prefills away from live interactive decodes — is the real fix (`--scheduling-policy priority` does *not* help: it orders admission, not intra-step compute). Per-budget latency numbers pending a community A/B.
 
 **When to pick:** real concurrent load. Solo users won't see the win on the per-stream curve — but per-stream TPS at n=4 is essentially the same as n=1 here (74 vs 76 TPS code), so this is also a viable single-stream config if you want max KV pool. Pick this if you ever serve >1 request at a time, or want the biggest single-card-equivalent context.
 
@@ -111,19 +130,28 @@ Without it, vLLM falls back silently to baseline bf16 decode (~25 TPS, not 125).
 
 ### Marlin pad-sub-tile-n mount dependency
 
-The dual variants currently mount `/opt/ai/vllm-src/vllm/model_executor/kernels/linear/mixed_precision/marlin.py` (and one neighbor) read-only into the container. This is our patched fork of [vllm#40361](https://github.com/vllm-project/vllm/pull/40361) — required for AutoRound W4A16 at TP=2 where output-dim shards fall below 64. **You need to clone vLLM source to `/opt/ai/vllm-src/`** for these composes to boot. When the upstream PR lands, we'll drop the mount.
+The dual variants currently mount `/opt/ai/engines/vllm/primary/vllm/model_executor/kernels/linear/mixed_precision/marlin.py` (and one neighbor) read-only into the container. This is our patched fork of [vllm#40361](https://github.com/vllm-project/vllm/pull/40361) — required for AutoRound W4A16 at TP=2 where output-dim shards fall below 64. **You need to clone vLLM source to `/opt/ai/engines/vllm/primary/`** for these composes to boot. When the upstream PR lands, we'll drop the mount.
 
-If you don't have `/opt/ai/vllm-src/`:
+If you don't have `/opt/ai/engines/vllm/primary/`:
 
 ```bash
 sudo mkdir -p /opt/ai && sudo chown $USER /opt/ai
-git clone https://github.com/vllm-project/vllm.git /opt/ai/vllm-src
-cd /opt/ai/vllm-src && git checkout main
+git clone https://github.com/vllm-project/vllm.git /opt/ai/engines/vllm/primary
+cd /opt/ai/engines/vllm/primary && git checkout main
 ```
 
-### PCIe allreduce overhead (no NVLink)
+### NVLink auto-detection
 
-`--disable-custom-all-reduce` is set in all dual composes. Without it, vLLM tries to use a custom CUDA path that assumes NVLink topology and crashes. The trade is some allreduce latency on every layer, hence the per-stream TPS being lower than you'd see on an A100/A5000 dual setup with NVLink. Don't bother with NVLink bridges; this stack is intentionally PCIe-tested.
+The dual-card composes automatically detect whether an NVLink bridge is installed and configure themselves accordingly. No separate compose files needed — `dual.yml`, `dual-turbo.yml`, `dual-dflash.yml`, and `dual-dflash-noviz.yml` all adapt to your hardware.
+
+**How it works:** Each dual compose mounts `scripts/detect_nvlink.sh` and sources it in the entrypoint at container boot. The script checks `nvidia-smi topo -m` for NVLink links between GPUs, sets the correct NCCL env vars, and the entrypoint conditionally passes `--disable-custom-all-reduce` to vLLM.
+
+**Override:** Set `NVLINK_MODE` in your `.env` (passed through to the container):
+- `auto` (default) — detect via `nvidia-smi topo -m`
+- `force_on` — assume NVLink bridge present, enable NVLink mode
+- `force_off` — force PCIe-only path even if NVLink detected
+
+Without NVLink, `--disable-custom-all-reduce` is passed to vLLM and `NCCL_P2P_DISABLE=1` is set. With NVLink, custom all-reduce is enabled and NCCL uses the NVLink path. The per-stream TPS difference is ~10-15% on dual 3090 (see cross-rig data in [BENCHMARKS.md](../BENCHMARKS.md)).
 
 ### `dual.yml` is Genesis-less by design
 
@@ -148,9 +176,9 @@ If you're solo-using on dual, you're paying for hardware that mostly sits idle o
 ```bash
 # 1. Setup (downloads model, clones Genesis + vllm-src, ~20 min cold)
 bash scripts/setup.sh qwen3.6-27b
-git clone https://github.com/vllm-project/vllm.git /opt/ai/vllm-src    # required for dual variants
+git clone https://github.com/vllm-project/vllm.git /opt/ai/engines/vllm/primary    # required for dual variants
 
-# 2. Pick + boot via wizard (asks GPU count + workload)
+# 2. Pick + boot via wizard (asks model + GPUs, projects VRAM budget, auto-picks TP=2 for matched 2× 3090)
 bash scripts/launch.sh
 
 # 3. Or skip the wizard:
@@ -197,17 +225,28 @@ Code TPS held within bench variance across all 4 variants — no v0.20 regressio
 
 ## Models supported on dual 3090
 
-- **[Qwen3.6-27B](../models/qwen3.6-27b/)** — primary model. Quant choices, Genesis patch surface (single-card), engine internals all in the model directory.
-- More models coming. As they're added, this section will list which dual-card configs each one supports.
+- **[Qwen3.6-27B](../models/qwen3.6-27b/)** — primary model. Runs single-card AND dual-card. Quant choices (AutoRound INT4, GGUF Q3_K_XL / Q4_K_M), Genesis patch surface (mostly single-card relevant), engine internals all in the model directory.
+- **[Gemma 4 31B](../models/gemma-4-31b/)** — dual-card only on Ampere 24 GB (single-card boot OOMs even at 8K ctx; needs 32 GB+ per card). Two drafter paths (MTP via Google's official `gemma-4-31B-it-assistant` + DFlash via z-lab) × two KV strategies (bf16 / 32K vs INT8 PTH / 262K) + AWQ-4bit-weights variant. Genesis doesn't apply (Genesis patches are Qwen3-Next-specific).
+
+As more models land, they'll show up here with their dual-card compose set.
 
 ---
 
 ## Deep dives
 
+### Qwen3.6-27B
 - **[Model README](../models/qwen3.6-27b/)** — quant choices (AutoRound INT4 / GGUF), Genesis patch surface (mostly single-card relevant), what's working / what's not.
 - **[INTERNALS.md](../models/qwen3.6-27b/INTERNALS.md)** — engineering rationale: AutoRound vs GPTQ, DFlash forensics, Marlin pad fork, MTP, upstream tracker.
 - **[VRAM allocation diagram](../models/qwen3.6-27b/README.md#vram-allocation-across-configs)** — full per-config breakdown across single + dual.
+
+### Gemma 4 31B
+- **[Model README](../models/gemma-4-31b/)** — quants (BF16 source, AWQ-4bit, INT8 PTH KV via PR #40391 vendored overlay), drafter options (MTP / DFlash), upstream PR tracker.
+- **[Discussion #67](https://github.com/noonghunna/club-3090/discussions/67)** — first Ampere consumer cross-rig data thread. MTP, DFlash, INT8 PTH long-context, single-card 5090 numbers.
+
+### Cross-cutting
 - **[FAQ.md](FAQ.md)** — common questions (NVLink? AMD/Intel? Why fp8 not TQ3 on dual.yml? etc.).
 - **[EXAMPLES.md](EXAMPLES.md)** — Python / TS / curl client snippets + IDE connection settings.
 - **[HARDWARE.md](HARDWARE.md)** — Ampere SM 8.6 specifics, NVLink (declined), power caps, PCIe topology.
-- **[SINGLE_CARD.md](SINGLE_CARD.md)** — when one card is enough.
+- **[CLIFFS.md](CLIFFS.md)** — single-card Cliff 1 / Cliff 2 mechanisms (mostly Qwen3-Next-specific; Gemma 4 doesn't have these because it's dense attention without DeltaNet).
+- **[UPSTREAM.md](UPSTREAM.md)** — every upstream PR / issue we filed or watch (vLLM, Genesis, lucebox-hub, transformers, llama.cpp, SGLang).
+- **[SINGLE_CARD.md](SINGLE_CARD.md)** — when one card is enough (Qwen3.6-27B only — Gemma 4 needs ≥32 GB single-card).

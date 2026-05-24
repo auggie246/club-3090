@@ -10,6 +10,11 @@ models-cache/
 # No trailing slash — also matches local symlinks pointing at out-of-tree clones.
 models/*/vllm/patches/genesis
 
+# v0.8.0 [E] Pull-Emit-Derived runtime capture artifacts (the §6 capture
+# points + manifest; consumed by the later [F] Loop phase). Per-run output,
+# never committed.
+.pull-captures/
+
 # Python
 __pycache__/
 *.pyc

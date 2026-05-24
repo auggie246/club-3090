@@ -12,15 +12,41 @@
 #     retention across sessions.
 #   - Read-only against the running deployment.
 #
+# PASS verdict semantics:
+#   PASS = no failure signal fired on the test sample. Specifically:
+#     - silent_empty turns: 0 (no HTTP 200 + 0 completion tokens)
+#     - max VRAM growth: under SOAK_MAX_GROWTH_MIB (default 200 MiB)
+#     - TPS retention: first-5 vs last-5 median >= 98%
+#     - request errors / stream interruptions: 0
+#   PASS does NOT mean:
+#     - "Patches in this compose's overlay set are doing useful work."
+#       PASS-on-patched is consistent with patches working OR with patches
+#       not being load-bearing for this workload + topology. Cliff 2 / 2b
+#       mitigations target single-card 24 GB pressure; TP=2 (dual.yml)
+#       structurally escapes Cliff 2 regardless of which patches load.
+#     - "Deeper-context workloads will also pass." Continuous mode ramps
+#       to ~22-25K accumulated tokens by turn 5; it does not push to
+#       model max_ctx. Longer-context regimes can still fail.
+#     - "The configuration is optimally tuned." Soak detects failures,
+#       not whether perf is on the table.
+#   For patch attribution, run the same soak on the same compose with
+#   the overlay bind-mounts stripped (or on a baseline image) and compare
+#   metrics. See https://github.com/noonghunna/club-3090/issues/140.
+#
 # Time budget:
 #   Default SOAK_SESSIONS=20 x SOAK_TURNS=5, capped by SOAK_TIMEOUT_S=1800.
 #   Expect 10-30 minutes depending on config.
 #
-# Usage:
-#   CONTAINER=vllm-qwen36-27b-long-vision bash scripts/soak-test.sh
-#   ENDPOINT=http://localhost:8020 SOAK_SESSIONS=8 bash scripts/soak-test.sh
+# Usage (preferred):
+#   bash scripts/soak-test.sh                         # default fresh mode (20 sessions × 5 turns)
+#   bash scripts/soak-test.sh --continuous            # Cliff 2b detector (5 sessions × 5 turns ramping ctx)
+#   bash scripts/soak-test.sh --quick                 # 8 sessions × 5 turns, fresh mode (~5-8 min)
+#   bash scripts/soak-test.sh --help                  # full help
 #
-# Env:
+# Auto-detect: container + endpoint + model are sniffed from `docker ps` and
+# the running endpoint's /v1/models. Override via env vars if needed.
+#
+# Env (advanced — flags above cover the common cases):
 #   CONTAINER              Running container. Default: first vllm-qwen36-27b*
 #                          container from `docker ps`.
 #   ENDPOINT / URL         OpenAI endpoint. Default: mapped container port for
@@ -57,9 +83,92 @@
 
 set -euo pipefail
 
-SOAK_SESSIONS="${SOAK_SESSIONS:-20}"
-SOAK_TURNS="${SOAK_TURNS:-5}"
-SOAK_MODE="${SOAK_MODE:-fresh}"
+usage() {
+  cat <<'EOF'
+soak-test.sh — multi-turn VRAM-accretion + Cliff 2b validation
+
+USAGE
+  bash scripts/soak-test.sh [MODE]
+
+MODES
+  (default)         fresh mode: 20 sessions × 5 turns, ~10-25 min
+                    Tests raw per-request VRAM accretion.
+  --continuous      Cliff 2b detector: 5 sessions × 5 turns, ramping context
+                    to ~22-25K accumulated tokens. **The only test that
+                    catches the multi-turn accumulating-context cliff** that
+                    bit hermes/openhands traffic on long-* configs.
+  --quick           8 sessions × 5 turns, fresh mode (~5-8 min)
+  --fresh           Explicit fresh mode (same as default)
+
+OPTIONS
+  -h, --help        Show this help
+
+ENV (advanced — auto-detected by default)
+  CONTAINER         Running container. Default: first vllm-qwen36-27b* /
+                    vllm-gemma-4-31b* from docker ps. Use CONTAINER=none for
+                    host-mode engines (e.g. llama.cpp host build).
+  ENDPOINT / URL    OpenAI endpoint. Default: mapped container port → fallback
+                    http://localhost:8020.
+  MODEL             Served model. Default: first id from /v1/models.
+  SOAK_SESSIONS     Override session count.
+  SOAK_TURNS        Override turn count.
+  SOAK_MAX_GROWTH_MIB   VRAM-growth fail threshold. Default: 200.
+  SOAK_TIMEOUT_S    Hard wall-clock cap. Default: 1800.
+
+EXAMPLES
+  bash scripts/soak-test.sh --continuous          # Cliff 2b detector
+  bash scripts/soak-test.sh --quick               # fast smoke
+  CONTAINER=vllm-gemma-4-31b-mtp bash scripts/soak-test.sh --continuous
+  CONTAINER=none ENDPOINT=http://localhost:8030 bash scripts/soak-test.sh
+
+NOTES
+  Soak-continuous is the only test that surfaces Cliff 2b under
+  multi-turn accumulating-context traffic on single-card configs.
+  If you're filing a bench contribution, run with --continuous and
+  paste the [soak] summary alongside your bench numbers.
+  See docs/CLIFFS.md for context.
+
+PASS VERDICT — WHAT IT DOES AND DOES NOT MEAN
+  PASS = no failure signal on the test sample (silent_empty=0, VRAM
+  growth under threshold, TPS retention >= 98%, zero errors).
+  PASS does NOT validate that patches in the compose's overlay set
+  are load-bearing for the workload — topology alone (e.g. TP=2)
+  can sidestep the failure mode patches target. For patch attribution,
+  re-run the same soak with overlays stripped and compare.
+  Full discussion: docs/CLIFFS.md and issue #140.
+
+EOF
+}
+
+# --- arg parsing -------------------------------------------------------------
+# Set defaults (env vars override; flags override env vars; --help short-circuits)
+MODE_FLAG=""
+QUICK=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --continuous)  MODE_FLAG="continuous"; shift ;;
+    --fresh)       MODE_FLAG="fresh"; shift ;;
+    --quick)       QUICK=1; MODE_FLAG="${MODE_FLAG:-fresh}"; shift ;;
+    -h|--help)     usage; exit 0 ;;
+    *)             echo "✗ unknown argument: $1" >&2
+                   echo "  run 'bash scripts/soak-test.sh --help' for usage." >&2
+                   exit 2 ;;
+  esac
+done
+
+SOAK_MODE="${SOAK_MODE:-${MODE_FLAG:-fresh}}"
+if [[ "$SOAK_MODE" == "continuous" ]]; then
+  # Continuous mode requires the ramping turn shape; sessions=5 is the
+  # standard cross-rig cadence (matches what BENCHMARKS rows cite).
+  SOAK_SESSIONS="${SOAK_SESSIONS:-5}"
+  SOAK_TURNS="${SOAK_TURNS:-5}"
+elif [[ "$QUICK" == "1" ]]; then
+  SOAK_SESSIONS="${SOAK_SESSIONS:-8}"
+  SOAK_TURNS="${SOAK_TURNS:-5}"
+else
+  SOAK_SESSIONS="${SOAK_SESSIONS:-20}"
+  SOAK_TURNS="${SOAK_TURNS:-5}"
+fi
 SOAK_MAX_GROWTH_MIB="${SOAK_MAX_GROWTH_MIB:-200}"
 SOAK_TIMEOUT_S="${SOAK_TIMEOUT_S:-1800}"
 SOAK_REQ_TIMEOUT_S="${SOAK_REQ_TIMEOUT_S:-600}"
@@ -104,19 +213,25 @@ else
 fi
 
 auto_container() {
+  # Canonical club-3090 container prefixes across engines (mirror of
+  # preflight.sh::preflight_autodetect_endpoint). llama-cpp / ik-llama were
+  # previously missing here → rc=2 on llama.cpp/ik rebench-full soak step (#403).
   docker ps --format '{{.Names}}' 2>/dev/null \
-    | grep -E '^(vllm-qwen36-27b|vllm-gemma-4-31b)' \
+    | grep -E '^(vllm-qwen36-27b|llama-cpp-qwen36-27b|ik-llama-qwen36-27b|vllm-gemma-4-31b|sglang-qwen36-27b)' \
     | head -1 || true
 }
 
 endpoint_from_container() {
   local container="$1"
-  local mapped port
-  mapped="$(docker port "$container" 8000/tcp 2>/dev/null | head -1 || true)"
-  if [[ -n "$mapped" ]]; then
-    port="${mapped##*:}"
-    [[ "$port" =~ ^[0-9]+$ ]] && { printf 'http://localhost:%s\n' "$port"; return 0; }
-  fi
+  local mapped port internal
+  # vllm maps internal 8000, llama.cpp / ik_llama map 8080, sglang maps 30000.
+  for internal in 8000 8080 30000; do
+    mapped="$(docker port "$container" "${internal}/tcp" 2>/dev/null | head -1 || true)"
+    if [[ -n "$mapped" ]]; then
+      port="${mapped##*:}"
+      [[ "$port" =~ ^[0-9]+$ ]] && { printf 'http://localhost:%s\n' "$port"; return 0; }
+    fi
+  done
   printf 'http://localhost:8020\n'
 }
 
@@ -159,7 +274,7 @@ if [[ "$HOST_MODE" == "1" ]]; then
   CONTAINER="none"
 else
   CONTAINER="${CONTAINER:-$(auto_container)}"
-  [[ -n "$CONTAINER" ]] || die "no running vllm-qwen36-27b*/vllm-gemma-4-31b* container found; set CONTAINER=... or CONTAINER=none for host engines"
+  [[ -n "$CONTAINER" ]] || die "no running club-3090 container found (vllm-/llama-cpp-/ik-llama-/sglang- × qwen36-27b/gemma-4-31b); set CONTAINER=... or CONTAINER=none for host engines"
   docker inspect "$CONTAINER" >/dev/null 2>&1 || die "container '$CONTAINER' not found (use CONTAINER=none for host engine builds)"
   [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo false)" == "true" ]] \
     || die "container '$CONTAINER' is not running"

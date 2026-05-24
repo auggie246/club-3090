@@ -153,18 +153,42 @@ check_patches() {
   # club-3090#29. We grep -q each anchor in priority order on the full log.
   local docker_logs
   docker_logs="$(docker logs "${CONTAINER}" 2>&1)"
-  if echo "$docker_logs" | grep -q "\[Genesis\] FAILED"; then
+  # Use here-strings instead of pipes — when grep -q matches early it closes
+  # stdin, and the upstream `echo` then writes to a closed pipe → "Broken pipe"
+  # on stderr (issue #101 by @a-p-l). Here-strings feed the variable directly
+  # to grep without the pipe race.
+  if grep -q "\[Genesis\] FAILED" <<< "$docker_logs"; then
     fail "Genesis apply_all reported FAILED patch(es)" \
          "Inspect: docker logs ${CONTAINER} 2>&1 | grep -E 'Genesis.*FAILED' | head"
-  elif echo "$docker_logs" | grep -q "apply_all elapsed"; then
+  elif grep -q "apply_all elapsed" <<< "$docker_logs"; then
     pass "Genesis patches applied (apply_all completed clean)"
-  elif echo "$docker_logs" | grep -q "\[Genesis\] applied:"; then
+  elif grep -q "\[Genesis\] applied:" <<< "$docker_logs"; then
     pass "Genesis patches applied (partial log — apply_all may still be running)"
   else
     skip "no Genesis marker in logs (container restarted, or Genesis not loaded)"
   fi
 }
 run_check "patches" check_patches
+
+# --------------------------------------------------------------------
+# Cold-start warmup (not a scored check)
+# --------------------------------------------------------------------
+# The first real inference after a multi-minute boot pays cudagraph/JIT
+# compile for that shape. Without this, [3/8] (a 30s-capped request) is the
+# one that eats the cold start and false-fails while every later check passes
+# on the now-warm engine. Fire one discard-result request with a generous cap
+# so all *scored* checks reflect warm-engine behavior. Failure here is
+# non-fatal (a real outage still surfaces on [3/8]).
+echo "[warmup] priming engine (cold cudagraph/JIT, up to 180s, not scored) ..."
+curl -sf -m 180 "${URL}/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"${MODEL}\",
+    \"messages\": [{\"role\": \"user\", \"content\": \"ping\"}],
+    \"max_tokens\": 1,
+    \"temperature\": 0.0,
+    \"chat_template_kwargs\": {\"enable_thinking\": false}
+  }" >/dev/null 2>&1 && echo "[warmup] engine warm" || echo "[warmup] warmup request did not return in 180s — [3/8] will surface a real outage if present"
 
 # --------------------------------------------------------------------
 # 3. Basic completion — Paris sanity
@@ -317,7 +341,7 @@ check_thinking() {
 import sys, json
 d = json.load(sys.stdin)
 msg = d['choices'][0]['message']
-reasoning = msg.get('reasoning') or ''
+reasoning = msg.get('reasoning') or msg.get('reasoning_content') or ''
 content = msg.get('content') or ''
 finish = d['choices'][0].get('finish_reason')
 print(f'{len(reasoning)}|{len(content)}|{finish}|{(reasoning[:60] or \"(empty)\").replace(chr(10), \" \")}|{(content[:60] or \"(empty)\").replace(chr(10), \" \")}')

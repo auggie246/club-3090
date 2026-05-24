@@ -9,10 +9,13 @@
 # Usage:
 #   bash scripts/switch.sh <variant>           # switch + tail until ready
 #   bash scripts/switch.sh <variant> --no-wait # switch and return immediately
+#   bash scripts/switch.sh --force <variant>   # skip hardware/free-VRAM preflight
 #   bash scripts/switch.sh --list              # show all variants
 #   bash scripts/switch.sh --down              # just bring down whatever's up
 #
-# Variant names (engine/file, file is the docker-compose.<file>.yml stem):
+# Variant names are derived from the compose registry (the single source of
+# truth); `bash scripts/switch.sh --list` is authoritative. A representative
+# subset (engine/file, file is the docker-compose.<file>.yml stem):
 #
 #   Single-card vLLM:
 #     vllm/default            48K + TQ3 + MTP + vision + tools (recommended)
@@ -30,18 +33,24 @@
 #     vllm/dual-turbo       262K + TQ3 + 4 streams + vision (multi-tenant)
 #     vllm/dual-dflash      185K + FP16 + DFlash N=5 + vision (peak code TPS)
 #     vllm/dual-dflash-noviz 200K + FP16 + DFlash N=5 + no vision (peak code, max ctx)
-#     vllm/dual-nvlink          262K + fp8 + 2 streams + vision (REQUIRES NVLink bridge — community/experimental)
-#     vllm/dual-nvlink-turbo    262K + TQ3 + 4 streams + vision (REQUIRES NVLink bridge — community/experimental)
-#     vllm/dual-nvlink-dflash   185K + FP16 + DFlash N=5 + vision (REQUIRES NVLink bridge — community/experimental)
-#     vllm/dual-nvlink-dflash-noviz 188K + FP16 + DFlash N=5 + no vision (REQUIRES NVLink bridge — community/experimental)
+#     vllm/dual-nvlink          262K + fp8 + 2 streams + vision (NVLink stub — auto-detected via dual/)
+#     vllm/dual-nvlink-turbo    262K + TQ3 + 4 streams + vision (NVLink stub — auto-detected via dual/)
+#     vllm/dual-nvlink-dflash   185K + FP16 + DFlash N=5 + vision (NVLink stub — auto-detected via dual/)
+#     vllm/dual-nvlink-dflash-noviz 188K + FP16 + DFlash N=5 + no vision (NVLink stub — auto-detected via dual/)
 #     vllm/gemma-mtp        Gemma-4-31B + Google MTP drafter (32K, bf16 KV, vision — community/experimental, pre-merge)
 #
 #   Single-card llama.cpp:
-#     llamacpp/default      Q3_K_XL + 262K + q4_0 KV + vision (max ctx, no cliffs)
-#     llamacpp/concurrent   Q3_K_XL + 192K pool + 4 parallel slots + vision
+#     llamacpp/default      alias for llamacpp/mtp (Q4_K_M MTP, no vision)
+#     llamacpp/mtp          Q4_K_M MTP + 200K (max-safe @ -ub 512; 131K @ -ub 1024 faster prefill) + q4_0 KV (fast ~60 TPS code; no vision; cliff-immune)
+#     llamacpp/mtp-vision   Q4_K_M MTP + 49K + q4_0 KV + mmproj (fast + multimodal)
+#   Single-card ik_llama (IQ4_KS — ~0.5-0.8 GB leaner; best for VRAM-tight / WSL):
+#     ik-llama/iq4ks-mtp         IQ4_KS MTP + 262K + q4_0 KV (own image: ikawrakow/ik-llama-cpp)
+#     ik-llama/iq4ks-mtp-vision  IQ4_KS MTP + 160K + q4_0 KV + mmproj (multimodal)
 #
 # Env overrides (rarely needed):
 #   COMPOSE_BIN     Default: "docker compose" (set to e.g. "podman compose" if needed)
+#   CLUB3090_GPU    Single-card GPU index override, e.g. "1" on a hetero rig
+#   FORCE           Set to 1 to skip hardware/free-VRAM preflight
 #   READY_URL       Default: http://localhost:8020/v1/models
 #   READY_TIMEOUT   Default: 600 (seconds — longer for cold cudagraph capture)
 
@@ -50,6 +59,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_BIN="${COMPOSE_BIN:-docker compose}"
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
+LAUNCH_PROFILE="${LAUNCH_PROFILE:-${ROOT_DIR}/scripts/lib/profiles/launch_compat.py}"
 
 # Load .env if present, so PORT / MODEL_DIR / etc. flow through to docker
 # compose AND to the ready-URL probe below.
@@ -60,61 +70,77 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
   set +a
 fi
 
-# Per-variant default port (matches each compose's "${PORT:-XXXX}:8000"
-# fallback). Used when neither $PORT nor $READY_URL is set explicitly.
-declare -A VARIANT_DEFAULT_PORT=(
-  [vllm/default]=8020
-  [vllm/long-vision]=8020
-  [vllm/long-text]=8020
-  [vllm/long-text-no-mtp]=8021
-  [vllm/bounded-thinking]=8020
-  [vllm/tools-text]=8020
-  [vllm/minimal]=8020
-  [vllm/dual]=8010
-  [vllm/dual4]=8015
-  [vllm/dual4-dflash]=8016
-  [vllm/dual-turbo]=8011
-  [vllm/dual-dflash]=8012
-  [vllm/dual-dflash-noviz]=8013
-  [vllm/dual-nvlink]=8014
-  [vllm/dual-nvlink-turbo]=8017
-  [vllm/dual-nvlink-dflash]=8018
-  [vllm/dual-nvlink-dflash-noviz]=8019
-  [vllm/gemma-mtp]=8030
-  [vllm/gemma-mtp-tp1]=8031
-  [vllm/gemma-dflash]=8032
-  [llamacpp/default]=8020
-  [llamacpp/concurrent]=8020
-)
+# Variant tables are DERIVED from the single source of truth
+# (scripts/lib/profiles/compose_registry.py COMPOSE_REGISTRY) so that every
+# registered compose is launchable and there are no launcher-only ghosts
+# (CONTRACT-2b-ii / registry↔launcher parity). The previous hardcoded
+# `declare -A` maps drifted out of the registry (e.g. vllm/dual-int8 shipped
+# in the registry + as dual/int8.yml but was unlaunchable here); deriving
+# eliminates that drift class structurally. `scripts/tests/test-switch-registry-parity.sh`
+# fails CI on ANY mismatch in either direction.
+#
+#   VARIANT_DEFAULT_PORT[<key>]  = registry default_port (matches each
+#                                  compose's "${PORT:-XXXX}:8000" fallback).
+#   VARIANTS[<key>]              = "engine|compose_dir|file" derived from the
+#                                  registry compose_path
+#                                  (<dir>/compose/<file>) + the key's engine
+#                                  prefix (vllm|llamacpp).
+declare -A VARIANT_DEFAULT_PORT=()
+declare -A VARIANTS=()
 
-# variant -> "engine|compose_dir|file"  (file relative to compose_dir)
-declare -A VARIANTS=(
-  [vllm/default]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.yml"
-  [vllm/long-vision]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.long-vision.yml"
-  [vllm/long-text]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.long-text.yml"
-  [vllm/long-text-no-mtp]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.long-text-no-mtp.yml"
-  [vllm/bounded-thinking]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.bounded-thinking.yml"
-  [vllm/tools-text]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.tools-text.yml"
-  [vllm/minimal]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.minimal.yml"
-  [vllm/dual]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual.yml"
-  [vllm/dual4]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual4.yml"
-  [vllm/dual4-dflash]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual4-dflash.yml"
-  [vllm/dual-turbo]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual-turbo.yml"
-  [vllm/dual-dflash]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual-dflash.yml"
-  [vllm/dual-dflash-noviz]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual-dflash-noviz.yml"
-  [vllm/dual-nvlink]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual-nvlink.yml"
-  [vllm/dual-nvlink-turbo]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual-nvlink-turbo.yml"
-  [vllm/dual-nvlink-dflash]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual-nvlink-dflash.yml"
-  [vllm/dual-nvlink-dflash-noviz]="vllm|models/qwen3.6-27b/vllm/compose|docker-compose.dual-nvlink-dflash-noviz.yml"
-  [vllm/gemma-mtp]="vllm|models/gemma-4-31b/vllm/compose|docker-compose.gemma-mtp.yml"
-  [vllm/gemma-mtp-tp1]="vllm|models/gemma-4-31b/vllm/compose|docker-compose.gemma-mtp-tp1.yml"
-  [vllm/gemma-dflash]="vllm|models/gemma-4-31b/vllm/compose|docker-compose.gemma-dflash.yml"
-  [llamacpp/default]="llamacpp|models/qwen3.6-27b/llama-cpp/compose|docker-compose.yml"
-  [llamacpp/concurrent]="llamacpp|models/qwen3.6-27b/llama-cpp/compose|docker-compose.concurrent.yml"
-)
+_derive_variant_tables() {
+  local emit
+  if ! emit="$(python3 - "$ROOT_DIR" <<'PY' 2>/dev/null
+import sys
+from pathlib import Path
 
-# Container name patterns we'll bring down — covers all current composes.
-RUNNING_PATTERN="^(vllm-qwen36-27b|llama-cpp-qwen36-27b|vllm-qwen36-27b-bounded-thinking|vllm-qwen36-27b-long-text-no-mtp|vllm-gemma-4-31b)"
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+
+for key, entry in COMPOSE_REGISTRY.items():
+    engine_prefix = key.split("/", 1)[0]
+    # switch.sh engine token: vllm | llamacpp (matches the on-disk tree).
+    engine = "llamacpp" if engine_prefix == "llamacpp" else engine_prefix
+    cp = entry["compose_path"]
+    if "/compose/" not in cp:
+        # A registry entry whose compose_path can't be split is a registry
+        # bug; surface it loudly rather than silently dropping the variant.
+        print(f"__ERR__\t{key}\tcompose_path lacks /compose/: {cp}")
+        continue
+    dirpart, filepart = cp.split("/compose/", 1)
+    compose_dir = f"{dirpart}/compose"
+    port = entry["default_port"]
+    print(f"{key}\t{engine}\t{compose_dir}\t{filepart}\t{port}")
+PY
+  )"; then
+    echo "[switch] ERROR: could not derive variant tables from compose_registry.py" >&2
+    echo "[switch]        (python3 + scripts/lib/profiles/compose_registry.py must be importable)" >&2
+    exit 2
+  fi
+  local key engine cdir cfile port
+  while IFS=$'\t' read -r key engine cdir cfile port; do
+    [[ -n "$key" ]] || continue
+    if [[ "$key" == "__ERR__" ]]; then
+      echo "[switch] ERROR: registry entry not launchable: ${engine} (${cdir})" >&2
+      exit 2
+    fi
+    VARIANTS["$key"]="${engine}|${cdir}|${cfile}"
+    VARIANT_DEFAULT_PORT["$key"]="$port"
+  done <<< "$emit"
+  if [[ ${#VARIANTS[@]} -eq 0 ]]; then
+    echo "[switch] ERROR: derived an empty variant table from compose_registry.py" >&2
+    exit 2
+  fi
+}
+
+_derive_variant_tables
+
+# Container name patterns we'll bring down — covers all current composes
+# AND any vllm/llama-cpp container we don't formally know about (catches
+# locally-built variants and one-off `docker run` instances that would
+# otherwise pin GPU memory invisibly to switch.sh).
+RUNNING_PATTERN="^(vllm-|llama-cpp-)"
 
 usage() {
   sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
@@ -151,6 +177,95 @@ down_running() {
   done
 }
 
+gpu_preflight() {
+  # Catch the "switch.sh said no club-3090 container running but GPU is
+  # still pinned at 22 GiB and the new container OOMs at boot" failure
+  # mode. down_running() only catches docker containers we manage; this
+  # function catches anything else (out-of-band vllm/ollama/training
+  # processes, exited containers that didn't release GPU memory cleanly,
+  # etc.). Skip with FORCE=1 if you know what you're doing.
+  if [[ "${FORCE:-0}" == "1" ]]; then
+    echo "[switch] FORCE=1 — skipping GPU pre-flight"
+    return
+  fi
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    return
+  fi
+  # Free MiB per GPU. Tolerate small overhead (driver, X server) — abort
+  # if any selected GPU has <80% of its total memory free.
+  local mem_query
+  mem_query=$(nvidia-smi --query-gpu=index,memory.free,memory.total --format=csv,noheader,nounits 2>/dev/null) || return
+  local selector="${NVIDIA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
+  local selector_specific=0
+  if [[ -n "$selector" && "$selector" != "all" && "$selector" != "void" ]]; then
+    selector_specific=1
+  fi
+  local bad=0
+  while IFS=',' read -r idx free total; do
+    free=$(echo "$free" | tr -d ' ')
+    total=$(echo "$total" | tr -d ' ')
+    idx=$(echo "$idx" | tr -d ' ')
+    [[ -z "$free" || -z "$total" ]] && continue
+    if [[ "$selector_specific" -eq 1 && ",${selector}," != *",${idx},"* ]]; then
+      continue
+    fi
+    # Require ≥80% free. Compose default gpu-memory-utilization is 0.92.
+    local need=$(( total * 80 / 100 ))
+    if [[ "$free" -lt "$need" ]]; then
+      if [[ "$bad" -eq 0 ]]; then
+        echo "[switch] ERROR: GPU memory pre-flight failed." >&2
+        echo "[switch]        Something is still pinning GPU memory after down_running()." >&2
+        echo "[switch]        Per-GPU state (free / total MiB; need ≥80% free):" >&2
+      fi
+      echo "[switch]          GPU $idx: $free / $total MiB free  (need ≥ $need)" >&2
+      bad=1
+    fi
+  done <<< "$mem_query"
+
+  if [[ "$bad" -eq 1 ]]; then
+    echo "[switch]" >&2
+    echo "[switch]        Holding processes:" >&2
+    local apps
+    apps=$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null || true)
+    if [[ -n "$apps" ]]; then
+      while IFS= read -r line; do
+        echo "[switch]          $line" >&2
+      done <<< "$apps"
+    else
+      echo "[switch]          (nvidia-smi shows no compute apps — likely a zombie process or driver state)" >&2
+    fi
+    echo "[switch]" >&2
+    echo "[switch]        Common fixes:" >&2
+    echo "[switch]          docker ps -a | grep -E 'vllm|llama'       # find stopped containers" >&2
+    echo "[switch]          docker rm \$(docker ps -aq --filter status=exited)" >&2
+    echo "[switch]          fuser -v /dev/nvidia*                     # find host process holding the device" >&2
+    echo "[switch]" >&2
+    echo "[switch]        Override (skip this check):  FORCE=1 bash scripts/switch.sh ${VARIANT}" >&2
+    exit 1
+  fi
+}
+
+export_variant_engine_pin() {
+  local variant="$1" output line key value
+  [[ "$variant" == vllm/* ]] || return 0
+  if ! output="$(python3 "$LAUNCH_PROFILE" resolve-variant-pin --variant "$variant" --format shell 2>&1)"; then
+    echo "$output" >&2
+    exit 2
+  fi
+  while IFS='=' read -r key value; do
+    [[ -n "$key" ]] || continue
+    case "$key" in
+      VLLM_NIGHTLY_SHA) export VLLM_NIGHTLY_SHA="$value" ;;
+      *) echo "[switch] ERROR: unexpected engine pin export: $key" >&2; exit 2 ;;
+    esac
+  done <<< "$output"
+  if [[ -n "${VLLM_IMAGE:-}" ]]; then
+    echo "[switch] vLLM image override: ${VLLM_IMAGE} (profile nightly SHA ${VLLM_NIGHTLY_SHA})"
+  else
+    echo "[switch] vLLM nightly SHA: ${VLLM_NIGHTLY_SHA}"
+  fi
+}
+
 up_variant() {
   local v="$1"
   if [[ -z "${VARIANTS[$v]:-}" ]]; then
@@ -178,10 +293,15 @@ up_variant() {
     preflight_genesis_pin "${ROOT_DIR}" || true
     preflight_repo_drift "${ROOT_DIR}" || true
     preflight_compose_deps "${full_dir}/${file}" || exit 1
+    if [[ "$eng" == "vllm" ]]; then
+      preflight_compose_hardware "${full_dir}/${file}" "$v" "${FORCE:-0}" || exit 1
+    fi
     preflight_kv_format_hint "${full_dir}/${file}" || true
   fi
+  gpu_preflight
 
   echo "[switch] bringing up: ${v}  (${dir}/${file})"
+  export_variant_engine_pin "$v"
   (cd "${full_dir}" && ${COMPOSE_BIN} -f "${file}" up -d)
 }
 
@@ -256,20 +376,28 @@ wait_ready() {
 
 # --- arg parsing ---
 WAIT=1
-case "${1:-}" in
-  -h|--help|"") usage ;;
-  --list) list_variants ;;
-  --down) down_running; exit 0 ;;
-esac
-
-VARIANT="$1"
-shift || true
-for arg in "$@"; do
-  case "$arg" in
+FORCE="${FORCE:-0}"
+VARIANT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage ;;
+    --list) list_variants ;;
+    --down) down_running; exit 0 ;;
     --no-wait) WAIT=0 ;;
-    *) echo "Unknown flag: $arg"; exit 1 ;;
+    --force) FORCE=1 ;;
+    --*) echo "Unknown flag: $1"; exit 1 ;;
+    *)
+      if [[ -n "$VARIANT" ]]; then
+        echo "ERROR: multiple variants supplied: '${VARIANT}' and '$1'" >&2
+        exit 1
+      fi
+      VARIANT="$1"
+      ;;
   esac
+  shift
 done
+
+[[ -n "$VARIANT" ]] || usage
 
 resolve_ready_url "${VARIANT}"
 down_running

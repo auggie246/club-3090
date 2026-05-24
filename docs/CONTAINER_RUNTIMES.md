@@ -99,6 +99,16 @@ This footgun page should be revisited when:
 
 ---
 
+## Proxmox passthrough performance — NVLink is the fragile path, not Proxmox itself
+
+**Out-of-box Proxmox VM GPU-passthrough is not an inherent performance tax.** The reference rig runs under Proxmox (2× RTX 3090, **PCIe-only, no NVLink**, GPUs passed to the VM) with **no HugePages / CPU-pinning / governor tuning** and sustains the documented dual baselines (`dual.yml` ~69/89, `dual-turbo` ~81/108 tok/s). Pathologically low numbers (~20 tok/s on 2× 3090) indicate a *specific* misconfig, not "Proxmox".
+
+**The fragile element is NVLink across passed-through GPUs.** Two NVLinked GPUs in a VM with wrong IOMMU/ACS/NUMA placement → NCCL silently drops the NVLink peer link and collapses to a slow cross-bridge/cross-NUMA fallback (a 2–3× throughput floor). PCIe-only rigs (the stack default — `NCCL_P2P_DISABLE=1` / custom-all-reduce off) have no such path to misnegotiate, so they're robust out-of-box. Recurring class: [#137](https://github.com/noonghunna/club-3090/issues/137) (NVLink-not-engaging under container/VM passthrough); [#161](https://github.com/noonghunna/club-3090/discussions/161) (Proxmox 2×3090+NVLink — NUMA-alignment + vCPU pinning restored a collapsed NVLink path, 20→60 tok/s, but still below the PCIe-only baseline → verify NVLink is *actually* engaged before chasing tuning folklore).
+
+**Diagnostic:** `bash scripts/report.sh --full` includes a PCIe/NVLink topology + `lspci` + NVLink-detection section that shows whether NCCL is on the NVLink peer link or a fallback. On multi-socket hosts, check VM↔GPU NUMA alignment first; HugePages/governor are secondary.
+
+---
+
 ## What this page is NOT
 
 - **Not a recipe for Proxmox / microk8s / podman setups.** Those are user-driven; we don't have CI runners to validate them.

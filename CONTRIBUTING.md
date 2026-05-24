@@ -8,7 +8,7 @@ Thanks for being here. This repo collects working recipes for serving big LLMs o
 
 ### ✅ Yes please
 
-- **Numbers from your rig.** Different power caps, different motherboards, different models — we want all of it. Use the [Numbers from your rig](https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml) issue template (no PR needed). The template asks for `bash scripts/report.sh --full > my-rig.md` — one ~35-min pass captures hardware (incl. power caps + NVLink topology), stack version, verify-full + verify-stress 7/7, **SOAK_MODE=continuous summary (catches Cliff 2b)**, AND the canonical bench numbers. High-signal contributions land in `BENCHMARKS` with attribution. **Not running our Docker composes?** All scripts now work on non-Docker host builds (llama.cpp host server, SGLang, etc.) via `URL=... CONTAINER=none MODEL=... bash scripts/...` — engine is auto-detected, vLLM-specific checks skip cleanly. See [discussion #88](https://github.com/noonghunna/club-3090/discussions/88) for the full host-build contributor flow.
+- **Numbers from your rig.** Different power caps, different motherboards, different models — we want all of it. Use the [Numbers from your rig](https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml) issue template (no PR needed). The template asks for `bash scripts/report.sh --full > my-rig.md` — one ~35-min pass captures hardware (incl. power caps + NVLink topology), stack version, verify-full + verify-stress 7/7, **SOAK_MODE=continuous summary (catches Cliff 2b)**, AND the canonical bench numbers. If you're unsure what to run before measuring, start with `bash scripts/setup.sh` and `bash scripts/launch.sh`; both wizards mark hardware-fit. High-signal contributions land in `BENCHMARKS` with attribution. **Not running our Docker composes?** All scripts now work on non-Docker host builds (llama.cpp host server, SGLang, etc.) via `URL=... CONTAINER=none MODEL=... bash scripts/...` — engine is auto-detected, vLLM-specific checks skip cleanly. See [discussion #88](https://github.com/noonghunna/club-3090/discussions/88) for the full host-build contributor flow.
 - **Power-cap efficiency curves.** `sudo bash scripts/power-cap-sweep.sh --cooling air|water|aio --load-mode decode-concurrent --concurrency auto --bench-runs 3` produces cross-rig efficiency-knee data ([discussion #86](https://github.com/noonghunna/club-3090/discussions/86)). ~15-20 min for a 30-cap sweep on a 3090/4090/5090. Especially valuable on cards we don't have anchors for yet (A5000/A6000, 4080, 5060 Ti / 5080, modded variants). **Keep `--step-size 10` (the default).** Larger step-sizes (e.g. `--step-size 50`) are too coarse for the efficiency knee and only useful for quick smoke tests. See [docs/HARDWARE.md](docs/HARDWARE.md#cross-rig-power-cap-data-anchor-points) for the full canonical command and rationale.
 - **Bug reports with the data we ask for.** The [bug report template](https://github.com/noonghunna/club-3090/issues/new?template=bug-report.yml) leads with `bash scripts/report.sh > my-rig.md` (add `--verify` to include verify-full output, `--soak` to also run SOAK_MODE=continuous if you suspect a multi-turn agent cliff) — single command captures the rig state we'd otherwise ask for individually (hardware, container state, Genesis patches, KV pool sizing, engine config). With that paste, the first reply is usually a fix or a clear next step instead of "can you send me…".
 - **Bug reproductions / minimum repros for upstream issues.** vLLM / llama.cpp / Genesis bugs that affect this stack are most useful when they have a one-paragraph reduction. Drop them in an issue or open a draft PR adding a reproducer to `verify-stress.sh`.
@@ -45,6 +45,40 @@ Two GitHub channels, two different shapes of conversation. Picking the right one
 
 ---
 
+## Submitting your bench
+
+The matrix is hand-curated — the canonical path is to file an **issue** with your rig + numbers; we'll review, ask clarifying questions, and integrate.
+
+After running `bash scripts/rebench-full.sh`, generate a paste-ready row:
+
+```bash
+bash scripts/submit-bench.sh --tag <your-tag>
+```
+
+The script writes `results/rebench/<tag>/BENCHMARKS-row.md`. To submit:
+
+### Path A — Auto-issue (recommended, requires `gh auth login`)
+
+```bash
+bash scripts/submit-bench.sh --tag <your-tag> --auto-submit
+```
+
+Opens an issue via `gh issue create` with your rig + row pre-filled.
+
+### Path B — Manual issue (no tools beyond browser)
+
+Open https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml and paste the row + your `rig.txt` into the body.
+
+### Path C — Direct PR (advanced)
+
+```bash
+bash scripts/submit-bench.sh --tag <your-tag> --auto-submit --as-pr
+```
+
+For contributors who know the `BENCHMARKS.md` section structure and want to propose the exact row. The maintainer may still redirect to an issue thread for context-gathering before merge — direct PRs aren't a fast-path bypass.
+
+---
+
 ## Process for non-trivial changes
 
 1. **Open an issue first** for anything bigger than a typo fix or a one-line measurement contribution. We'll either align on shape or explain why we'd land it differently — saves you a wasted afternoon.
@@ -59,7 +93,7 @@ Two GitHub channels, two different shapes of conversation. Picking the right one
    ```bash
    bash scripts/bench.sh
    ```
-   Drop the run-by-run output in the PR — `wall_TPS`, `decode_TPS`, `TTFT`, MTP `AL` (where applicable). Mean + CV + n=5 minimum.
+   Drop the run-by-run output in the PR — `wall_TPS`, `decode_TPS`, `PP tok/s`, `TTFT`, MTP `AL` (where applicable). Mean + CV + n=5 minimum.
 5. **Open the PR with a description that answers four questions:**
    - What problem does this solve? (One paragraph.)
    - What's the measured impact? (Numbers.)
@@ -93,7 +127,7 @@ Or run the steps individually if you'd rather:
      CONTAINER=<container-name> ENDPOINT=<http://localhost:port> \
      bash scripts/soak-test.sh
    ```
-5. **`bench.sh` run** — 3 warmups + 5 measured runs of narrative + code prompts. Report `wall_TPS`, `decode_TPS`, `TTFT`, peak VRAM/card per run, MTP/DFlash AL where applicable.
+5. **`bench.sh` run** — 3 warmups + 5 measured runs of narrative + code prompts. Report `wall_TPS`, `decode_TPS`, `PP tok/s`, `TTFT`, peak VRAM/card per run, MTP/DFlash AL where applicable. For llama.cpp or other engines without vLLM prompt-throughput logs, include `PP=1 bash scripts/bench.sh` so the long-prompt fallback captures prompt-processing throughput.
 6. **BENCHMARKS row** — under the appropriate model section, mirroring existing column shape (incl. `Rig` column). Attribution is automatic.
 7. **CHANGELOG entry** — in `models/<model>/CHANGELOG.md`.
 

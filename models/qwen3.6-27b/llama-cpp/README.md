@@ -22,32 +22,53 @@ For full pros/cons + general llama.cpp tuning, see [`/docs/engines/LLAMA_CPP.md`
 
 ## Docker compose (recommended)
 
-Two compose files in [`compose/`](compose/) — both use the official `ghcr.io/ggml-org/llama.cpp:server-cuda` image, no custom build needed.
+Two compose variants in [`compose/single/`](compose/single/) — both use the official `ghcr.io/ggml-org/llama.cpp` image (CUDA), **no custom build needed**, **no club-3090 patches** (unlike our vLLM track). MTP PR #22673 has merged upstream so this image has it natively. The composes are **pinned to build `server-cuda-b9246`** (validated 2026-05-20) — *not* the rolling `:server-cuda` tag, because that tag regressed at `b9282` (broken lib packaging → crash loop, [#187](https://github.com/noonghunna/club-3090/issues/187)). To follow a newer build, override `LLAMACPP_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda-bXXXX` (validate it first). Bench numbers were measured on `b9246`; expect ±5% drift on newer builds.
 
-### `docker-compose.yml` — max context, single slot, vision
+### `single/mtp.yml` — MTP n=2, 200K ctx, no vision
 
-Showcase: full **262K context** on one 3090 with vision + q4_0 KV.
+The single-card speed + context workhorse: ~51/60 TPS (narr/code), **200K ctx** (max-safe default @ `-ub 512` — fills cleanly with ~1.1 GB margin; 131K @ `-ub 1024` for faster prefill; 262K is the native max but *boots-not-fills*, see [`docs/CLIFFS.md`](../../../docs/CLIFFS.md)), 7/7 verify-stress boundary checks (incl. 60K + 91K needle recall), 102/150 (68%) on the 8-pack quality matrix. Best for IDE agents, opencode, Hermes, long-multi-turn agentic. Q4_K_M MTP GGUF (`unsloth/Qwen3.6-27B-MTP-GGUF` Q4_K_M).
+
+### `single/mtp-vision.yml` — MTP n=2, 160K ctx, vision on
+
+Multimodal profile — combines MTP + vision (validated on build 9235, 2026-05-19). 160K default context on 24 GB with mmproj F16 mounted. Supports up to 192K with `UBATCH_SIZE=512`.
+
+### Tuning knobs
+
+Both composes expose llama.cpp's batch-size + KV controls without editing YAML:
+
+| Env var | llama.cpp flag | Default | Sensible range on 24 GB | Notes |
+|---|---|---:|---:|---|
+| `CTX_SIZE` | `-c` | varies by variant | up to ~256K (q4_0 KV) | KV pool size. See per-variant defaults below. |
+| `BATCH_SIZE` | `-b` | `4096` | `2048`-`8192` | Logical prompt-processing batch. Higher can improve prefill throughput if VRAM headroom allows. |
+| `UBATCH_SIZE` | `-ub` | `1024` | `512`-`4096` | Physical microbatch. **Lower this first if long prompts OOM during prefill** — but it also has a major impact on max-context (see next section). |
+| `KV_TYPE` | `--cache-type-k/-v` | `q4_0` | `q4_0`, `q5_0`, `q8_0` | Lower KV bits-per-value = more ctx fits at same VRAM (quality trade-off is small at q4_0 for this model). |
+
+These are throughput-tuning knobs inside llama.cpp. They are orthogonal to
+`ESTATE_GPUS` and `ESTATE_PORT`, which only isolate GPU assignment and host port
+when `scripts/launch.sh --estate` boots multiple instances.
+
+### Speed vs context — pick your trade-off
+
+`UBATCH_SIZE` (the `-ub` chunked-prefill chunk) is doing two jobs at once: it caps the **per-pass activation buffer** (cliff-survival for tool prefill) AND it eats into the **VRAM budget that could otherwise go to KV cache**. We ship `1024` as the default sweet spot, but you can rebalance:
+
+**For `llamacpp/mtp-vision` specifically** — the vision encoder (mmproj F16, ~0.8 GB) competes for the same VRAM budget. The shipped 49K ctx + ub=1024 is the **speed-optimal** point on a single 3090. If you need more ctx for agentic vision workloads (UI navigation, multi-step tool use, long screenshots-in-context), drop `-ub` to 512 and you can push context up to 192K with full cliff coverage:
 
 ```bash
-cd models/qwen3.6-27b/llama-cpp/compose
-MODEL_DIR=/mnt/models/gguf docker compose up -d
+# Tested 2026-05-20 on single 3090, verify-stress 7/7 (incl. 60K + 91K needle):
+UBATCH_SIZE=512 CTX_SIZE=196608 bash scripts/switch.sh llamacpp/mtp-vision
 ```
 
-Memory budget: 14.5 GB (Q3_K_XL) + 4.5 GB KV @ 262K + 0.8 GB mmproj ≈ 20 GB / 24 GB.
+| Config | ctx | VRAM | narr TPS | verify-stress | When to pick |
+|---|---|---:|---:|:---:|---|
+| shipped: `ub=1024` | 49K | 22.0 GB | **56.5** | 7/7 ✓ | speed-first, short context |
+| override: `ub=512 CTX=131072` | 131K | 21.0 GB | 50.0 | 7/7 ✓ | balanced (extra headroom) |
+| override: `ub=512 CTX=196608` | **192K** | 22.5 GB | 50.9 | 7/7 ✓ | **max ctx with cliff coverage** |
 
-### `docker-compose.concurrent.yml` — 4 parallel slots, vision
+So ~10% TPS hit (56.5 → 50.9 narr) buys ~4× more context (49K → 192K). For pure-chat / short-prompt workloads, keep the default. For agentic vision, override.
 
-Trade max context for parallelism. Same image, `--parallel 4` + smaller ctx pool.
+**For `llamacpp/mtp` (no vision)** — the same `-ub` 512 trade applies but with smaller margins (no mmproj competing for VRAM). Probe with `UBATCH_SIZE=512 CTX_SIZE=196608 bash scripts/switch.sh llamacpp/mtp` if you need more than the shipped 131K — we haven't shipped this as a default but the lever is there.
 
----
-
-## Recipes (host-binary alternative)
-
-[`recipes/`](recipes/) contains shell scripts that launch a host-built `llama-server` with the same flags. Use these if you've built llama.cpp natively (e.g. for AMD/Intel/Apple Silicon) and don't want Docker.
-
-- **`single-card-default.sh`** — 65K ctx, Q4_K_M
-- **`single-card-max-ctx.sh`** — 262K ctx, Q4_K_M + q4_0 KV
-- `dual-card.sh` — TBD; llama.cpp supports multi-GPU but we haven't validated configs for this model
+**For `llamacpp/default`** — already at the model's training-max 262K ctx; `-ub` is not a useful lever (no ctx upside, only TPS cost). Keep the default `1024`.
 
 ---
 
@@ -56,7 +77,7 @@ Trade max context for parallelism. Same image, `--parallel 4` + smaller ctx pool
 | Config | Quant | KV | Ctx | Vision | Narr TPS | Code TPS | Notes |
 |---|---|---|---|---|---|---|---|
 | docker-compose.yml | UD-Q3_K_XL | q4_0 | 262K | ✅ | 21 | 21 | Flat across context depth — same TPS at 65K and 262K |
-| `+ --spec-type ngram-mod` (recipe) | Q4_K_M | q8_0 | 32K | ❌ | 22 | **26** | +25% on code via draftless n-gram spec-decode |
+| `+ --spec-type ngram-mod` | Q4_K_M | q8_0 | 32K | ❌ | 22 | **26** | +25% on code via draftless n-gram spec-decode |
 
 The Q3_K_XL number at 262K is **lower than community-reported 35-45 tok/s** ([Reddit](https://www.reddit.com/r/LocalLLaMA/comments/1sx8uok/) + earlier 2026-04-23 measurements showing 28.5 TPS on Q4_K_M). We're investigating whether mainline llama.cpp regressed between commits `9ab47e7d8` (2026-04-23) and `0d0764dfd` (current). For absolute speed today, **vLLM patched is ~2.5× faster** on the same hardware (51-55 narr / 67-70 code) — see [BENCHMARKS](../../../BENCHMARKS.md). llama.cpp's value proposition here is **simplicity + max context + multi-platform**, not throughput.
 
@@ -65,17 +86,22 @@ The Q3_K_XL number at 262K is **lower than community-reported 35-45 tok/s** ([Re
 ## Quick start
 
 ```bash
-# 1. Get a GGUF quant (recommended: Unsloth's Q4_K_M)
-hf download unsloth/Qwen3.6-27B-GGUF Qwen3.6-27B-Q4_K_M.gguf --local-dir /mnt/models/gguf/qwen3.6-27b/
+# 1. Get the MTP-enabled GGUF
+#    Easiest: WEIGHTS=gguf bash scripts/setup.sh qwen3.6-27b   (downloads Q4_K_M + mmproj,
+#    SHA-verified, into the path below; skips Genesis). Or download it directly:
+hf download unsloth/Qwen3.6-27B-MTP-GGUF Qwen3.6-27B-Q4_K_M.gguf \
+  --local-dir $MODEL_DIR/qwen3.6-27b-gguf/unsloth-mtp-q4km
 
-# 2. Build llama.cpp with CUDA support
-git clone https://github.com/ggerganov/llama.cpp /opt/llama.cpp
-cd /opt/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j
-
-# 3. Run a recipe
-cd <repo>/models/qwen3.6-27b/llama-cpp/recipes
-bash single-card-max-ctx.sh
+# 2. Launch via Docker compose (recommended)
+cd <repo>/models/qwen3.6-27b/llama-cpp/compose
+MODEL_DIR=$MODEL_DIR docker compose -f single/mtp.yml up -d
+curl http://localhost:8020/v1/models
 ```
+
+For host-built llama.cpp (AMD/Intel/Apple Silicon without Docker), use the
+same flags from `compose/single/mtp.yml` adapted to your binary. Key flags:
+`-ngl 99 -fa on -c 262144 -ub 512 --cache-type-k q4_0 --cache-type-v q4_0
+--spec-type draft-mtp --spec-draft-n-max 2 --jinja --reasoning off`.
 
 ---
 
@@ -99,9 +125,9 @@ GGUFs of this model are at [unsloth/Qwen3.6-27B-GGUF](https://huggingface.co/uns
 ## Vision (mmproj)
 
 ```bash
-hf download unsloth/Qwen3.6-27B-GGUF mmproj-F16.gguf --local-dir /mnt/models/gguf/qwen3.6-27b/
+hf download unsloth/Qwen3.6-27B-GGUF mmproj-F16.gguf --local-dir $MODEL_DIR/qwen3.6-27b-gguf/
 
-# Add to launch: --mmproj /mnt/models/gguf/qwen3.6-27b/mmproj-F16.gguf
+# Add to launch: --mmproj $MODEL_DIR/qwen3.6-27b-gguf/mmproj-F16.gguf
 ```
 
 Vision works via the mmproj model. Sample text+image queries are OpenAI-compat.

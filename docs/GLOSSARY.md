@@ -2,9 +2,21 @@
 
 Plain-language definitions for terms used throughout the docs. Roughly grouped by topic.
 
+> Want the *narrative* version — how hardware / engines / sizes / quants fit together — instead of isolated definitions? See [LOCAL_AI_PRIMER.md](LOCAL_AI_PRIMER.md).
+
 > Coming from a different background and don't see something here? Open an issue and we'll add it.
 
 ---
+
+## Universal `pull` (v0.8.0)
+
+| Term | What it means |
+|---|---|
+| **`pull`** | `scripts/pull.sh <hf-repo> --profile-like <key>` — evaluates *any* safetensors HF repo against this stack's KV math and, if it passes the gates, downloads + generates a minimal compose + boots it. The model-agnostic front door; the curated catalog still works unchanged. See [PULL.md](PULL.md). |
+| **dry-run** | `pull … --dry-run` — evaluate only: never downloads, never boots, just prints the verdict. |
+| **confidence tier** | How much the fit verdict is trusted: `exact` (a measured/curated profile) vs `estimated-lower-bound` (derived from the repo's own config — a floor, likely under-modeled). Always shown with the verdict. |
+| **boot-fit ≠ runtime-stability** | A "fits" verdict is a *boot-time* allocation check. It's necessary-not-sufficient: a config that boots clean can still degrade/OOM under sustained accumulated-context agent workloads (see [CLIFFS.md](CLIFFS.md)). Validate with soak-continuous before relying on it. |
+| **calibration backbone** | The curated catalog's role under v0.8.0 — the measured anchor set the KV math is calibrated against (vs. being the only supported models). |
 
 ## Throughput / latency
 
@@ -32,6 +44,8 @@ Plain-language definitions for terms used throughout the docs. Roughly grouped b
 ---
 
 ## Quantization
+
+> For the full per-GPU-arch hardware-acceleration matrix — which dtypes / quant schemes run on Tensor Cores natively vs in software emulation — see [DTYPE_MATRIX.md](DTYPE_MATRIX.md).
 
 | Term | What it means |
 |---|---|

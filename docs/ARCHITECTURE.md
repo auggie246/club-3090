@@ -10,6 +10,37 @@ You have **1 or 2 RTX 3090s** (or compatible 24 GB Ampere-class cards). You want
 
 ---
 
+## Two ways in: curated catalog + universal `pull`
+
+The stack has two entry paths, and the mental model is "the curated catalog is the *measured backbone*; `pull` is the *general front door*."
+
+- **Curated catalog** (`models/<model-name>/`) — models we have measured: real benchmark numbers, validated composes, KV-math calibration anchors, per-model gotchas. This is the high-confidence path and the source of truth the math is calibrated against.
+- **Universal `pull`** (`scripts/pull.sh <hf-repo> --profile-like <catalog-key>`) — point it at *any* safetensors HF repo. It derives a spec from the repo's own files, runs it through the gate, and only proceeds for a vLLM-loadable, supported model whose fit math passes (or where you accept an explicit override). It is **honest about confidence and never silently gate-passes** — every non-pass outcome hard-stops with a precise reason. Headline: *"evaluate any safetensors HF repo; pull only vLLM-loadable supported ones, and only when the gates pass (or an explicit override is accepted)."*
+
+The pipeline behind `pull`:
+
+```
+pull → derive (read repo config/safetensors)
+     → gate   ([C0] engine-support · [C2a] disk · [B] kv-calc fit verdict
+                · [C1] confidence × verdict → terminal action)
+     → emit   (generate a minimal derived compose for an in-scope model)
+     → boot   (gated download → derived-compose boot → capture artifacts)
+     → loop   (classify failures · trust pipeline · dedup · feed the
+                calibration backbone)
+```
+
+**v0.8.2 surfaces (current):**
+- `scripts/pull.sh … --recommend` — appends an honest one-line fit verdict (FITS / FITS-but-not-yet-accepted / DOES-NOT-FIT) over the same gate result; presentation only, never changes the verdict, carries the boot-fit≠runtime caveat.
+- **Failure on-ramp** — every hard-block leaves a redacted `.pull-captures/<slug>/<ts>/` bundle; `scripts/pull.sh --submit-last` (or `--submit <dir>`) is a separate, consented, user-invoked step that submits it (works with *or without* `gh`; no telemetry, no auto-send).
+- **Broadened arch registry** — materially more safetensors architectures pass `[C0]` without `--experimental-arch`; native built-ins reach a clean serve verdict, per-repo remote-code stays fail-closed (zero false-pass).
+- **Optional non-NVIDIA `hwdetect`** — bounded subprocess augmenting hardware detection where `nvidia-smi` doesn't apply (AMD/Apple); absent → graceful degrade, never feeds kv-calc.
+
+**You don't need to know any of these stage names to use it** — you run one command (`scripts/pull.sh`); the `[C0]`/`[B]`/`[C1]`/… taxonomy above is internal flow for contributors. Start at the user guide: [`docs/PULL.md`](PULL.md) (Quickstart at the top). Contributor depth, in pipeline order: [`COMPOSE_GENERATOR.md`](COMPOSE_GENERATOR.md) (emit) → [`PULL_GATE.md`](PULL_GATE.md) (gate) → [`PULL_EMIT_DERIVED.md`](PULL_EMIT_DERIVED.md) (boot+capture) → [`LOOP.md`](LOOP.md) (classify+trust+dedup). The curated path still works exactly as before — `pull` is additive, the front door for anything not in the catalog.
+
+A boot-fit pass is a *static* check. It is necessary-not-sufficient: a `fits-clean` config can still degrade under accumulated-context agent workloads (the Cliff 2 / prefill-cliff failure modes — see [`CLIFFS.md`](CLIFFS.md)). The gate verdict says so explicitly and points at soak-continuous validation; trust the caveat, not just the green.
+
+---
+
 ## How the repo is organized
 
 The mental model: **engines are general; models are specific; hardware is fixed.**
@@ -40,6 +71,14 @@ scripts/                      shared, model-aware
   verify-full.sh                fast functional test, 8 checks (~1-2 min)
   verify-stress.sh              boundary-case stress test, 2 checks (~5-10 min)
   bench.sh                      canonical TPS bench
+  pull.sh <hf-repo>             universal evaluate→gate→emit→boot front door
+                                  (+ --recommend verdict; --submit-last/--submit on-ramp)
+  generate-compose.sh           emit a minimal compose for an in-scope profile
+  lib/profiles/                 the gate/derive/classify/trust pipeline (engine)
+  tests/                        executable specs (test-pull, test-classifier, …)
+
+.pull-captures/<slug>/<ts>/   runtime: per-pull capture bundle the loop consumes
+                              (pt1–5 + manifest; redacted; created by pull)
 ```
 
 ---

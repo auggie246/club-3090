@@ -84,7 +84,7 @@ git -C /path/to/local/vllm-clone show <pinned-sha>:vllm/model_executor/kernels/l
 ### 3. Have the patched files diverged from upstream?
 
 ```bash
-cd /opt/ai/vllm-src    # or wherever your local clone lives
+cd /opt/ai/engines/vllm/primary    # or wherever your local clone lives
 git log <our-fork-base>..<new-image-sha> -- \
   vllm/model_executor/kernels/linear/mixed_precision/marlin.py \
   vllm/model_executor/kernels/linear/mixed_precision/MPLinearKernel.py

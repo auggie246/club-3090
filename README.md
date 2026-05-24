@@ -163,8 +163,9 @@ When filing a bug, sharing cross-rig data, or replying to a triage thread, gener
 # Quick report (~2 sec) — hardware + stack + boot-log highlights
 bash scripts/report.sh
 
-# Capture to a file ready to paste into a GitHub issue/discussion
-bash scripts/report.sh > my-rig.md
+# Capture the full cross-rig pass to a file, ready to paste into an issue/discussion
+# (~35 min — drop --full for a ~2 sec hardware-only capture)
+bash scripts/report.sh --full > my-rig.md
 
 # Add live test output (pick what the thread needs):
 bash scripts/report.sh --verify    # + verify-full.sh         (~1-2 min)
@@ -178,6 +179,39 @@ bash scripts/report.sh --no-redact
 ```
 
 `--soak` is its own flag because a config can pass verify + stress + bench and still fail the multi-turn continuous soak (Cliff 2b at ~25K accumulated tokens) — soak is currently the only test that catches that agentic-workload failure mode. See [`docs/CLIFFS.md`](docs/CLIFFS.md).
+
+### If `launch.sh` / `switch.sh` won't boot — load a compose directly
+
+The launcher scripts wrap the boot in a preflight (hardware / free-VRAM checks), `.env` parsing, and a Python-driven variant→compose registry. If any of those misfire — a false preflight failure, a CRLF/`.env` quirk on Windows, or missing PyYAML — bypass them and bring the compose up with plain Docker. Two escalations (assumes you've already downloaded the weights — Quick start step 2):
+
+```bash
+# 1. Skip ONLY the hardware / free-VRAM preflight (keeps .env + registry):
+bash scripts/switch.sh --force llamacpp/default
+
+# 2. Bypass the scripts entirely — boot the compose file with Docker directly.
+#    Set MODEL_DIR to wherever your weights live; -f points at the compose.
+#    Layout: models/<model>/<engine>/compose/<topology>/<variant>.yml
+
+# single-card llama.cpp (recommended default) — serves on :8020
+MODEL_DIR=/path/to/models docker compose \
+  -f models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml up -d
+
+# single-card ik_llama (fastest single-card path) — :8020
+MODEL_DIR=/path/to/models docker compose \
+  -f models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp.yml up -d
+
+# dual-card vLLM — :8010
+MODEL_DIR=/path/to/models docker compose \
+  -f models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml up -d
+
+# verify it's serving (use the port from the comment above), then stop it the same way:
+curl -s http://localhost:8020/v1/models | jq .
+docker compose -f <the-same-compose-file> down
+```
+
+`MODEL_DIR` is the only env var you must set — it's mounted as `/models`, and defaults to the in-repo `models-cache/` if your weights live there. Everything else has a sane default baked in; each compose **header** documents its own overrides (`GGUF_FILE`, `CTX_SIZE`, `UBATCH_SIZE`, …) and the exact `docker compose` line. `bash scripts/switch.sh --list` lists every variant, and a successful `switch.sh` run prints the compose path it used — so you can always recover the `-f` target.
+
+> ⚠ Launching directly skips the preflight that catches under-VRAM / wrong-GPU-count mistakes. If the container exits, check `docker logs <container> 2>&1 | tail -50`.
 
 ---
 

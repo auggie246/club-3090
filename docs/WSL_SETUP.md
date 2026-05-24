@@ -130,6 +130,16 @@ WSL2's container CUDA context reserves **~1.3 GiB of VRAM that `nvidia-smi` does
 - **Single-card vLLM:** drop `GPU_MEMORY_UTILIZATION=0.94` into `models/qwen3.6-27b/vllm/compose/.env`.
 - **Single-card llama.cpp / ik_llama:** lower the context (e.g. `CTX_SIZE=131072`), since these allocate by fixed size, not a ratio.
 
+**Shrink the overhead (not just budget for it).** Part of the ~1.3 GiB is the WSL2 GPU-paravirtualization context itself — unavoidable while you're on WSL2 at all — but the **display/WDDM portion is reclaimable**, often most of it:
+
+- **Don't let the 3090 drive the Windows desktop.** If the display runs off a second GPU or the CPU's integrated graphics, the 3090 is effectively headless and the WDDM/display reservation drops toward zero. **Biggest single lever.**
+- **Close GPU-accelerated Windows apps before you boot** — hardware-accelerated browsers (Chrome/Edge), games, video editors, other CUDA jobs all hold VRAM. Confirm `nvidia-smi` in WSL shows near-idle first.
+- **Keep the Windows NVIDIA driver current** — newer driver/WSL combos have trimmed the paravirt cost.
+- **Disable WSLg if you never run Linux GUI apps** — add `guiApplications=false` under `[wsl2]` in `.wslconfig` (frees the small GPU + RAM the WSLg compositor reserves).
+- **Want zero overhead? Dual-boot Linux** — sidesteps WSL2/WDDM (and TDR) entirely.
+
+**Measure your real headroom:** `nvidia-smi` in WSL at idle, then again after boot — the jump above your idle baseline is exactly what you're budgeting for, and these tips shrink that idle baseline.
+
 Full per-compose VRAM table + the combined `.env` template: [FAQ.md → Windows/WSL2](FAQ.md#does-this-work-on-windows--wsl2) and [HARDWARE.md → GPU memory budget on WSL2](HARDWARE.md#note-for-wsl2--windows-users).
 
 ## 9. Long-prompt + boot-crash gotchas (TDR, expandable_segments)
@@ -156,6 +166,34 @@ curl -sf http://localhost:8020/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen3.6-27b-autoround","messages":[{"role":"user","content":"Capital of France?"}],"max_tokens":200}'
 ```
+
+---
+
+## Native llama.cpp in WSL (no Docker)
+
+Prefer to skip Docker — one fewer layer, or because you just don't want the daemon? (It's marginally leaner on VRAM, but the real overhead lever is headless + closed apps from [Step 8](#8-budget-for-the-13-gib-wsl2-gpu-overhead), not the engine.) llama.cpp / ik_llama run **natively** in the WSL distro. The GPU passthrough from **Step 2 is all you need**: a native process uses WSL's CUDA libraries (`/usr/lib/wsl/lib`) directly, so there's **no `nvidia-container-toolkit`** and you **skip Step 4** entirely. (vLLM has no native path here — it's Docker-only.)
+
+You still do steps **1–3** (WSL + driver/passthrough + `.wslconfig` RAM) and **5–7** (ext4 clone, LF endings, `WEIGHTS=gguf` weights). Then, instead of `launch.sh` (which drives the Docker composes):
+
+1. **Get a CUDA llama.cpp build** — build it in the distro:
+   ```bash
+   git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
+   cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j
+   ```
+   …or grab a prebuilt CUDA binary. To match the MTP / spec-decode support the Docker image ships, track a recent build — the composes pin `ghcr.io/ggml-org/llama.cpp:server-cuda-b9246` (or newer).
+
+2. **Run `llama-server` with the flags the compose uses.** The compose is the source of truth — lift them from [`models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml). The equivalent native invocation:
+   ```bash
+   ./build/bin/llama-server --host 0.0.0.0 --port 8020 \
+     -m "$MODEL_DIR/qwen3.6-27b-gguf/unsloth-mtp-q4km/Qwen3.6-27B-Q4_K_M.gguf" \
+     -c 200000 -ub 512 -ngl 99 -fa on \
+     --cache-type-k q4_0 --cache-type-v q4_0 \
+     --spec-type draft-mtp --spec-draft-n-max 2 \
+     --jinja --temp 0.6 --top-p 0.95 --top-k 20
+   ```
+   On a tight WSL2 VRAM budget, drop the context per [Step 8](#8-budget-for-the-13-gib-wsl2-gpu-overhead) — e.g. `-c 131072`. The endpoint then answers the same sanity curl as Step 10.
+
+**Caveat:** going native puts you **off the repo's scripted path** — `launch.sh` / `switch.sh` and the bench / verify / soak scripts all target the Docker containers. You own the `llama-server` process and its flags; treat the compose file as the canonical flag list and re-check it after pulling repo updates.
 
 ---
 

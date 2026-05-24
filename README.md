@@ -114,14 +114,6 @@ More models coming — they go under `models/<name>/` with the same internal pat
 
 Bench protocol: 3 warm + 5 measured runs. See [`scripts/bench.sh`](scripts/bench.sh) for methodology. Per-config details + run-by-run numbers + VRAM + AL/accept rates: [models/qwen3.6-27b/CHANGELOG.md](models/qwen3.6-27b/CHANGELOG.md).
 
-Behavioral quality gates live in [`docs/QUALITY_TEST.md`](docs/QUALITY_TEST.md):
-
-```bash
-bash scripts/quality-test.sh --quick
-bash scripts/quality-test.sh --full
-bash scripts/quality-test.sh --reasoning
-```
-
 ---
 
 ## Benchmarks
@@ -141,6 +133,7 @@ bash scripts/quality-test.sh                          # --medium: 5 packs (defau
 bash scripts/quality-test.sh --quick                  # 2 packs (~5-10 min, no Docker)
 bash scripts/quality-test.sh --full                   # 8 packs / 150 scenarios (~25-40 min, needs Docker)
 bash scripts/quality-test.sh --pack aider-polyglot-30 # a single named pack
+bash scripts/quality-test.sh --reasoning              # HE+/LCB/GPQA(gated)/GSM reasoning suite — separate from --full; code packs need Docker
 ```
 
 **Full rebench (one model, everything)** — the canonical 5-step pipeline (`bench` → `verify-stress` → `quality-test --full` → `soak` → `aider-polyglot-30`), ~1.75-2 hr per leg. All artifacts land under `results/rebench/<tag>/`:

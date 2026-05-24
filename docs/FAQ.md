@@ -43,7 +43,9 @@ vLLM: NVIDIA-only (CUDA). llama.cpp: yes — pick the right Docker image (`ghcr.
 
 ### Does this work on Windows / WSL2?
 
-Yes — both engines work on WSL2. Make sure GPU passthrough is set up (`nvidia-smi` works inside WSL). Native Windows: vLLM doesn't support it; llama.cpp does — but use a native llama.cpp build, not Docker.
+Yes — both engines work on WSL2. Make sure GPU passthrough is set up (`nvidia-smi` works inside WSL). Native Windows (no WSL): vLLM doesn't support it, and **club-3090's scripts/composes don't run there either** (bash + Docker + Linux paths) — only the *upstream* llama.cpp binary works, by hand. For club-3090's tooling on Windows, use WSL2 (see [WSL_SETUP.md](WSL_SETUP.md)).
+
+> **Setting up from scratch?** Start with the step-by-step [WSL2 setup guide](WSL_SETUP.md) (install → driver → `.wslconfig` RAM → Docker → ext4/CRLF gotchas → weights → boot). The rest of this answer is the **runtime tuning** that guide links back to.
 
 **WSL2 adds ~1.3 GiB of invisible GPU overhead** — the Windows display driver, CUDA runtime, and WDDM reserve VRAM that `nvidia-smi` doesn't report at idle but is locked once a container starts. On a 24 GB card that leaves you with **~22.7 GB usable** instead of 24 GB.
 

@@ -8,6 +8,8 @@ If you have one or two RTX 3090s and want to run modern LLMs at home, in a homel
 
 ## Quick start
 
+> 🪟 **On Windows?** These steps assume Linux/macOS. Set up **WSL2** first → **[docs/WSL_SETUP.md](docs/WSL_SETUP.md)** (start-to-finish). Native Windows runs only the *upstream* llama.cpp binary — none of this repo's tooling.
+
 ```bash
 # 1. Clone the repo
 git clone https://github.com/noonghunna/club-3090.git
@@ -19,7 +21,7 @@ cd club-3090
 # 2. Pick/download + SHA-verify the model (interactive hardware-aware picker)
 #    (asks you which model, then where to put model weights — pick in-repo
 #     default, ~/models, or a custom path on a different drive. To skip prompts:
-#     `export MODEL_DIR=/mnt/your-drive/models` and pass the model name. See FAQ.)
+#     `export MODEL_DIR=/path/to/models` and pass the model name. See FAQ.)
 bash scripts/setup.sh
 #    Or scripted:
 #      bash scripts/setup.sh qwen3.6-27b
@@ -116,6 +118,69 @@ Bench protocol: 3 warm + 5 measured runs. See [`scripts/bench.sh`](scripts/bench
 
 ---
 
+## Benchmarks
+
+Reproduce the numbers above on your own rig. All benchmarks run against the **currently-running** compose (boot one first via `launch.sh`).
+
+**Throughput (TPS)** — the canonical narrative + code bench (3 warmup + 5 measured per prompt):
+
+```bash
+bash scripts/bench.sh
+```
+
+**Behavioral quality** — tool-call correctness, instruction-following, structured output, etc. via `benchlocal-cli`:
+
+```bash
+bash scripts/quality-test.sh                          # --medium: 5 packs (default, ~15-25 min, no Docker)
+bash scripts/quality-test.sh --quick                  # 2 packs (~5-10 min, no Docker)
+bash scripts/quality-test.sh --full                   # 8 packs / 150 scenarios (~25-40 min, needs Docker)
+bash scripts/quality-test.sh --pack aider-polyglot-30 # a single named pack
+bash scripts/quality-test.sh --reasoning              # HE+/LCB/GPQA(gated)/GSM reasoning suite — separate from --full; code packs need Docker
+```
+
+**Full rebench (one model, everything)** — the canonical 5-step pipeline (`bench` → `verify-stress` → `quality-test --full` → `soak` → `aider-polyglot-30`), ~1.75-2 hr per leg. All artifacts land under `results/rebench/<tag>/`:
+
+```bash
+bash scripts/rebench-full.sh                      # auto-tag from MODEL
+bash scripts/rebench-full.sh --tag qwen-int8      # explicit tag
+bash scripts/rebench-full.sh --skip soak,aider    # skip phases (CSV)
+bash scripts/rebench-full.sh --resume             # resume an interrupted run (skip completed steps)
+
+# Endpoint-first mode (non-Docker engines: llama-swap, ramalama, raw llama-server, …):
+bash scripts/rebench-full.sh \
+  --url http://HOST:PORT --model 'MODEL-NAME' --engine llama-cpp   # vllm|llama-cpp|sglang|other
+```
+
+Run `rebench-full.sh` twice on different models to assemble a matched-config head-to-head. Full test-pipeline reference: [`docs/QUALITY_TEST.md`](docs/QUALITY_TEST.md).
+
+---
+
+## Diagnostics
+
+When filing a bug, sharing cross-rig data, or replying to a triage thread, generate a paste-ready triage report — it captures hardware, OS, GPU, container runtime, stack version, and active container state as markdown. **Home paths, hostnames, usernames, and HF tokens are redacted by default**, so it's safe to paste into a public issue or discussion.
+
+```bash
+# Quick report (~2 sec) — hardware + stack + boot-log highlights
+bash scripts/report.sh
+
+# Capture to a file ready to paste into a GitHub issue/discussion
+bash scripts/report.sh > my-rig.md
+
+# Add live test output (pick what the thread needs):
+bash scripts/report.sh --verify    # + verify-full.sh         (~1-2 min)
+bash scripts/report.sh --stress    # + verify-stress.sh 7/7   (~5-10 min)
+bash scripts/report.sh --soak      # + continuous soak        (~25 min) — catches Cliff 2b
+bash scripts/report.sh --bench     # + bench.sh TPS           (~3 min)
+bash scripts/report.sh --full      # ALL four — the canonical "everything" cross-rig pass (~35 min)
+
+# Internal sharing only (disable redaction):
+bash scripts/report.sh --no-redact
+```
+
+`--soak` is its own flag because a config can pass verify + stress + bench and still fail the multi-turn continuous soak (Cliff 2b at ~25K accumulated tokens) — soak is currently the only test that catches that agentic-workload failure mode. See [`docs/CLIFFS.md`](docs/CLIFFS.md).
+
+---
+
 ## Repo layout
 
 ```
@@ -127,6 +192,7 @@ club-3090/
 │   ├── LOCAL_AI_PRIMER.md                 plain-English on-ramp: hardware / engines / sizes / quants
 │   ├── ARCHITECTURE.md                    how this stack thinks about LLM serving on 24 GB
 │   ├── HARDWARE.md                        Ampere SM 8.6+, NVLink note, 24 GB ceilings
+│   ├── WSL_SETUP.md                        Windows (WSL2) from-scratch setup walkthrough
 │   ├── GLOSSARY.md                        plain-language definitions (TPS / KV / MTP / TP / etc.)
 │   ├── UPSTREAM.md                        every upstream issue / PR we depend on or have filed
 │   ├── CLIFFS.md                          full synopsis of the prefill cliffs (root causes + fix landscape)
@@ -179,7 +245,7 @@ club-3090/
 | For any model on this stack | Notes |
 |---|---|
 | 1× or 2× NVIDIA RTX 3090 (24 GB each) | Larger Ampere/Ada cards (4090, A6000) work; smaller cards (12 GB) don't fit 27B-class models. |
-| Linux (Ubuntu 22.04+ tested) | macOS/Windows: vLLM is Linux + CUDA only. Llama.cpp works on macOS/Windows but recipes assume Linux paths. |
+| Linux (Ubuntu 22.04+ tested) | macOS/Windows: vLLM is Linux + CUDA only. Llama.cpp works on macOS/Windows but recipes assume Linux paths. **On Windows? See [docs/WSL_SETUP.md](docs/WSL_SETUP.md)** for the from-scratch WSL2 walkthrough. |
 | Docker + NVIDIA Container Toolkit | For vLLM. llama.cpp works without Docker. |
 | NVIDIA driver 580.x+ | For CUDA 13 runtime in vLLM nightly. |
 | ~30 GB free disk | Per model. More for multiple models. |

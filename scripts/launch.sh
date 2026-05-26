@@ -124,7 +124,13 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
-    *) echo "Unknown flag: $1"; exit 1 ;;
+    --*) echo "Unknown flag: $1"; exit 1 ;;
+    *)
+      if [[ -n "$VARIANT" ]]; then
+        echo "ERROR: multiple variants supplied: '${VARIANT}' and '$1'" >&2
+        exit 1
+      fi
+      VARIANT="$1"; shift ;;
   esac
 done
 
@@ -206,92 +212,18 @@ choose() {
   done
 }
 
-declare -A LAUNCH_VARIANT_COMPOSE=(
-  [vllm/default]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/tq3-mtp.yml"
-  [vllm/long-vision]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-vision.yml"
-  [vllm/long-text]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text.yml"
-  [vllm/long-text-no-mtp]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text-no-mtp.yml"
-  [vllm/bounded-thinking]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/bounded-thinking.yml"
-  [vllm/tools-text]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/tools-text.yml"
-  [vllm/minimal]="models/qwen3.6-27b/vllm/compose/single/autoround-int4/minimal.yml"
-  [vllm/dual]="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml"
-  [vllm/dual4]="models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/fp8-mtp.yml"
-  [vllm/dual4-dflash]="models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/dflash.yml"
-  [vllm/dual-turbo]="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/turbo.yml"
-  [vllm/dual-dflash]="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash.yml"
-  [vllm/dual-dflash-noviz]="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash-noviz.yml"
-  [vllm/dual-nvlink]="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-fp8-mtp.yml"
-  [vllm/dual-nvlink-turbo]="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-turbo.yml"
-  [vllm/dual-nvlink-dflash]="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-dflash.yml"
-  [vllm/dual-nvlink-dflash-noviz]="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-dflash-noviz.yml"
-  [vllm/gemma-mtp]="models/gemma-4-31b/vllm/compose/dual/autoround-int4/fp8-mtp.yml"
-  [vllm/gemma-mtp-tp1]="models/gemma-4-31b/vllm/compose/single/autoround-int4/tq3-mtp.yml"
-  [vllm/gemma-dflash]="models/gemma-4-31b/vllm/compose/dual/autoround-int4/dflash.yml"
-  [llamacpp/default]="models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml"
-  [llamacpp/mtp]="models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml"
-  [llamacpp/bounded-thinking]="models/qwen3.6-27b/llama-cpp/compose/single/autoround-int4/bounded-thinking.yml"
-  [llamacpp/mtp-vision]="models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp-vision.yml"
-  [ik-llama/iq4ks-mtp]="models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp.yml"
-  [ik-llama/iq4ks-mtp-vision]="models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp-vision.yml"
-)
-declare -A LAUNCH_VARIANT_MODEL=(
-  [vllm/default]="qwen3.6-27b" [vllm/long-vision]="qwen3.6-27b" [vllm/long-text]="qwen3.6-27b"
-  [vllm/long-text-no-mtp]="qwen3.6-27b" [vllm/bounded-thinking]="qwen3.6-27b" [vllm/tools-text]="qwen3.6-27b"
-  [vllm/minimal]="qwen3.6-27b" [vllm/dual]="qwen3.6-27b" [vllm/dual4]="qwen3.6-27b"
-  [vllm/dual4-dflash]="qwen3.6-27b" [vllm/dual-turbo]="qwen3.6-27b" [vllm/dual-dflash]="qwen3.6-27b"
-  [vllm/dual-dflash-noviz]="qwen3.6-27b" [vllm/dual-nvlink]="qwen3.6-27b" [vllm/dual-nvlink-turbo]="qwen3.6-27b"
-  [vllm/dual-nvlink-dflash]="qwen3.6-27b" [vllm/dual-nvlink-dflash-noviz]="qwen3.6-27b"
-  [vllm/gemma-mtp]="gemma-4-31b" [vllm/gemma-mtp-tp1]="gemma-4-31b" [vllm/gemma-dflash]="gemma-4-31b"
-  [llamacpp/default]="qwen3.6-27b" [llamacpp/mtp]="qwen3.6-27b" [llamacpp/bounded-thinking]="qwen3.6-27b" [llamacpp/mtp-vision]="qwen3.6-27b"
-  [ik-llama/iq4ks-mtp]="qwen3.6-27b" [ik-llama/iq4ks-mtp-vision]="qwen3.6-27b"
-)
-declare -A LAUNCH_VARIANT_ENGINE=(
-  [vllm/default]="vllm" [vllm/long-vision]="vllm" [vllm/long-text]="vllm" [vllm/long-text-no-mtp]="vllm"
-  [vllm/bounded-thinking]="vllm" [vllm/tools-text]="vllm" [vllm/minimal]="vllm" [vllm/dual]="vllm"
-  [vllm/dual4]="vllm" [vllm/dual4-dflash]="vllm" [vllm/dual-turbo]="vllm" [vllm/dual-dflash]="vllm"
-  [vllm/dual-dflash-noviz]="vllm" [vllm/dual-nvlink]="vllm" [vllm/dual-nvlink-turbo]="vllm"
-  [vllm/dual-nvlink-dflash]="vllm" [vllm/dual-nvlink-dflash-noviz]="vllm"
-  [vllm/gemma-mtp]="vllm" [vllm/gemma-mtp-tp1]="vllm" [vllm/gemma-dflash]="vllm"
-  [llamacpp/default]="llamacpp" [llamacpp/mtp]="llamacpp" [llamacpp/bounded-thinking]="llamacpp" [llamacpp/mtp-vision]="llamacpp"
-  [ik-llama/iq4ks-mtp]="llamacpp" [ik-llama/iq4ks-mtp-vision]="llamacpp"
-)
-declare -A LAUNCH_VARIANT_KVCALC=(
-  [vllm/default]="qwen3.6-27b:long-vision"
-  [vllm/long-text]="qwen3.6-27b:long-text"
-  [vllm/long-text-no-mtp]="qwen3.6-27b:long-text-no-mtp"
-  [vllm/long-vision]="qwen3.6-27b:long-vision"
-  [vllm/bounded-thinking]="qwen3.6-27b:bounded-thinking"
-  [vllm/tools-text]="qwen3.6-27b:tools-text"
-  [vllm/minimal]="qwen3.6-27b:minimal"
-  [vllm/dual]="qwen3.6-27b:dual"
-  [vllm/dual-turbo]="qwen3.6-27b:dual-turbo"
-  [vllm/dual-dflash]="qwen3.6-27b:dual-dflash"
-  [vllm/dual-dflash-noviz]="qwen3.6-27b:dual-dflash-noviz"
-  [vllm/dual4]="qwen3.6-27b:dual4"
-  [vllm/dual4-dflash]="qwen3.6-27b:dual4-dflash"
-  [vllm/dual-nvlink]="qwen3.6-27b:dual"
-  [vllm/dual-nvlink-turbo]="qwen3.6-27b:dual-turbo"
-  [vllm/dual-nvlink-dflash]="qwen3.6-27b:dual-dflash"
-  [vllm/dual-nvlink-dflash-noviz]="qwen3.6-27b:dual-dflash-noviz"
-  [vllm/gemma-mtp]="gemma-4-31b:gemma-dual"
-  [vllm/gemma-mtp-tp1]="gemma-4-31b:gemma-single"
-  [vllm/gemma-dflash]="gemma-4-31b:gemma-dual-dflash"
-  [llamacpp/default]="SKIP"
-  [llamacpp/mtp]="SKIP"
-  [llamacpp/bounded-thinking]="SKIP"
-  [llamacpp/mtp-vision]="SKIP"
-  [ik-llama/iq4ks-mtp]="SKIP"
-  [ik-llama/iq4ks-mtp-vision]="SKIP"
-)
-LAUNCH_VARIANT_ORDER=(
-  vllm/long-vision vllm/long-text vllm/long-text-no-mtp vllm/bounded-thinking
-  vllm/default vllm/tools-text vllm/minimal
-  vllm/dual vllm/dual-turbo vllm/dual-dflash vllm/dual-dflash-noviz
-  vllm/dual4 vllm/dual4-dflash
-  vllm/gemma-mtp vllm/gemma-mtp-tp1 vllm/gemma-dflash
-  llamacpp/default llamacpp/mtp llamacpp/bounded-thinking llamacpp/mtp-vision
-  ik-llama/iq4ks-mtp ik-llama/iq4ks-mtp-vision
-)
+declare -A LAUNCH_VARIANT_COMPOSE=()
+declare -A LAUNCH_VARIANT_MODEL=()
+declare -A LAUNCH_VARIANT_ENGINE=()
+declare -A LAUNCH_VARIANT_PROFILE_ENGINE=()
+declare -A LAUNCH_VARIANT_KVCALC=()
+declare -A LAUNCH_DEFAULT_PORT=()
+declare -A LAUNCH_DEFAULT_CONTAINER=()
+LAUNCH_VARIANT_ORDER=()
+PRIMARY_MODEL="${PRIMARY_MODEL:-qwen3.6-27b}"
+# shellcheck source=lib/registry-emit.sh
+source "${ROOT_DIR}/scripts/lib/registry-emit.sh"
+derive_launch_variant_tables "${ROOT_DIR}"
 
 variant_hw_status() {
   local variant="$1"
@@ -899,6 +831,44 @@ suggest_default_variant() {
   fi
 }
 
+
+launch_topology_from_selected() {
+  local cards="${#CARD_INDICES[@]}"
+  case "$cards" in
+    0|1) printf 'single' ;;
+    2) printf 'dual' ;;
+    4) printf 'multi4' ;;
+    *) printf 'multi%s' "$cards" ;;
+  esac
+}
+
+resolve_launch_default_variant() {
+  local variant="$1" engine topology target
+  if [[ "$variant" =~ ^([^/]+)/(single|dual|multi[0-9]+)/default$ ]]; then
+    engine="${BASH_REMATCH[1]}"
+    topology="${BASH_REMATCH[2]}"
+  elif [[ "$variant" =~ ^([^/]+)/default$ ]]; then
+    engine="${BASH_REMATCH[1]}"
+    if [[ "${#CARD_INDICES[@]}" -eq 0 ]]; then
+      select_topology_gpus || {
+        echo "[launch] ERROR: cannot autodetect topology for '${variant}' because no GPUs were detected." >&2
+        exit 1
+      }
+    fi
+    topology="$(launch_topology_from_selected)"
+  else
+    printf '%s' "$variant"
+    return 0
+  fi
+  MODEL_NAME="${MODEL_NAME:-$PRIMARY_MODEL}"
+  MODEL_NAME="$(normalize_model_name "$MODEL_NAME")"
+  if ! target="$(registry_default_target "$ROOT_DIR" "$MODEL_NAME" "$engine" "$topology")"; then
+    echo "[launch] ERROR: cannot resolve default variant '${variant}' for model ${MODEL_NAME}." >&2
+    exit 1
+  fi
+  printf '%s' "$target"
+}
+
 no_fit_guidance() {
   echo "[launch] Selected GPU budget: ${MIN_VRAM_GB} GB minimum per card." >&2
   echo "" >&2
@@ -1048,6 +1018,9 @@ if [[ "$TOPOLOGY_ONLY" -eq 1 ]]; then
 fi
 
 # --- wizard ---
+if [[ -n "$VARIANT" ]]; then
+  VARIANT="$(resolve_launch_default_variant "$VARIANT")"
+fi
 if [[ -z "$VARIANT" ]]; then
   echo "" >&2
   echo "club-3090 launcher — pick model, GPU set, and serving variant." >&2
@@ -1118,66 +1091,6 @@ fi
 export_variant_engine_pin "$VARIANT"
 "$SWITCH" "$VARIANT"
 
-# Resolve the actual endpoint port + container name the same way switch.sh
-# does: explicit $PORT / $CONTAINER > per-variant default. Mirrors
-# VARIANT_DEFAULT_PORT in switch.sh — keep in sync if you add a new variant.
-declare -A LAUNCH_DEFAULT_PORT=(
-  [vllm/default]=8020
-  [vllm/long-vision]=8020
-  [vllm/long-text]=8020
-  [vllm/long-text-no-mtp]=8021
-  [vllm/bounded-thinking]=8020
-  [vllm/tools-text]=8020
-  [vllm/minimal]=8020
-  [vllm/dual]=8010
-  [vllm/dual4]=8015
-  [vllm/dual4-dflash]=8016
-  [vllm/dual-turbo]=8011
-  [vllm/dual-dflash]=8012
-  [vllm/dual-dflash-noviz]=8013
-  [vllm/dual-nvlink]=8014
-  [vllm/dual-nvlink-turbo]=8017
-  [vllm/dual-nvlink-dflash]=8018
-  [vllm/dual-nvlink-dflash-noviz]=8019
-  [vllm/gemma-mtp]=8030
-  [vllm/gemma-mtp-tp1]=8031
-  [vllm/gemma-dflash]=8032
-  [llamacpp/default]=8020
-  [llamacpp/mtp]=8020
-  [llamacpp/bounded-thinking]=8020
-  [llamacpp/mtp-vision]=8020
-  [ik-llama/iq4ks-mtp]=8020
-  [ik-llama/iq4ks-mtp-vision]=8020
-)
-declare -A LAUNCH_DEFAULT_CONTAINER=(
-  [vllm/default]=vllm-qwen36-27b
-  [vllm/long-vision]=vllm-qwen36-27b-long-vision
-  [vllm/long-text]=vllm-qwen36-27b-long-text
-  [vllm/long-text-no-mtp]=vllm-qwen36-27b-long-text-no-mtp
-  [vllm/bounded-thinking]=vllm-qwen36-27b-bounded-thinking
-  [vllm/tools-text]=vllm-qwen36-27b
-  [vllm/minimal]=vllm-qwen36-27b-minimal
-  [vllm/dual]=vllm-qwen36-27b-dual
-  [vllm/dual4]=vllm-qwen36-27b-dual4
-  [vllm/dual4-dflash]=vllm-qwen36-27b-dual4-dflash
-  [vllm/dual-turbo]=vllm-qwen36-27b-dual-turbo
-  [vllm/dual-dflash]=vllm-qwen36-27b-dual-dflash
-  [vllm/dual-dflash-noviz]=vllm-qwen36-27b-dual-dflash-noviz
-  [vllm/dual-nvlink]=vllm-qwen36-27b-dual-nvlink
-  [vllm/dual-nvlink-turbo]=vllm-qwen36-27b-dual-nvlink-turbo
-  [vllm/dual-nvlink-dflash]=vllm-qwen36-27b-dual-nvlink-dflash
-  [vllm/dual-nvlink-dflash-noviz]=vllm-qwen36-27b-dual-nvlink-dflash-noviz
-  [vllm/gemma-mtp]=vllm-gemma-4-31b-mtp
-  [vllm/gemma-mtp-tp1]=vllm-gemma-4-31b-mtp-tp1
-  [vllm/gemma-dflash]=vllm-gemma-4-31b-dflash
-  [llamacpp/default]=llama-cpp-qwen36-27b
-  [llamacpp/mtp]=llama-cpp-qwen36-27b
-  [llamacpp/bounded-thinking]=llama-cpp-qwen36-27b-bounded-thinking
-  [llamacpp/mtp-vision]=llama-cpp-qwen36-27b-vision
-  [ik-llama/iq4ks-mtp]=ik-llama-qwen36-27b
-  [ik-llama/iq4ks-mtp-vision]=ik-llama-qwen36-27b-vision
-  [ik-llama/iq4ks-two-stage]=ik-llama-qwen36-27b-two-stage
-)
 ENDPOINT_PORT="${PORT:-${LAUNCH_DEFAULT_PORT[$VARIANT]:-8020}}"
 ENDPOINT_URL="http://localhost:${ENDPOINT_PORT}"
 ENDPOINT_CONTAINER="${CONTAINER:-${LAUNCH_DEFAULT_CONTAINER[$VARIANT]:-vllm-qwen36-27b}}"

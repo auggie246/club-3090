@@ -19,6 +19,7 @@ def _entry(
     mem_util,
     compose_path,
     default_port,
+    kvcalc_key=None,
     requires_nvlink=False,
     required_engine_features=None,
     recommended_engine_features=None,
@@ -41,6 +42,7 @@ def _entry(
         "required_engine_features": list(required_engine_features or []),
         "default_port": default_port,
         "gpu_assignment_mode": "contiguous",
+        "kvcalc_key": kvcalc_key,
     }
     if recommended_engine_features:
         entry["recommended_engine_features"] = list(recommended_engine_features)
@@ -57,6 +59,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=48000, max_num_seqs=1, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/single/autoround-int4/tq3-mtp.yml",
         default_port=8020, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:long-vision",
     ),
     "vllm/long-text": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -64,6 +67,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=180000, max_num_seqs=1, mem_util=0.93,
         compose_path="models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text.yml",
         default_port=8020, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:long-text",
     ),
     "vllm/long-text-no-mtp": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -71,6 +75,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=200000, max_num_seqs=1, mem_util=0.95,
         compose_path="models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text-no-mtp.yml",
         default_port=8021, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:long-text-no-mtp",
     ),
     "vllm/long-vision": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="vision-coding",
@@ -78,6 +83,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=145000, max_num_seqs=1, mem_util=0.95,
         compose_path="models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-vision.yml",
         default_port=8020, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:long-vision",
     ),
     "vllm/bounded-thinking": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="tool-heavy",
@@ -85,6 +91,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=180000, max_num_seqs=1, mem_util=0.95,
         compose_path="models/qwen3.6-27b/vllm/compose/single/autoround-int4/bounded-thinking.yml",
         default_port=8020, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:bounded-thinking",
     ),
     "vllm/tools-text": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="tool-heavy",
@@ -92,6 +99,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=75000, max_num_seqs=1, mem_util=0.97,
         compose_path="models/qwen3.6-27b/vllm/compose/single/autoround-int4/tools-text.yml",
         default_port=8020,
+        kvcalc_key="qwen3.6-27b:tools-text",
     ),
     "vllm/minimal": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="fast-chat",
@@ -99,6 +107,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=32768, max_num_seqs=1, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/single/autoround-int4/minimal.yml",
         default_port=8020,
+        kvcalc_key="qwen3.6-27b:minimal",
     ),
 
     # Qwen 3.6 27B, vLLM dual/multi-card.
@@ -108,6 +117,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml",
         default_port=8010, recommended_engine_features=["marlin_pad_sub_tile_n"],
+        kvcalc_key="qwen3.6-27b:dual",
     ),
     "vllm/dual-turbo": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="multi-stream-tenant",
@@ -115,6 +125,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=4, mem_util=0.85,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/turbo.yml",
         default_port=8011, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:dual-turbo",
         recommended_engine_features=["marlin_pad_sub_tile_n"],
     ),
     "vllm/dual-dflash": _entry(
@@ -123,6 +134,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=185000, max_num_seqs=1, mem_util=0.95,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash.yml",
         default_port=8012, required_engine_features=["marlin_pad_sub_tile_n"],
+        kvcalc_key="qwen3.6-27b:dual-dflash",
     ),
     "vllm/dual-dflash-noviz": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -130,6 +142,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=200000, max_num_seqs=1, mem_util=0.95,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/dflash-noviz.yml",
         default_port=8013, required_engine_features=["marlin_pad_sub_tile_n"],
+        kvcalc_key="qwen3.6-27b:dual-dflash-noviz",
     ),
     "vllm/dual-bf16": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -137,6 +150,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=200000, max_num_seqs=1, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/bf16.yml",
         default_port=8012,
+        kvcalc_key="qwen3.6-27b:dual-bf16",
     ),
     "vllm/dual-int8": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -144,6 +158,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/int8.yml",
         default_port=8011, required_engine_features=["int8_per_token_head"],
+        kvcalc_key="qwen3.6-27b:dual-int8",
     ),
     "vllm/dual-tq3-mtp": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="multi-stream-tenant",
@@ -151,6 +166,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-mtp.yml",
         default_port=8013, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:dual-tq3-mtp",
     ),
     "vllm/dual-tq3-mtp-genesis": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="multi-stream-tenant",
@@ -158,6 +174,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.85,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-mtp-genesis.yml",
         default_port=8015, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:dual-tq3-mtp-genesis",
     ),
     "vllm/dual-tq3-nomtp": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -165,6 +182,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/tq3-nomtp.yml",
         default_port=8014, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:dual-tq3-nomtp",
     ),
     "vllm/dual-carnice-bf16mtp": _entry(
         model="qwen3.6-27b", weights_variant="carnice-bf16mtp", workload="long-ctx-single",
@@ -172,6 +190,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/carnice-bf16mtp/bf16-mtp.yml",
         default_port=8070,
+        kvcalc_key="SKIP",
     ),
     "vllm/dual-qwopus-bf16mtp": _entry(
         model="qwen3.6-27b", weights_variant="qwopus-bf16mtp", workload="long-ctx-single",
@@ -179,6 +198,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/qwopus-bf16mtp/bf16-mtp.yml",
         default_port=8071,
+        kvcalc_key="SKIP",
     ),
     "vllm/dual-nvlink": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -186,6 +206,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=2, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-fp8-mtp.yml",
         default_port=8014, requires_nvlink=True, recommended_engine_features=["marlin_pad_sub_tile_n"],
+        kvcalc_key="qwen3.6-27b:dual",
     ),
     "vllm/dual-nvlink-turbo": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="multi-stream-tenant",
@@ -193,6 +214,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=4, mem_util=0.85,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-turbo.yml",
         default_port=8017, requires_nvlink=True, required_engine_features=["turboquant_3bit_nc"],
+        kvcalc_key="qwen3.6-27b:dual-turbo",
         recommended_engine_features=["marlin_pad_sub_tile_n"],
     ),
     "vllm/dual-nvlink-dflash": _entry(
@@ -201,6 +223,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=185000, max_num_seqs=1, mem_util=0.95,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-dflash.yml",
         default_port=8018, requires_nvlink=True, required_engine_features=["marlin_pad_sub_tile_n"],
+        kvcalc_key="qwen3.6-27b:dual-dflash",
     ),
     "vllm/dual-nvlink-dflash-noviz": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -208,6 +231,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=200000, max_num_seqs=1, mem_util=0.95,
         compose_path="models/qwen3.6-27b/vllm/compose/dual/autoround-int4/nvlink-dflash-noviz.yml",
         default_port=8019, requires_nvlink=True, required_engine_features=["marlin_pad_sub_tile_n"],
+        kvcalc_key="qwen3.6-27b:dual-dflash-noviz",
     ),
     "vllm/dual4": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="multi-stream-tenant",
@@ -215,6 +239,7 @@ COMPOSE_REGISTRY = {
         tp=4, max_ctx=262144, max_num_seqs=4, mem_util=0.92,
         compose_path="models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/fp8-mtp.yml",
         default_port=8015,
+        kvcalc_key="qwen3.6-27b:dual4",
     ),
     "vllm/dual4-dflash": _entry(
         model="qwen3.6-27b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -222,6 +247,7 @@ COMPOSE_REGISTRY = {
         tp=4, max_ctx=262144, max_num_seqs=2, mem_util=0.95,
         compose_path="models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/dflash.yml",
         default_port=8016, required_engine_features=["marlin_pad_sub_tile_n"],
+        kvcalc_key="qwen3.6-27b:dual4-dflash",
     ),
 
     # Qwen 3.6 27B, llama.cpp single-card.
@@ -235,6 +261,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=200000, max_num_seqs=1, mem_util=None,
         compose_path="models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml",
         default_port=8020,
+        kvcalc_key="SKIP",
     ),
     "llamacpp/mtp": _entry(
         model="qwen3.6-27b", weights_variant="unsloth-q4km", workload="fast-chat",
@@ -242,6 +269,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=200000, max_num_seqs=1, mem_util=None,
         compose_path="models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml",
         default_port=8020,
+        kvcalc_key="SKIP",
     ),
     "llamacpp/bounded-thinking": _entry(
         model="qwen3.6-27b", weights_variant="unsloth-q4km", workload="tool-heavy",
@@ -249,6 +277,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=200000, max_num_seqs=1, mem_util=None,
         compose_path="models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/bounded-thinking.yml",
         default_port=8020,
+        kvcalc_key="SKIP",
     ),
     "llamacpp/mtp-vision": _entry(
         model="qwen3.6-27b", weights_variant="unsloth-q4km", workload="vision-coding",
@@ -258,6 +287,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=150000, max_num_seqs=1, mem_util=None,
         compose_path="models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp-vision.yml",
         default_port=8020,
+        kvcalc_key="SKIP",
     ),
 
     # ik_llama.cpp — IQ4_KS (ubergarm). Same engine family as llamacpp, but the
@@ -270,6 +300,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=200000, max_num_seqs=1, mem_util=None,
         compose_path="models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp.yml",
         default_port=8020,
+        kvcalc_key="SKIP",
     ),
     "ik-llama/iq4ks-mtp-vision": _entry(
         model="qwen3.6-27b", weights_variant="ubergarm-iq4ks", workload="vision-coding",
@@ -277,6 +308,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=163840, max_num_seqs=1, mem_util=None,
         compose_path="models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp-vision.yml",
         default_port=8020,
+        kvcalc_key="SKIP",
     ),
     "ik-llama/iq4ks-two-stage": _entry(
         model="qwen3.6-27b", weights_variant="ubergarm-iq4ks", workload="fast-chat",
@@ -284,6 +316,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=200000, max_num_seqs=1, mem_util=None,
         compose_path="models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/two-stage.yml",
         default_port=8020,
+        kvcalc_key="SKIP",
     ),
 
     # Gemma 4 31B, vLLM.
@@ -293,6 +326,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=8192, max_num_seqs=256, mem_util=0.95,
         compose_path="models/gemma-4-31b/vllm/compose/single/autoround-int4/fp8-mtp.yml",
         default_port=8031, required_sm=9.0,
+        kvcalc_key="gemma-4-31b:gemma-single",
     ),
     "vllm/gemma-mtp": _entry(
         model="gemma-4-31b", weights_variant="autoround-int4", workload="fast-chat",
@@ -300,6 +334,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=32768, max_num_seqs=4, mem_util=0.92,
         compose_path="models/gemma-4-31b/vllm/compose/dual/autoround-int4/bf16-mtp.yml",
         default_port=8030,
+        kvcalc_key="gemma-4-31b:gemma-dual",
     ),
     "vllm/gemma-int8": _entry(
         model="gemma-4-31b", weights_variant="autoround-int4", workload="multi-stream-tenant",
@@ -307,6 +342,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=98304, max_num_seqs=4, mem_util=0.95,
         compose_path="models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml",
         default_port=8032, required_engine_features=["int8_per_token_head"],
+        kvcalc_key="gemma-4-31b:gemma-dual-int8",
     ),
     "vllm/gemma-int8-262k": _entry(
         model="gemma-4-31b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -314,6 +350,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=262144, max_num_seqs=1, mem_util=0.95,
         compose_path="models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml",
         default_port=8032, required_engine_features=["int8_per_token_head"],
+        kvcalc_key="gemma-4-31b:gemma-dual-int8-262k",
     ),
     "vllm/gemma-dflash": _entry(
         model="gemma-4-31b", weights_variant="autoround-int4", workload="fast-chat",
@@ -321,6 +358,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=32768, max_num_seqs=4, mem_util=0.92,
         compose_path="models/gemma-4-31b/vllm/compose/dual/autoround-int4/dflash.yml",
         default_port=8032,
+        kvcalc_key="gemma-4-31b:gemma-dual-dflash",
     ),
     "vllm/gemma-dflash-int8": _entry(
         model="gemma-4-31b", weights_variant="autoround-int4", workload="multi-stream-tenant",
@@ -328,6 +366,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=65536, max_num_seqs=2, mem_util=0.95,
         compose_path="models/gemma-4-31b/vllm/compose/dual/autoround-int4/dflash-int8.yml",
         default_port=8032, required_engine_features=["int8_per_token_head"],
+        kvcalc_key="gemma-4-31b:gemma-dual-dflash-int8",
     ),
     "vllm/gemma-int8-tq3": _entry(
         model="gemma-4-31b", weights_variant="autoround-int4", workload="multi-stream-tenant",
@@ -335,6 +374,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=98304, max_num_seqs=4, mem_util=0.95,
         compose_path="models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8-tq3.yml",
         default_port=8034, required_engine_features=["turboquant_3bit_nc"], required_sm=9.0,
+        kvcalc_key="gemma-4-31b:gemma-dual-int8-tq3",
     ),
     "vllm/gemma-bf16": _entry(
         model="gemma-4-31b", weights_variant="autoround-int4", workload="long-ctx-single",
@@ -342,6 +382,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=200000, max_num_seqs=1, mem_util=0.95,
         compose_path="models/gemma-4-31b/vllm/compose/dual/autoround-int4/bf16.yml",
         default_port=8033,
+        kvcalc_key="gemma-4-31b:gemma-dual-bf16",
     ),
     "vllm/gemma-awq": _entry(
         model="gemma-4-31b", weights_variant="awq", workload="multi-stream-tenant",
@@ -349,6 +390,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=65536, max_num_seqs=4, mem_util=0.85,
         compose_path="models/gemma-4-31b/vllm/compose/dual/awq/bf16-mtp.yml",
         default_port=8033,
+        kvcalc_key="gemma-4-31b:gemma-dual-awq",
     ),
 
     # v0.7.3 MoE onboarding — Gemma 4 26B-A4B + Qwen 3.6 35B-A3B.
@@ -362,6 +404,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=8192, max_num_seqs=256, mem_util=0.92,
         compose_path="models/gemma-4-26b-a4b/vllm/compose/single/autoround-int4-mixed/bf16.yml",
         default_port=8040,
+        kvcalc_key="gemma-4-26b-a4b:gemma-a4b-single",
     ),
     "vllm/gemma-a4b": _entry(
         model="gemma-4-26b-a4b", weights_variant="autoround-int4-mixed", workload="fast-chat",
@@ -369,6 +412,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=32768, max_num_seqs=256, mem_util=0.92,
         compose_path="models/gemma-4-26b-a4b/vllm/compose/dual/autoround-int4-mixed/bf16.yml",
         default_port=8041,
+        kvcalc_key="gemma-4-26b-a4b:gemma-a4b",
     ),
     "vllm/gemma-a4b-awq": _entry(
         model="gemma-4-26b-a4b", weights_variant="awq", workload="fast-chat",
@@ -376,6 +420,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=32768, max_num_seqs=256, mem_util=0.92,
         compose_path="models/gemma-4-26b-a4b/vllm/compose/dual/awq/bf16.yml",
         default_port=8042,
+        kvcalc_key="gemma-4-26b-a4b:gemma-a4b-awq",
     ),
     "vllm/gemma-a4b-awq-mtp": _entry(
         model="gemma-4-26b-a4b", weights_variant="awq", workload="fast-chat",
@@ -383,6 +428,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=32768, max_num_seqs=256, mem_util=0.92,
         compose_path="models/gemma-4-26b-a4b/vllm/compose/dual/awq/mtp.yml",
         default_port=8043,
+        kvcalc_key="gemma-4-26b-a4b:gemma-a4b-awq-mtp",
     ),
     "vllm/qwen-a3b-preview-single": _entry(
         model="qwen3.6-35b-a3b", weights_variant="autoround-int4", workload="fast-chat",
@@ -390,6 +436,7 @@ COMPOSE_REGISTRY = {
         tp=1, max_ctx=8192, max_num_seqs=1, mem_util=0.92,
         compose_path="models/qwen3.6-35b-a3b/vllm/compose/single/autoround-int4/preview.yml",
         default_port=8050,
+        kvcalc_key="qwen3.6-35b-a3b:qwen-a3b-preview-single",
     ),
     "vllm/qwen-a3b-preview": _entry(
         model="qwen3.6-35b-a3b", weights_variant="autoround-int4", workload="fast-chat",
@@ -397,6 +444,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=16384, max_num_seqs=1, mem_util=0.92,
         compose_path="models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/preview.yml",
         default_port=8051,
+        kvcalc_key="qwen3.6-35b-a3b:qwen-a3b-preview",
     ),
     "vllm/qwen-a3b-preview-mtp": _entry(
         model="qwen3.6-35b-a3b", weights_variant="autoround-int4", workload="fast-chat",
@@ -404,6 +452,7 @@ COMPOSE_REGISTRY = {
         tp=2, max_ctx=16384, max_num_seqs=1, mem_util=0.92,
         compose_path="models/qwen3.6-35b-a3b/vllm/compose/dual/autoround-int4/preview-mtp.yml",
         default_port=8052,
+        kvcalc_key="qwen3.6-35b-a3b:qwen-a3b-preview-mtp",
     ),
 }
 

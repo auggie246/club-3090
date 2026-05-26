@@ -16,6 +16,37 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.8.6 — 2026-05-26
+
+
+### ✨ Features
+
+- feat(ik-llama): PRISM-PRO-DQ + APEX-MTP presets, conformed to the <quant>/ layout ([458c473](https://github.com/noonghunna/club-3090/commit/458c473908242aab349a19529d2606feb28b2e3e))
+
+
+### 🐛 Bug fixes
+
+- fix(profiles): cover the new ik-llama PRISM/APEX presets in the compat catalog ([aa2a965](https://github.com/noonghunna/club-3090/commit/aa2a965bb93ea7c9cf50f6ef16a9bb1a14ce13f0))
+- fix: post-PR-A compose-path fixes for gpu-mode.sh + 2 patch READMEs ([b23846e](https://github.com/noonghunna/club-3090/commit/b23846ea36c71ea2d86d3343eb2d367fa5d58b22))
+- fix(registry+bench): sync vision defaults to the 2026-05-25 re-tune (#438) ([b116750](https://github.com/noonghunna/club-3090/commit/b116750ef16850ee2472f857cde4dbea6bd09c0a))
+- fix(vision): re-tune single-card vision defaults to measured-safe (1M-px + 160K/150K) ([c9b7dd3](https://github.com/noonghunna/club-3090/commit/c9b7dd3999de78cf2847677e60503d1dafec5af9))
+- fix(vllm/dual): pin to stable v0.21.0, drop all source overlays (#407 pin-drift) ([cf1f14f](https://github.com/noonghunna/club-3090/commit/cf1f14fbc781ec7fbfca060c791144dd79ab6308))
+
+
+### 📝 Documentation
+
+- docs+scripts: finish <quant>/ path migration across full repo sweep ([eaa7a8c](https://github.com/noonghunna/club-3090/commit/eaa7a8c1ad4dc36d39d6935944136cc0734e4ef2))
+- docs(switch): correct ik-llama/iq4ks-mtp usage comment 262K -> 200K ([2135230](https://github.com/noonghunna/club-3090/commit/2135230f8f02fde978c897526c9b55618c22c7fd))
+
+
+### 🧹 Maintenance
+
+- refactor(launch): derive launcher tables from the registry + <engine>/default resolver ([a0520e2](https://github.com/noonghunna/club-3090/commit/a0520e2060966a3b63efadf95401f684417b4c62))
+- refactor(compose): insert <quant> layer + make the registry the single source of truth ([9821c94](https://github.com/noonghunna/club-3090/commit/9821c94efb4ac837dcaaa6f5805a14b0c8b0a05d))
+
+
+
+[Pin: `git checkout v0.8.6`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.5...v0.8.6)
 ## v0.8.5 — 2026-05-24
 
 

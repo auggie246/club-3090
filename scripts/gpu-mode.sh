@@ -9,8 +9,12 @@ set -e
 # both deprecated 2026-05-10 — supporting services moved into services/).
 CLUB3090_DIR="/opt/ai/github/club-3090"
 COMPOSE_BASE="$CLUB3090_DIR/services"
-DUAL_27B_DIR="$CLUB3090_DIR/models/qwen3.6-27b/vllm/compose/dual"
-GEMMA_DUAL_DIR="$CLUB3090_DIR/models/gemma-4-31b/vllm/compose/dual"
+# Post-PR-A (<quant>/ layer): dual composes live under <topology>/<quant>/.
+# Point each var at the quant dir so `compose_at` cd's into it — mount-safe,
+# the same invocation switch.sh uses (project dir = compose-file dir).
+DUAL_27B_DIR="$CLUB3090_DIR/models/qwen3.6-27b/vllm/compose/dual/autoround-int4"
+GEMMA_DUAL_DIR="$CLUB3090_DIR/models/gemma-4-31b/vllm/compose/dual/autoround-int4"
+GEMMA_DUAL_AWQ_DIR="$CLUB3090_DIR/models/gemma-4-31b/vllm/compose/dual/awq"
 
 # Estate planner state file (v0.7.0+). Instances booted via launch.sh --estate
 # or --estate-file are tracked here and persist via Docker `restart:
@@ -71,11 +75,11 @@ stop_service() {
 # Project-specific helpers
 start_27b_dual_mtp() {
     printf "  ${GREEN}▲${NC} Starting 27b-dual-mtp..."
-    compose_at "$DUAL_27B_DIR" "up -d" docker-compose.yml && echo "done" || echo "failed"
+    compose_at "$DUAL_27B_DIR" "up -d" fp8-mtp.yml && echo "done" || echo "failed"
 }
 stop_27b_dual_mtp() {
     printf "  ${RED}▼${NC} Stopping 27b-dual-mtp..."
-    compose_at "$DUAL_27B_DIR" "down" docker-compose.yml && echo "done" || echo "skipped"
+    compose_at "$DUAL_27B_DIR" "down" fp8-mtp.yml && echo "done" || echo "skipped"
 }
 
 start_27b_dual_dflash() {
@@ -127,11 +131,11 @@ stop_comfyui() {
 # --- Gemma 4 31B dual-card serving variants ---------------------------------
 start_gemma_mtp() {
     printf "  ${GREEN}▲${NC} Starting gemma-mtp..."
-    compose_at "$GEMMA_DUAL_DIR" "up -d" docker-compose.yml && echo "done" || echo "failed"
+    compose_at "$GEMMA_DUAL_DIR" "up -d" bf16-mtp.yml && echo "done" || echo "failed"
 }
 stop_gemma_mtp() {
     printf "  ${RED}▼${NC} Stopping gemma-mtp..."
-    compose_at "$GEMMA_DUAL_DIR" "down" docker-compose.yml && echo "done" || echo "skipped"
+    compose_at "$GEMMA_DUAL_DIR" "down" bf16-mtp.yml && echo "done" || echo "skipped"
 }
 
 start_gemma_dflash() {
@@ -163,11 +167,11 @@ stop_gemma_dflash_int8() {
 
 start_gemma_awq() {
     printf "  ${GREEN}▲${NC} Starting gemma-awq..."
-    compose_at "$GEMMA_DUAL_DIR" "up -d" awq.yml && echo "done" || echo "failed"
+    compose_at "$GEMMA_DUAL_AWQ_DIR" "up -d" bf16-mtp.yml && echo "done" || echo "failed"
 }
 stop_gemma_awq() {
     printf "  ${RED}▼${NC} Stopping gemma-awq..."
-    compose_at "$GEMMA_DUAL_DIR" "down" awq.yml && echo "done" || echo "skipped"
+    compose_at "$GEMMA_DUAL_AWQ_DIR" "down" bf16-mtp.yml && echo "done" || echo "skipped"
 }
 
 # Stop every Gemma serving variant before starting a new one

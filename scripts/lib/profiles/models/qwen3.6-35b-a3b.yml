@@ -77,6 +77,30 @@ weights:
     engine: llama-cpp
     kind: gguf
     verify_glob: "*.gguf"
+  mudler-apex-compact:
+    path: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    local_subdir: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    size_gb: variable
+    format: gguf
+    status: community-experimental
+    hf_repo: mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF
+    files:
+      - Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
+  mudler-apex-quality:
+    path: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    local_subdir: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    size_gb: variable
+    format: gguf
+    status: community-experimental
+    hf_repo: mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF
+    files:
+      - Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
 default_weight_variant: autoround-int4
 compatible_drafters:
   - qwen-mtp-builtin

@@ -319,6 +319,73 @@ COMPOSE_REGISTRY = {
         kvcalc_key="SKIP",
     ),
 
+    # Qwen3.6-27B PRISM-PRO-DQ (Ex0bit dynamic-quant GGUF) — community-experimental, ik-llama.
+    "ik-llama/prism-pro-dq-mtp": _entry(
+        model="qwen3.6-27b", weights_variant="ex0bit-prism-pro-dq", workload="fast-chat",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q4_0",
+        tp=1, max_ctx=122880, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-27b/ik-llama/compose/single/ex0bit-prism-pro-dq/mtp.yml",
+        default_port=8020,
+        kvcalc_key="SKIP",
+    ),
+    "ik-llama/prism-pro-dq-long": _entry(
+        model="qwen3.6-27b", weights_variant="ex0bit-prism-pro-dq", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q4_0",
+        tp=1, max_ctx=180000, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-27b/ik-llama/compose/single/ex0bit-prism-pro-dq/long.yml",
+        default_port=8052,
+        kvcalc_key="SKIP",
+    ),
+    "ik-llama/prism-pro-dq-two-stage": _entry(
+        model="qwen3.6-27b", weights_variant="ex0bit-prism-pro-dq", workload="tool-heavy",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q4_0",
+        tp=1, max_ctx=200000, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-27b/ik-llama/compose/single/ex0bit-prism-pro-dq/two-stage.yml",
+        default_port=8020,
+        kvcalc_key="SKIP",
+    ),
+    "ik-llama/prism-pro-dq-dual": _entry(
+        model="qwen3.6-27b", weights_variant="ex0bit-prism-pro-dq", workload="tool-heavy",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q4_0",
+        tp=2, max_ctx=196608, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-27b/ik-llama/compose/dual/ex0bit-prism-pro-dq/mtp.yml",
+        default_port=8053,
+        kvcalc_key="SKIP",
+    ),
+    "ik-llama/prism-pro-dq-dual-vision": _entry(
+        model="qwen3.6-27b", weights_variant="ex0bit-prism-pro-dq", workload="vision-coding",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q8_0",
+        tp=2, max_ctx=262144, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-27b/ik-llama/compose/dual/ex0bit-prism-pro-dq/mtp-vision.yml",
+        default_port=8010,
+        kvcalc_key="SKIP",
+    ),
+    # Qwen3.6-35B-A3B APEX-MTP (mudler MoE GGUF — Compact + Quality) — community-experimental, ik-llama.
+    "ik-llama/apex-mtp-compact": _entry(
+        model="qwen3.6-35b-a3b", weights_variant="mudler-apex-compact", workload="fast-chat",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q4_0",
+        tp=1, max_ctx=163840, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/mtp.yml",
+        default_port=8054,
+        kvcalc_key="SKIP",
+    ),
+    "ik-llama/apex-mtp-compact-long": _entry(
+        model="qwen3.6-35b-a3b", weights_variant="mudler-apex-compact", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q8_0",
+        tp=1, max_ctx=196608, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-35b-a3b/ik-llama/compose/single/mudler-apex-compact/long.yml",
+        default_port=8056,
+        kvcalc_key="SKIP",
+    ),
+    "ik-llama/apex-mtp-quality-dual": _entry(
+        model="qwen3.6-35b-a3b", weights_variant="mudler-apex-quality", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q8_0",
+        tp=2, max_ctx=196608, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-35b-a3b/ik-llama/compose/dual/mudler-apex-quality/mtp.yml",
+        default_port=8055,
+        kvcalc_key="SKIP",
+    ),
+
     # Gemma 4 31B, vLLM.
     "vllm/gemma-mtp-tp1": _entry(
         model="gemma-4-31b", weights_variant="autoround-int4", workload="fast-chat",

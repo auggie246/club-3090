@@ -119,6 +119,18 @@ weights:
     kind: gguf
     verify_glob: "*.gguf"
     setup_weights_key: iq4ks
+  ex0bit-prism-pro-dq:
+    path: qwen3.6-27b-gguf/ex0bit-prism-pro-dq
+    local_subdir: qwen3.6-27b-gguf/ex0bit-prism-pro-dq
+    size_gb: variable
+    format: gguf
+    status: community-experimental
+    hf_repo: Ex0bit/Qwen3.6-27B-PRISM-PRO-DQ
+    files:
+      - Qwen3.6-27B-PRISM-PRO-DQ.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
   carnice-bf16mtp:
     path: carnice-v2-27b-int4-recipe-d-bf16mtp
     local_subdir: carnice-v2-27b-int4-recipe-d-bf16mtp

@@ -112,12 +112,12 @@ def infer_compose_path(container_name: str, served: str, tp: str) -> str:
     model_root = "models/gemma-4-31b/vllm/compose" if is_gemma else "models/qwen3.6-27b/vllm/compose"
 
     mapping = {
-        "dual-int8-tq3": "dual/int8-tq3.yml",
-        "dual-tq3-mtp-genesis": "dual/tq3-mtp-genesis.yml",
-        "dual-tq3-nomtp": "dual/tq3-nomtp.yml",
-        "dual-tq3-mtp": "dual/tq3-mtp.yml",
-        "dual-int8": "dual/int8.yml",
-        "dual-bf16": "dual/bf16.yml",
+        "dual-int8-tq3": "dual/autoround-int4/int8-tq3.yml",
+        "dual-tq3-mtp-genesis": "dual/autoround-int4/tq3-mtp-genesis.yml",
+        "dual-tq3-nomtp": "dual/autoround-int4/tq3-nomtp.yml",
+        "dual-tq3-mtp": "dual/autoround-int4/tq3-mtp.yml",
+        "dual-int8": "dual/autoround-int4/int8.yml",
+        "dual-bf16": "dual/autoround-int4/bf16.yml",
         "dual-dflash-noviz": "dual/autoround-int4/dflash-noviz.yml",
         "dual-dflash": "dual/autoround-int4/dflash.yml",
         "dual-turbo": "dual/autoround-int4/turbo.yml",

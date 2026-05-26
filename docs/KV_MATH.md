@@ -572,8 +572,8 @@ Two drafter families on this stack:
 
 | Drafter | Size | Composes |
 |---|---:|---|
-| `gemma-4-31b-it-assistant` (Google MTP) | 0.97 GB FP16 | `dual/docker-compose.yml`, `dual/int8.yml`, `dual/awq.yml` (with MTP n=4) |
-| `gemma-4-31b-it-dflash` (z-lab DFlash) | 2.9 GB FP16 | `dual/dflash.yml`, `dual/dflash-int8.yml` |
+| `gemma-4-31b-it-assistant` (Google MTP) | 0.97 GB FP16 | `dual/autoround-int4/bf16-mtp.yml`, `dual/autoround-int4/int8.yml`, `dual/awq/default.yml` (with MTP n=4) |
+| `gemma-4-31b-it-dflash` (z-lab DFlash) | 2.9 GB FP16 | `dual/autoround-int4/dflash.yml`, `dual/autoround-int4/dflash-int8.yml` |
 
 At TP > 1, drafter weights shard across cards (`drafter_gb / TP`).
 
@@ -766,7 +766,7 @@ Run `bash tools/kv-calc.py --calibration` to see predicted vs measured for all s
 | Model | Verdict accuracy | Notes |
 |---|---|---|
 | Qwen 3.6 27B | 11/11 = 100% (±1.5 GB band) | Refactored Phase 3 of v0.7.0 preserved this byte-for-byte |
-| Gemma 4 31B | 7/7 = 100% (±1.5 GB band) | Calibrated against `dual/int8.yml` 98K+262K rows, `dual/dflash.yml`, `dual/awq.yml`, `dual/docker-compose.yml` |
+| Gemma 4 31B | 7/7 = 100% (±1.5 GB band) | Calibrated against `dual/autoround-int4/int8.yml` 98K+262K rows, `dual/autoround-int4/dflash.yml`, `dual/awq/default.yml`, `dual/autoround-int4/bf16-mtp.yml` |
 | Qwen 3.6 35B-A3B | not on stack | Pending download + first calibration |
 | Gemma 4 26B-A4B | not on stack | Pending download + first calibration |
 

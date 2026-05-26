@@ -164,7 +164,7 @@ Chains ngram self-spec (catches repeated code spans, near-zero compute) with the
 
 These exist for troubleshooting, niche workloads, or historical comparison. Not promoted as primary because the long-* variants now cover their use cases:
 
-- **`docker-compose.yml`** — 48K + TQ3 + vision, mem-util 0.92. The "below both cliffs by definition" baseline (engine HTTP-400-rejects requests >48K, so Cliff 2 is unreachable). Useful when you want bulletproof error behavior on a specific small-ctx workload, or as a fast-boot diagnostic. Most users should pick `long-vision` or `llamacpp/default` instead.
+- **`tq3-mtp.yml`** — 48K + TQ3 + vision, mem-util 0.92. The "below both cliffs by definition" baseline (engine HTTP-400-rejects requests >48K, so Cliff 2 is unreachable). Useful when you want bulletproof error behavior on a specific small-ctx workload, or as a fast-boot diagnostic. Most users should pick `long-vision` or `llamacpp/default` instead.
 - **`tools-text.yml`** — 75K + FP8 KV + PN8. Was the only Cliff-1-safe single-card path before PN12 anchor fix landed. FP8 KV is closer in quality to FP16 than TQ3 is, so kept around for accuracy-sensitive comparisons. Most IDE-agent workloads now run fine on `long-text.yml`.
 - **`minimal.yml`** — 32K + FP8 + no Genesis + no spec-decode. Stripped-down stack for isolating "is this a Genesis bug?" questions. Half the throughput of any other variant.
 

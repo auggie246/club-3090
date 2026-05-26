@@ -190,7 +190,7 @@ bash scripts/switch.sh --force llamacpp/default
 
 # 2. Bypass the scripts entirely — boot the compose file with Docker directly.
 #    Set MODEL_DIR to wherever your weights live; -f points at the compose.
-#    Layout: models/<model>/<engine>/compose/<topology>/<variant>.yml
+#    Layout: models/<model>/<engine>/compose/<topology>/<quant>/<serving>.yml
 
 # single-card llama.cpp (recommended default) — serves on :8020
 MODEL_DIR=/path/to/models docker compose \
@@ -244,13 +244,13 @@ club-3090/
 │       ├── CHANGELOG.md                   model-specific dated history
 │       ├── vllm/
 │       │   ├── README.md                  "vLLM recipes for Qwen3.6-27B"
-│       │   ├── compose/                   docker-compose files (single-card + dual-card variants)
+│       │   ├── compose/<topology>/<quant>/  compose files (e.g. dual/autoround-int4/fp8-mtp.yml)
 │       │   └── patches/                   tolist_cudagraph + Marlin pad README + Genesis pointer
 │       ├── llama-cpp/
 │       │   ├── README.md                  "llama.cpp composes for Qwen3.6-27B"
-│       │   └── compose/single/            mtp.yml + mtp-vision.yml (single-card MTP)
+│       │   └── compose/single/unsloth-q4km/ mtp.yml + mtp-vision.yml + bounded-thinking.yml
 │       ├── ik-llama/
-│       │   └── compose/single/            iq4ks-mtp.yml + iq4ks-mtp-vision.yml + iq4ks-two-stage.yml (IQK quant)
+│       │   └── compose/single/ubergarm-iq4ks/ mtp.yml + mtp-vision.yml + two-stage.yml (IQK quant)
 │       └── sglang/
 │           └── README.md                  blocked status — what would unblock it on this model
 ├── scripts/                               shared, model-aware

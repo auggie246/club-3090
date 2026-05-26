@@ -136,7 +136,7 @@ AutoRound (Lorbus) gave us +9% TPS over AWQ on this model. GPTQ has a similar qu
 
 Look at the [TPS chart](../README.md#measured-tps-at-a-glance) — single-card vLLM is 51-55 TPS narrative / 67-70 code at 48K, which beats most consumer-3090 numbers we've seen reported. If you're seeing materially lower, the most common causes are:
 1. Power cap < 230 W (this rig benches at 230 W; 280 W gives ~+5%, 350 W ~+10%)
-2. Wrong compose for your prompt shape (use the `docker-compose.yml` 48K default for chat — don't pick `long-vision.yml` if you don't need 198K)
+2. Wrong compose for your prompt shape (use the `tq3-mtp.yml` 48K single-card default for chat — don't pick `long-vision.yml` if you don't need 198K)
 3. Genesis tree drift — `git pull origin main` between bench runs can change AL by ±15%. We pin to commit `bf667c7` for this reason.
 
 ### My TPS dropped after switching to 198K context. Why?
@@ -155,7 +155,7 @@ For the full deep dive — empirical bisection, root-cause walk-through, who-can
 
 Sandermage's K+1 verify routing PR for TurboQuant spec-decode. We tested a local post-#41434 rebase on 2026-05-11 and it is **not** enough for our Qwen3.6-27B Genesis-free TQ+MTP path: MTP acceptance becomes perfect, but long-context recall corrupts into repeated tokens and tool/multi-turn paths regress. Removing the overlay is better, but TQ3/TQ4/k8v4 + MTP still fail needle recall.
 
-The working paths today are `dual/tq3-nomtp.yml` without Genesis, or Genesis-backed TQ+MTP with P67/P67b. Treat #40914 as adjacent upstream work, not a shippable closure for this stack.
+The working paths today are `dual/autoround-int4/tq3-nomtp.yml` without Genesis, or Genesis-backed TQ+MTP with P67/P67b. Treat #40914 as adjacent upstream work, not a shippable closure for this stack.
 
 ### What's PN8?
 
@@ -167,10 +167,10 @@ Not a bug — it's the canonical signature of `int8_per_token_head` quantization
 
 This shows up clearly in the head-to-head matrix on dual-3090:
 
-- **INT8 PTH** (`dual/int8.yml`) — 85 narr / 121 code TPS single-stream, 605K KV pool / 2.31× concurrency at 262K, p50 decode TPS stays near baseline at concurrency (no aggregate lift)
-- **fp8 default** (`dual/docker-compose.yml`) — lower per-stream but scales to ~9× concurrency at 262K, aggregate throughput goes up almost linearly with stream count
+- **INT8 PTH** (`dual/autoround-int4/int8.yml`) — 85 narr / 121 code TPS single-stream, 605K KV pool / 2.31× concurrency at 262K, p50 decode TPS stays near baseline at concurrency (no aggregate lift)
+- **fp8 default** (`dual/autoround-int4/fp8-mtp.yml`) — lower per-stream but scales to ~9× concurrency at 262K, aggregate throughput goes up almost linearly with stream count
 
-So pick by workload: INT8 PTH if you want max single-stream TPS and don't need many concurrent users; fp8 if you want aggregate throughput across many streams. If you want **both** — high single-stream *and* high concurrency on the same compose — the answer is the Genesis-backed TQ3+MTP path (`dual/tq3-mtp-genesis.yml`): 89 / 119 narr / code TPS single-stream + 1.22M KV pool / 4.66× concurrency on the same PCIe dual-3090 rig (~5pp quality cost vs INT8 PTH on the 150-scenario quality suite, within noise on aider-polyglot-30 — see [docs/TQ3_MTP_GENESIS.md](TQ3_MTP_GENESIS.md) for the full writeup). This is also why `dual/turbo.yml` (4-stream production variant) ships TQ3+MTP rather than INT8 PTH — INT8 PTH wouldn't scale across the 4 concurrent streams.
+So pick by workload: INT8 PTH if you want max single-stream TPS and don't need many concurrent users; fp8 if you want aggregate throughput across many streams. If you want **both** — high single-stream *and* high concurrency on the same compose — the answer is the Genesis-backed TQ3+MTP path (`dual/autoround-int4/tq3-mtp-genesis.yml`): 89 / 119 narr / code TPS single-stream + 1.22M KV pool / 4.66× concurrency on the same PCIe dual-3090 rig (~5pp quality cost vs INT8 PTH on the 150-scenario quality suite, within noise on aider-polyglot-30 — see [docs/TQ3_MTP_GENESIS.md](TQ3_MTP_GENESIS.md) for the full writeup). This is also why `dual/autoround-int4/turbo.yml` (4-stream production variant) ships TQ3+MTP rather than INT8 PTH — INT8 PTH wouldn't scale across the 4 concurrent streams.
 
 If your numbers on the same compose look different from ours by >15%, the most likely sources of the gap are: power cap (370W vs 290W = ~10-15%), vLLM nightly (pre-#41434 was ~15% slower on Qwen3-Next due to GPU↔CPU syncs in attention), Genesis patches loaded vs not (~10-15% via P67 + PN12 + PN25 on Qwen3-Next), MTP `n` value, or the prompt shape. Run `bash scripts/rebench-full.sh` to capture the canonical 5-phase numbers and we can compare apples-to-apples — see the [Numbers from your rig](https://github.com/noonghunna/club-3090/issues/new?template=numbers-from-your-rig.yml) issue template to share them back.
 

@@ -525,7 +525,7 @@ This is why our launch frame is **two routes, not one**: vLLM dual-card for max 
 
 | Mitigation | Closes which cliff? | Where shipped |
 |---|---|---|
-| Cap `max-model-len` at 48K (TQ3) | Cliff 1 (under threshold) | `docker-compose.yml` (default) |
+| Cap `max-model-len` at 48K (TQ3) | Cliff 1 (under threshold) | `tq3-mtp.yml` (single default) |
 | FP8 KV + PN8 + cap at 75K | Cliff 1 (PN8 absorbs leak) | `tools-text.yml` |
 | TP=2 (dual-card) | Cliff 2 (state splits across cards) | `dual.yml`, `dual-turbo.yml` |
 | llama.cpp engine swap | Both (different library entirely) | `llamacpp/default`, `llamacpp/mtp`, `llamacpp/mtp-vision` |

@@ -94,7 +94,7 @@ cd /path/to/club-3090
 bash scripts/switch.sh vllm/bounded-thinking
 # Or directly:
 cd models/qwen3.6-27b/vllm/compose
-docker compose -f single/bounded-thinking.yml up -d
+docker compose -f single/autoround-int4/bounded-thinking.yml up -d
 ```
 
 Endpoint: `http://localhost:8020/v1` (set `PORT=...` to override).
@@ -145,7 +145,7 @@ cd /path/to/club-3090
 bash scripts/switch.sh llamacpp/bounded-thinking
 # Or directly:
 cd models/qwen3.6-27b/llama-cpp/compose
-docker compose -f single/bounded-thinking.yml up -d
+docker compose -f single/autoround-int4/bounded-thinking.yml up -d
 ```
 
 Endpoint: `http://localhost:8020/v1` (set `PORT=...` to override). The compose is intentionally the same runtime envelope as `llamacpp/mtp`: Q4_K_M MTP GGUF, MTP n=2, q4_0 KV, `-ub 512`, 200K context, no vision. The serving-policy difference is `REASONING=on` by default.

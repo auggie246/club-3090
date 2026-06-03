@@ -241,6 +241,10 @@ On vLLM, `turboquant_3bit_nc` is the long-context default; where context allows,
 
 ## Setup
 
+### How do I test my own compose or model on my rig?
+
+You don't need the catalog — serve any safetensors repo (`scripts/pull.sh`) or a GGUF you already have (copy the closest `ik-llama`/`llama.cpp`/`beellama` compose), tune it with the fast scripts (`verify-full` / `verify-stress` / `bench.sh` / `quality-test --full|--medium`), then run the full `rebench-full` gate. Single-or-dual, any engine. Full walkthrough + a tuning guide (context ceiling, NIAH, KV quant, MTP/DFlash n-sweeps): **[Bring your own model or compose](BRING_YOUR_OWN.md)**.
+
 ### How do I pick the right model + variant?
 
 For a first install, run `bash scripts/setup.sh` with no model argument in a normal terminal. It opens a hardware-aware model picker, marks Qwen / Gemma / Both as eligible or not for your detected GPUs, then continues into the existing download flow.

@@ -1,0 +1,186 @@
+# Bring your own model or compose
+
+You don't need to touch the curated catalog to serve and validate your own model
+on your rig. The same scripts that gate our shipped composes work on anything you
+serve. The arc is **serve → tune → validate → share**: bring it up, dial it in
+with the fast loops, then run the full gate once it's settled.
+
+## 1. Serve it
+
+Which path depends on what weights you have.
+
+### A — An HF safetensors repo  →  `scripts/pull.sh`
+
+```bash
+scripts/pull.sh <org/Model> --profile-like <registry-key> --dry-run   # evaluate
+scripts/pull.sh <org/Model> --profile-like <registry-key> --yes       # then fetch
+```
+
+`--profile-like` is **required** — it borrows a curated config's *runtime shape*
+(engine, KV format, tensor-parallel degree) to evaluate your model against our KV
+math, and tells you whether it fits **before** downloading. Pick the key that
+matches the engine + topology you want to test:
+
+| Target | `--profile-like` key |
+|---|---|
+| vLLM, single GPU (TP=1) | `vllm/minimal` |
+| vLLM, dual GPU (TP=2) | `vllm/dual` |
+
+`pull.sh` is **safetensors-only** by design — GGUF / llama.cpp serving is a
+separate cross-engine concern and out of scope here. A GGUF-only repo will
+hard-stop; use path B. See [`PULL.md`](PULL.md) for the full gate taxonomy.
+
+### B — A GGUF you already have  →  copy the closest compose
+
+`pull.sh` doesn't serve GGUF, so for **ik-llama / llama.cpp / beellama** (single
+*or* dual) you copy an existing compose and point it at your file. List every
+shipped compose with its path and registry key:
+
+```bash
+bash scripts/switch.sh --list          # single + dual for this machine
+bash scripts/switch.sh --list --all    # include multi-GPU
+```
+
+Copy the one closest to your target engine + topology as a starting point:
+
+| Engine | Single-GPU starting point | Dual-GPU starting point |
+|---|---|---|
+| ik-llama | `ik-llama/iq4ks-mtp` | `ik-llama/apex-mtp-quality-dual` |
+| llama.cpp | `llamacpp/mtp` | (multi-GPU via `--list --all`) |
+| beellama | `beellama/dflash` | `beellama/qwen-dflash-dual` |
+
+Then point it at your weights and boot directly — no registry or profile entry
+needed:
+
+```bash
+env MODEL_DIR=/path/to/your/models \
+    GGUF_FILE=relative/path/to/your-model.gguf \
+    PORT=8062 CTX_SIZE=104000 \
+    CUDA_VISIBLE_DEVICES=0 ESTATE_CONTAINER=byo-eval \
+    docker compose -f models/<model>/<engine>/compose/<topology>/<quant>/<serving>.yml up -d
+```
+
+**Single vs dual** is encoded in the path/key, not a flag: for vLLM the
+`--profile-like` key sets TP (`vllm/minimal` = TP=1, `vllm/dual` = TP=2); for GGUF
+engines you copy a `single/` or `dual/` compose (dual splits layers / `-ts` across
+cards). Custom all-reduce stays disabled on PCIe (no NVLink). See
+[`SINGLE_CARD.md`](SINGLE_CARD.md) / [`DUAL_CARD.md`](DUAL_CARD.md).
+
+## 2. Tune it
+
+Bring-up rarely lands on the best config first. Tune with the **fast loops** and
+**change one variable at a time** — keep the long `rebench-full` run (§3) for the
+end, it's a 2.5–3.5 hr gate, not a tuning loop:
+
+- `verify-full.sh` — ~2 min functional smoke (boots, serves, tool-calls, streams).
+- `verify-stress.sh` — ~5–10 min context / NIAH ladder.
+- `bench.sh` — ~3–5 min TPS (3 warm + 5 measured).
+- `quality-test.sh --full` — the 8-pack /150 quality read; or `--medium` (5
+  deterministic packs /75) for a quick probe between config changes.
+
+```bash
+MODEL=<served-name> URL=http://localhost:<port> bash scripts/verify-full.sh
+MODEL=<served-name> URL=http://localhost:<port> bash scripts/quality-test.sh --medium   # quick probe
+MODEL=<served-name> URL=http://localhost:<port> bash scripts/quality-test.sh --full      # 8-pack /150
+```
+
+### Context size — find the *real* ceiling
+The advertised max context is rarely the fillable ceiling on 24 GB: KV is
+pre-allocated at boot, so a too-large `CTX_SIZE` leaves no headroom for the
+prefill and a high-context request OOMs and wedges the server (we've watched a
+"160K" compose die at ~125K).
+- `verify-stress.sh` runs a staggered NIAH ladder to ~0.92 × n_ctx and reports
+  the **fillable** ceiling + VRAM margin. An `HTTP 0` at a rung is an OOM/wedge,
+  **not** a recall miss — drop `CTX_SIZE` and re-run.
+- ik-llama: `--fit` auto-sizes context to free VRAM; otherwise step `CTX_SIZE`
+  down until verify-stress passes with ≥1 GB margin.
+- Watch the **cliffs** — the single-prompt prefill cliff (~50–60K on DeltaNet)
+  and the accumulated-context Cliff 2b (~21–26K, soak-only). See
+  [`CLIFFS.md`](CLIFFS.md); single-card long-context often belongs on dual.
+
+### NIAH — confirm it actually *uses* the context
+verify-stress's needle ladder requires **exact** recall at each depth (10K / 30K
+/ 60K / 90K + the ceiling rungs). Allocating context isn't using it — a model
+that allocates 200K but misses the needle at 90K is not a 200K model.
+
+### KV-cache quant — context vs fidelity
+Lower KV bits buy more context for a small quality cost; the lever is per-stream
+K and V type:
+- `-ctk q4_0 -ctv q4_0` — max context (cheapest KV).
+- `-ctk q8_0 -ctv q5_0` (or `q4_1`) + `-khad -vhad` — **asymmetric K-high /
+  V-low** (Anbeeld pattern): keeps precision-sensitive K accurate, quantises V
+  harder. A little VRAM for tighter quality at slightly less context.
+- Re-run verify-stress + a quality `--medium` after any KV change. See the
+  KV-cache entry in [`FAQ.md`](FAQ.md).
+
+### Speculative decoding — sweep the draft depth (MTP / DFlash)
+Spec-decode only wins if **net wall TPS** improves — high acceptance does *not*
+guarantee a win (built-in MTP on an MoE can be net-*negative* despite 80%+
+acceptance, because the draft forward re-runs expert routing). Always compare
+against the no-spec baseline.
+- **ik-llama built-in MTP**: `--multi-token-prediction --draft-max N
+  --draft-p-min 0.0`. Sweep `N` (2 → 5) — more draft tokens isn't always faster
+  as acceptance decays with depth. n=2 is a common mainline sweet spot; ik
+  single-card often likes n=4–5.
+- **mainline llama.cpp MTP**: `--spec-type draft-mtp` (a *different* flag from
+  ik's `--multi-token-prediction`).
+- **DFlash (beellama)**: external-drafter path, tool-grammar-neutral; n-sweep
+  the same way.
+- Read acceptance-length (AL) + per-position accept from the logs, but **judge on
+  the bench delta**.
+
+### Batch / ubatch + sampling
+- `-b` (batch) / `-ub` (ubatch) are first-class levers — a smaller `-ub` (e.g.
+  1024) can unblock high-context prefill that OOMs at the default.
+- Qwen3.6 sampling defaults: `temp 0.6, top_p 0.95, top_k 20, min_p 0.0,
+  repeat_penalty 1.0`. `thinking on/off` shifts both latency and quality —
+  validate the mode you'll actually serve.
+
+### A/B discipline
+Give every arm an identical **docker restart + fixed settle** before benching,
+**≥3 runs/arm**, compared on the same segment at **matched power** — a cold or
+lower-power arm fakes a regression. Never trust a single run.
+
+## 3. Validate it — the full gate
+
+Once the config is settled, run the full pipeline. It chains everything in one
+pass: bench → verify-stress → 8-pack quality (think-OFF **and** think-ON) → soak.
+
+```bash
+bash scripts/rebench-full.sh \
+  --url http://localhost:<port> --model <served-name> \
+  --engine vllm|llama-cpp|sglang|beellama --tag <your-tag>
+```
+
+> **Optional for your own use — mandatory to contribute.** Just serving it
+> yourself? The tuning loops above are enough. But a contribution PR that adds a
+> model to the **central registry must include a full `rebench-full` run** so its
+> quality and stability are on record before it ships — and we reproduce those
+> numbers on our own rig before promoting anything past `🧪`. See the gate list in
+> [`CONTRIBUTING.md`](../CONTRIBUTING.md#submitting-a-new-compose-variant--full-gate-list).
+
+Notes:
+- It's a **2.5–3.5 hr** run — that's why you tune with the fast scripts first and
+  run this once at the end. `--resume` skips completed steps; `--skip
+  soak,quality-thinking` trims; artifacts land in `results/rebench/<tag>/`.
+- Pass `MODEL=<served-name>` to every script — they default to a Qwen name and
+  404 against a different endpoint. A **clean, no-slash** model id (e.g.
+  `mymodel-q4`) also keeps the sandboxed packs (HermesAgent, BugFind) routing
+  cleanly; the `quality-test` wrapper already sets the localhost-resolve env so
+  those packs can reach a host model.
+
+## 4. Share it / contribute it back
+
+- Format your numbers with the [Results Card](RESULTS_CARD.md)
+  (Serving · Quality · Takeaways).
+- Contributing the compose upstream? **One model — or one feature/concern — per
+  PR** (see [`CONTRIBUTING.md`](../CONTRIBUTING.md)). Reproduce-before-promote: we
+  re-run community numbers on our own rig before promoting past `🧪`.
+
+## See also
+
+- [`PULL.md`](PULL.md) — the safetensors evaluate-and-fetch gate in depth
+- [`ADDING_MODELS.md`](ADDING_MODELS.md) — the heavier path: promoting a model into the curated catalog
+- [`QUALITY_TEST.md`](QUALITY_TEST.md) — what the 8-pack quality harness measures
+- [`CLIFFS.md`](CLIFFS.md) — the prefill / accumulated-context failure modes
+- [`SINGLE_CARD.md`](SINGLE_CARD.md) / [`DUAL_CARD.md`](DUAL_CARD.md) — workload → config

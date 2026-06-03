@@ -21,6 +21,7 @@ Start here if you want to run a model.
 | [`DUAL_CARD.md`](DUAL_CARD.md) | 2× RTX 3090 (PCIe / NVLink auto-detected) — workload → config → quick start. |
 | [`MULTI_CARD.md`](MULTI_CARD.md) | 3+ GPUs — TP scaling math, derivation from `dual.yml`, valid TP values. |
 | [`PULL.md`](PULL.md) | Any HF safetensors repo — evaluate against the KV math, honest about confidence. |
+| [`BRING_YOUR_OWN.md`](BRING_YOUR_OWN.md) | Serve + tune + validate **your own** model/compose (any engine, single or dual) without touching the catalog. |
 | [`HARDWARE.md`](HARDWARE.md) | Card-class questions — 4090/5090, power caps, NVLink, laptop EC power. |
 | [`GLOSSARY.md`](GLOSSARY.md) | TPS / KV / MTP / TP and the rest of the vocabulary. |
 | [`FAQ.md`](FAQ.md) | Common setup and operational questions. |

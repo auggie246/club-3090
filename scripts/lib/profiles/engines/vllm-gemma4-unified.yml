@@ -23,6 +23,7 @@ supported_drafters:
 supported_weight_formats:
   - bf16
   - fp16
+  - autoround
 required_overlays: []
 vendored_overlays: []
 required_genesis: false

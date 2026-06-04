@@ -106,17 +106,19 @@ def _load_model_specs_from_yaml(profiles):
     # shaped (same SWA KV math family as gemma-4-31b), so it rides the SAME
     # "gemma4-swa-dense" prediction path — we set model_family to that internal
     # KV-family tag (NOT its ModelProfile family "gemma4-unified", which is the
-    # vLLM arch name). It ships only bf16 weights (+ a small assistant drafter):
-    # there is no int4/awq variant, so all three weight-size keys point at the
-    # one real bf16 blob (23.9 GB) — this keeps _weights_per_card_gb()'s
-    # int4/awq/bf16 branch from KeyError'ing regardless of which the resolver
-    # asks for. Activation/overhead constants stay the SHARED Gemma dense
-    # constants (NOT re-tuned). The ONE measured calibration is the growing
-    # KV per-token — `measured_kv_growing_bpt_tp1` (see kv_pool_per_card_bytes):
-    # gemma4_unified's global-layer KV measured 1.44x LOWER than the 31B-derived
-    # global-only formula predicts, so we ride the measurement for the 12B only.
+    # vLLM arch name). It ships bf16 weights + an Intel AutoRound INT8 variant
+    # (~13 GB, W8A16) + a small assistant drafter; there is no int4/awq variant,
+    # so weights_int4_gb/weights_awq_gb point at the bf16 blob (23.9 GB) to keep
+    # _weights_per_card_gb()'s branch from KeyError'ing, while weights_int8_gb
+    # carries the real INT8 footprint (vllm/gemma-12b-single-int8-mtp path).
+    # Activation/overhead constants stay the SHARED Gemma dense constants (NOT
+    # re-tuned). The ONE measured calibration is the growing KV per-token —
+    # `measured_kv_growing_bpt_tp1` (see kv_pool_per_card_bytes): gemma4_unified's
+    # global-layer KV measured 1.44x LOWER than the 31B-derived global-only
+    # formula predicts, so we ride the measurement for the 12B only.
     g12_bf16 = _weight_size(gemma12, "bf16")
-    g12spec = {"model_id": gemma12.id, "model_family": "gemma4-swa-dense", **{k: getattr(gemma12, k) for k in g_fields}, "valid_tp": list(gemma12.valid_tp), "weights_int4_gb": g12_bf16, "weights_awq_gb": g12_bf16, "weights_bf16_gb": g12_bf16, "drafter_mtp_gb": float(profiles.drafters["gemma-12b-it-assistant"].vram_footprint_gb), "measured_kv_growing_bpt_tp1": 45632, "mtp_n_default": profiles.drafters["gemma-12b-it-assistant"].n_default}
+    g12_int8 = _weight_size(gemma12, "autoround-int8")
+    g12spec = {"model_id": gemma12.id, "model_family": "gemma4-swa-dense", **{k: getattr(gemma12, k) for k in g_fields}, "valid_tp": list(gemma12.valid_tp), "weights_int4_gb": g12_bf16, "weights_awq_gb": g12_bf16, "weights_bf16_gb": g12_bf16, "weights_int8_gb": g12_int8, "drafter_mtp_gb": float(profiles.drafters["gemma-12b-it-assistant"].vram_footprint_gb), "measured_kv_growing_bpt_tp1": 45632, "mtp_n_default": profiles.drafters["gemma-12b-it-assistant"].n_default}
     return {
         "qwen3.6-27b": qspec,
         "qwen3.6-35b-a3b": qmspec,
@@ -252,7 +254,7 @@ COMPOSE_ALIAS_TEXT = {
     # bare `gemma-dual` string here is harmless — compat + the CLI always pass
     # an explicit --model, and the reverse map is keyed by (unique) registry
     # slug. `gemma-dual` → the MTP dual; `gemma-no-mtp` → the no-drafter dual.
-    "gemma-4-12b": "gemma-dual=vllm/gemma-12b-mtp gemma-no-mtp=vllm/gemma-12b",
+    "gemma-4-12b": "gemma-dual=vllm/gemma-12b-dual-bf16-mtp gemma-single-int8-mtp=vllm/gemma-12b-single-int8-mtp",
     "gemma-4-26b-a4b": "gemma-a4b-single=vllm/gemma-a4b-single gemma-a4b=vllm/gemma-a4b gemma-a4b-awq=vllm/gemma-a4b-awq gemma-a4b-awq-mtp=vllm/gemma-a4b-awq-mtp",
 }
 COMPOSE_ALIASES = {model: tuple(part.split("=", 1) for part in text.split()) for model, text in COMPOSE_ALIAS_TEXT.items()}
@@ -287,7 +289,7 @@ def _compose_cfg_from_registry(profiles, model_id, legacy_name, registry_name):
     if model_id in ("gemma-4-31b", "gemma-4-12b") and drafter is not None:
         cfg["drafter_gb"] = float(drafter.vram_footprint_gb)
     if model_id in ("gemma-4-31b", "gemma-4-12b"):
-        cfg["weights_variant"] = {"awq": "awq", "bf16": "bf16"}.get(entry["weights_variant"], "int4")
+        cfg["weights_variant"] = {"awq": "awq", "bf16": "bf16", "autoround-int8": "int8"}.get(entry["weights_variant"], "int4")
     if model_id == "gemma-4-26b-a4b":
         cfg["weights_variant"] = "awq" if entry["weights_variant"] == "awq" else "int4"
         if drafter is not None:
@@ -375,6 +377,8 @@ def _weights_per_card_gb(spec, tp, weights_variant="default"):
             return spec["weights_awq_gb"] / tp
         elif weights_variant == "bf16":
             return spec["weights_bf16_gb"] / tp
+        elif weights_variant == "int8":
+            return spec["weights_int8_gb"] / tp
         else:  # int4 default
             return spec["weights_int4_gb"] / tp
     elif spec["model_family"] == "gemma4-swa-moe":
@@ -1302,7 +1306,7 @@ def main():
                    help="Drafter model size in GB (MTP / DFlash). 0 if not using a drafter.")
     p.add_argument("--dflash-draft-gb", type=float, default=None,
                    help="(deprecated alias for --drafter-gb)")
-    p.add_argument("--weights-variant", choices=["default", "int4", "awq", "bf16"], default=None,
+    p.add_argument("--weights-variant", choices=["default", "int4", "awq", "bf16", "int8"], default=None,
                    help="Gemma 4 only: which weight quant variant. Default: from --compose, or int4.")
     p.add_argument("--calibration", action="store_true", help="Print predicted vs measured for all calibrated models.")
     p.add_argument("--solve-max-ctx", action="store_true", help="Binary-search for the largest max_ctx that fits.")

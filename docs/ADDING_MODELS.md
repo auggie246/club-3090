@@ -191,7 +191,7 @@ Fix by either adding the drafter YAML or removing the reference.
 Place at `models/<model-id>/<engine>/compose/<topology>/<quant-slug>/<serving>.yml`:
 
 - Engine dirs (filesystem): `vllm`, `llama-cpp`, `ik-llama`, `beellama` (`sglang` parked)
-- **⚠️ Registry slug prefix ≠ filesystem dir.** The slug prefixes are `vllm` / `llamacpp` / `ik-llama` / `beellama` — note **`llamacpp`, NOT `llama-cpp`** (`registry-emit.sh` special-cases it). So a `models/<id>/llama-cpp/…` compose registers under a `llamacpp/<slug>` key, e.g. `llamacpp/gemma-12b` (not `llama-cpp/gemma-12b`).
+- **⚠️ Registry slug prefix ≠ filesystem dir.** The slug prefixes are `vllm` / `llamacpp` / `ik-llama` / `beellama` — note **`llamacpp`, NOT `llama-cpp`** (`registry-emit.sh` special-cases it). So a `models/<id>/llama-cpp/…` compose registers under a `llamacpp/<slug>` key, e.g. `llamacpp/gemma-12b-single-q8kxl` (not `llama-cpp/gemma-12b-single-q8kxl`).
 - Topologies: `single`, `dual`, `multi4`
 - Quant slug: exactly matches the `weights_variant` key (`autoround-int4`, `awq`, `unsloth-q4km`, etc.)
 - Serving filename: the feature stack only (`fp8-mtp.yml`, `turbo.yml`, `dflash.yml`, etc.). Do not create `docker-compose.yml` or `default.yml`; defaults are registry pointers.

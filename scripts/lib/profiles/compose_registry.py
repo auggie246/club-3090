@@ -578,6 +578,19 @@ COMPOSE_REGISTRY = {
         status="experimental",
         status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16 + assistant spec-dec (n=4). rebench-full 2026-06-04: bench + soak + 8-pack pass; 256K NIAH with MTP re-confirmed overlay-free. Ephemeral gemma4-unified arch-preview image. Max ctx 262144 works on the stock image (google/gemma-4-12B-it + assistant ship max_position_embeddings=262144, upstream config fix vllm#39914; the local p-RoPE overlay was dropped). Pin a digest before any Production promotion.",
     ),
+    # Gemma-4-12B single-card vLLM — Intel AutoRound INT8 (W8A16 on Ampere) on the
+    # gemma4_unified image. Validated single 3090 sm_86 2026-06-04: int8 loads, coherent,
+    # KV pool ~433K tokens holds the FULL 262144 (NIAH 140K-241K exact-recall). No overlay.
+    "vllm/gemma-12b-int8": _entry(
+        model="gemma-4-12b", weights_variant="autoround-int8", workload="fast-chat",
+        engine="vllm-gemma4-unified", drafter=None, kv_format="bf16",
+        tp=1, max_ctx=262144, max_num_seqs=4, mem_util=0.92,
+        compose_path="models/gemma-4-12b/vllm/compose/single/autoround-int8/base.yml",
+        default_port=8037,
+        kvcalc_key="gemma-4-12b:gemma-single-int8",
+        status="experimental",
+        status_note="Gemma-4-12B Intel AutoRound INT8 (W8A16) single 3090 on the gemma4_unified arch-preview image. Validated 2026-06-04: int8 loads on sm_86, coherent, KV pool ~433K tokens holds the full 262144 (NIAH exact-recall 140K/170K/200K/230K/241K). bf16 KV only (no fp8/INT8-PTH on this image). The high-fidelity single-card vLLM path; INT4 would trade quality for more concurrency. Ephemeral tag — pin a digest before any Production promotion.",
+    ),
 
     # Gemma-4-12B single-card GGUF (Q8_K_XL) — the two engine-native single-3090
     # paths that fit the bf16-too-big model in 24 GB. Both llama.cpp-family

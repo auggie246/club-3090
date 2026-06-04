@@ -30,6 +30,16 @@ weights:
     engine: vllm
     kind: main
     verify_glob: "*.safetensors"
+  autoround-int8:
+    path: gemma-4-12b-autoround-int8
+    local_subdir: gemma-4-12b-autoround-int8
+    size_gb: 13.0
+    format: autoround
+    status: experimental
+    hf_repo: Intel/gemma-4-12B-it-int8-AutoRound
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
   assistant:
     path: gemma-4-12b-it-assistant
     local_subdir: gemma-4-12b-it-assistant

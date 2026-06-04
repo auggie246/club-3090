@@ -10,11 +10,13 @@
 #              1.18x at 262K, ~20.7 GB). The ~0.5B drafter stays resident at full ctx.
 #              Config ships max_position_embeddings=262144.
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
-#   Status:    🧪 Experimental — validated single 3090 sm_86 2026-06-04 (boot + n-sweep).
-#              n-sweep (code-gen, @262144): n2 96.7 / n3 115.5 / n4 117.0 / n5 122.5 TPS
-#              (accept_len 2.62/3.33/3.67/4.06) vs ~50 base. n=4 = robust default (near-
-#              peak, matches dual); SPEC_N=5 squeezes ~5% more on code. 🧪 while the
-#              gemma4-unified image is an ephemeral arch-preview tag.
+#   Status:    ⚠️ Production w/ caveats — validated single 3090 sm_86 2026-06-04 (bench +
+#              256K NIAH + 8-pack 105/150 + soak PASS). n-sweep (code-gen, @262144): n2 96.7 /
+#              n3 115.5 / n4 117.0 / n5 122.5 TPS (accept_len 2.62/3.33/3.67/4.06) vs ~50
+#              undrafted. n=4 = robust default (near-peak, matches dual); SPEC_N=5 for code-max.
+#   Caveats:   Ephemeral arch-preview image `vllm/vllm-openai:gemma4-unified` (0.1.dev) — pin a
+#              digest before relying on it. Promotes to ✅ Production when gemma4_unified ships
+#              in a STABLE vLLM release.
 #   Quality:   8-pack 105/150 (70%) thinking-OFF — on par with the bf16 dual's 94/150
 #              (no INT8 degradation; MTP is output-lossless). 2026-06-04.
 #   Best for:  one 3090, Gemma-4-12B INT8 at the FULL 256K + spec-decode speedup — the

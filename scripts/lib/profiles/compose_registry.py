@@ -566,8 +566,8 @@ COMPOSE_REGISTRY = {
         compose_path="models/gemma-4-12b/vllm/compose/dual/bf16/mtp.yml",
         default_port=8036,
         kvcalc_key="gemma-4-12b:gemma-dual",
-        status="experimental",
-        status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16 + assistant spec-dec (n=4). rebench-full 2026-06-04: bench + soak PASS + 8-pack 94/150; 256K NIAH overlay-free. Ephemeral gemma4-unified arch-preview image; 256K from the stock config fix (vllm#39914, overlay dropped). Pin a digest before any Production promotion.",
+        status="caveats",
+        status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16 + assistant spec-dec (n=4). ⚠️ Production w/ caveats: rebench-full 2026-06-04 (verify-full + bench + verify-stress + 8-pack 94/150 + soak PASS); 256K NIAH overlay-free (stock config fix vllm#39914). CAVEAT: ephemeral gemma4-unified arch-preview image (0.1.dev) — pin a digest; promotes to Production on a STABLE vLLM gemma4_unified release.",
     ),
     "vllm/gemma-12b-single-int8-mtp": _entry(
         model="gemma-4-12b", weights_variant="autoround-int8", workload="fast-chat",
@@ -576,8 +576,8 @@ COMPOSE_REGISTRY = {
         compose_path="models/gemma-4-12b/vllm/compose/single/autoround-int8/mtp.yml",
         default_port=8038,
         kvcalc_key="gemma-4-12b:gemma-single-int8-mtp",
-        status="experimental",
-        status_note="Gemma-4-12B Intel AutoRound INT8 (W8A16) + assistant external drafter (n=4) single 3090 on the gemma4_unified arch-preview image. MTP fits the full 262144 (drafter resident, KV pool ~310K tok, 1.18x at 262K, ~20.7 GB). n-sweep 2026-06-04 code-gen: n=4 117 TPS / accept_len 3.67 (n=5 122.5 code-max via SPEC_N=5) vs ~50 no-MTP. 8-pack 105/150 (on par with the bf16 dual's 94/150 — INT8≈bf16). bf16 KV only. Ephemeral tag — pin a digest before any Production promotion.",
+        status="caveats",
+        status_note="Gemma-4-12B Intel AutoRound INT8 (W8A16) + assistant external drafter (n=4) single 3090 on the gemma4_unified arch-preview image. ⚠️ Production w/ caveats: validated 2026-06-04 (bench + 256K NIAH + 8-pack 105/150 + soak PASS). MTP fits the full 262144 (drafter resident, KV pool ~310K tok, 1.18x at 262K, ~20.7 GB). n-sweep code-gen: n=4 117 TPS / accept_len 3.67 (n=5 122.5 code-max via SPEC_N=5) vs ~50 no-MTP. 8-pack on par with the bf16 dual's 94/150 (INT8≈bf16). bf16 KV only. CAVEAT: ephemeral arch-preview image (0.1.dev) — pin a digest; promotes to Production on a STABLE vLLM gemma4_unified release.",
     ),
 
     # Gemma-4-12B single-card GGUF (Q8_K_XL) — the two engine-native single-3090

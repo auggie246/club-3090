@@ -12,10 +12,11 @@
 #              the stock gemma4_unified image serves the full 256K — drafter included.
 #              NIAH exact-recall validated 140K–241K with MTP active (2026-06-04).
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
-#   Status:    🧪 Experimental — validated on 2× 3090 sm_86 (rebench-full 2026-06-04: bench +
-#              soak + 8-pack all pass; 256K NIAH with MTP re-confirmed overlay-free). Stays 🧪
-#              while the image is an ephemeral arch-preview tag (gemma4-unified, 0.1.dev) →
-#              promote to ⚠️ caveats when gemma4_unified lands in a STABLE vLLM release.
+#   Status:    ⚠️ Production w/ caveats — validated on 2× 3090 sm_86 (rebench-full 2026-06-04:
+#              verify-full + bench + verify-stress + 8-pack 94/150 + soak PASS; 256K NIAH overlay-free).
+#   Caveats:   Ephemeral arch-preview image `vllm/vllm-openai:gemma4-unified` (0.1.dev) — pin a
+#              digest before relying on it. Promotes to ✅ Production when gemma4_unified ships
+#              in a STABLE vLLM release.
 #   Quality:   94/150 (63%) thinking-OFF default · 85/150 (57%) reasoning-ON (think-ON lower —
 #              over-reasoning/timeouts; thinking-OFF is the default). Soak PASS: 0 err · 0/100
 #              silent-empty · 0 MiB growth · p50 115.7 TPS · 94.8% retention. rebench-full 2026-06-04.

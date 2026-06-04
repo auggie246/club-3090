@@ -24,13 +24,6 @@ supported_weight_formats:
   - bf16
   - fp16
 required_overlays: []
-vendored_overlays:
-  - id: vllm-gemma4-prope-longctx
-    pr_url: https://github.com/vllm-project/vllm/issues/39914
-    upstream_status: open
-    upstream_merged_in_version: null
-    local_status: vendored
-    delivery: install_script
-    purpose: "Gemma-4-12B p-RoPE long-context cache sizing. The preview gemma4_unified image builds RoPE caches from config.max_position_embeddings=131072; this local diff sizes them from runtime max_model_len so 256K prefill does not index past cos_sin_cache."
+vendored_overlays: []
 required_genesis: false
-notes: "Gemma-4-12B (gemma4_unified arch) vLLM path. Pins the EPHEMERAL `vllm/vllm-openai:gemma4-unified` arch-preview tag — gemma4_unified was merged into vLLM main in PR #44429 (2026-06-03); this tag IS today's vLLM main, so Gemma-4 architecture fixes are baked in except the local vllm-gemma4-prope-longctx overlay. The tag may move/disappear — pin a digest before any Production promotion. Only bf16/fp16 KV on this image (no fp8/INT8-PTH path here). Usable context ceiling is 262144 with the local p-RoPE cache-sizing overlay; drop it when vllm#39914 lands upstream."
+notes: "Gemma-4-12B (gemma4_unified arch) vLLM path. Pins the EPHEMERAL `vllm/vllm-openai:gemma4-unified` arch-preview tag — gemma4_unified was merged into vLLM main in PR #44429 (2026-06-03); this tag IS today's vLLM main, so Gemma-4 architecture fixes are baked in. The tag may move/disappear — pin a digest before any Production promotion. Only bf16/fp16 KV on this image (no fp8/INT8-PTH path here). 256K (262144) works on the stock image: google/gemma-4-12B-it ships the corrected max_position_embeddings=262144 (upstream config fix, vllm#39914), so the prior local vllm-gemma4-prope-longctx overlay was dropped 2026-06-04 (NIAH 140K–241K validated overlay-free)."

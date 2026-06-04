@@ -507,39 +507,6 @@ patches:
     status: verified
 
 
-  - id: gemma-vllm-gemma4-prope-longctx
-    model: [gemma-4-12b]
-    files:
-      - models/gemma-4-12b/vllm/patches/vllm-gemma4-prope-longctx
-    load_bearing_when:
-      - composes:
-          - vllm/gemma-12b
-          - vllm/gemma-12b-mtp
-        reason: "Stock vllm/vllm-openai:gemma4-unified sizes Gemma4 p-RoPE cos/sin caches from config.max_position_embeddings=131072. With --max-model-len 262144, prefill past position 131071 indexes past the fixed cache and crashes with a CUDA device-side assert. This overlay sizes the cache from runtime max_model_len."
-        evidence: "models/gemma-4-12b/vllm/patches/vllm-gemma4-prope-longctx/README.md"
-    delivery:
-      dockerfile_bake: false
-      entrypoint_invoke: true
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: install_script
-    delivery_spec:
-      script: models/gemma-4-12b/vllm/patches/vllm-gemma4-prope-longctx/install.sh
-      invoke: "boot-time: applies a Gemma4 model-constructor diff to size RoPE caches from runtime max_model_len (idempotent; fail-loud)"
-      invoked_before: vllm-import
-      wired_at: [volumes, entrypoint]
-    drift_guard:
-      kind: behavioral
-      check: "Gemma-4-12B vLLM dual boots with --max-model-len 262144 and a prompt past 131072 tokens no longer trips the Gemma4 RoPE cos/sin cache OOB path"
-      on_fail: capability-degraded
-    capability: gemma4-prope-longctx
-    foundational: false
-    upstream:
-      ref: vllm-project/vllm#39914
-      status: open
-      drop_when: "upstream gemma4_unified sizes p-RoPE caches for runtime max_model_len and 256K prefill passes without the overlay"
-    status: verified
-
   - id: gemma-vllm-perheadkv-hybridpage-fix
     model: [gemma-4-31b]
     files:

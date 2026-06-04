@@ -50,12 +50,6 @@ OVERLAY_PATH_HINTS = {
     "vllm-gemma4-tool-parser-fixes": [
         "models/gemma-4-31b/vllm/patches/vllm-pr42006-v0.22.0"
     ],
-    "gemma-vllm-gemma4-prope-longctx": [
-        "models/gemma-4-12b/vllm/patches/vllm-gemma4-prope-longctx"
-    ],
-    "vllm-gemma4-prope-longctx": [
-        "models/gemma-4-12b/vllm/patches/vllm-gemma4-prope-longctx"
-    ],
     "vllm-pr41800-truncate-prompt-tokens": [
         "models/gemma-4-31b/vllm/patches/vllm-pr41800-truncate-prompt-tokens",
         "models/qwen3.6-27b/vllm/patches/vllm-pr41800-truncate-prompt-tokens",

@@ -1,21 +1,20 @@
 # ===========================================================================
 # Profile (at-a-glance):
-#   Model:     Gemma-4-12B-it (bf16 — unsloth ungated mirror of google/gemma-4-12B-it)
+#   Model:     Gemma-4-12B-it (bf16 — google/gemma-4-12B-it)
 #   Engine:    vLLM (vllm/vllm-openai:gemma4-unified — Gemma-4 arch-preview image)
 #   Topology:  Dual 3090 PCIe (TP=2, no NVLink → custom all-reduce auto-disabled)
 #   Drafter:   assistant speculative-decode, n=4 (google/gemma-4-12B-it-assistant ~0.5B)
 #   KV:        bf16 / auto — single kv-dtype (vLLM); no FP8/INT8-PTH on this image
 #   Vision:    yes (gemma4_unified is multimodal; served text-only here)
-#   Max ctx:   256K (262144) via local p-RoPE cache overlay. The HF config's trained
-#              max_position_embeddings is 131072, but the model card advertises 256K via
-#              proportional RoPE. Stock gemma4_unified OOB-crashes past 131072 because its
-#              RoPE cache is sized from config.max_position_embeddings; this compose mounts
-#              vllm-gemma4-prope-longctx so the fixed cache is sized from runtime max_model_len.
-#              Drop/re-test when vllm#39914 lands upstream.
+#   Max ctx:   256K (262144) — stock, no overlay. The fixed RoPE cache is sized from
+#              config.max_position_embeddings; google/gemma-4-12B-it (+ the assistant draft)
+#              now ship max_position_embeddings=262144 (upstream config fix, vllm#39914), so
+#              the stock gemma4_unified image serves the full 256K — drafter included.
+#              NIAH exact-recall validated 140K–241K with MTP active (2026-06-04).
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
 #   Status:    🧪 Experimental — validated on 2× 3090 sm_86 (rebench-full 2026-06-04: bench +
-#              soak + 8-pack all pass). Stays 🧪 while the image is an ephemeral arch-preview
-#              tag (gemma4-unified, 0.1.dev) and 256K rides the vendored p-RoPE overlay →
+#              soak + 8-pack all pass; 256K NIAH with MTP re-confirmed overlay-free). Stays 🧪
+#              while the image is an ephemeral arch-preview tag (gemma4-unified, 0.1.dev) →
 #              promote to ⚠️ caveats when gemma4_unified lands in a STABLE vLLM release.
 #   Quality:   94/150 (63%) thinking-OFF default · 85/150 (57%) reasoning-ON (think-ON lower —
 #              over-reasoning/timeouts; thinking-OFF is the default). Soak PASS: 0 err · 0/100
@@ -28,11 +27,12 @@
 # no NVLink), bf16, gemma4 parsers.
 #
 # Validate base.yml first (the sm_86-kernel bring-up test). The draft model
-# `gemma-4-12B-it-assistant` is UNGATED (unlike the base) — fetch it ungated:
+# `gemma-4-12B-it-assistant` (google) carries the same max_position_embeddings=262144
+# config fix the 256K ceiling needs — fetch it from google:
 #   hf download google/gemma-4-12B-it-assistant --local-dir $MODEL_DIR/gemma-4-12b-it-assistant
 # Default SPEC_MODEL below expects it at /root/.cache/huggingface/gemma-4-12b-it-assistant.
 #
-# Weights (base): hf download unsloth/gemma-4-12b-it --local-dir $MODEL_DIR/gemma-4-12b-it
+# Weights (base): hf download google/gemma-4-12B-it --local-dir $MODEL_DIR/gemma-4-12b-it
 # The arch-preview image tag may be ephemeral — pin a digest before shipping.
 
 services:
@@ -47,7 +47,6 @@ services:
       - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
       - ../../../cache/triton:/root/.triton/cache
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
-      - ../../../patches/vllm-gemma4-prope-longctx:/etc/club3090/gemma4-prope-longctx:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
@@ -74,7 +73,6 @@ services:
       - /bin/bash
       - -c
       - |
-        bash /etc/club3090/gemma4-prope-longctx/install.sh
         # PCIe (no NVLink) → inject --disable-custom-all-reduce; NVLink rigs skip it.
         source /etc/club3090/detect_nvlink.sh
         if [ "${_NVLINK_ENABLED:-0}" = "1" ]; then

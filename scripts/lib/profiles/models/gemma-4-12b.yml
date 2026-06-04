@@ -12,10 +12,11 @@ num_kv_heads: 8
 head_dim_sliding: 256
 global_head_dim: 512
 sliding_window: 1024
-# Model card claims 256K via p-RoPE. Stock vLLM gemma4_unified OOB-crashes on
-# prefill past 131072 because the Gemma4 RoPE cache is sized from
-# max_position_embeddings instead of runtime max_model_len (vllm#39914). The
-# local vllm-gemma4-prope-longctx overlay fixes the cache sizing for vLLM.
+# Model card claims 256K via p-RoPE. The Gemma4 RoPE cache is sized from
+# config.max_position_embeddings; google/gemma-4-12B-it now ships 262144 (upstream
+# config fix, vllm#39914), so the stock gemma4_unified image serves the full 256K
+# with no overlay. NIAH exact-recall validated 140K–241K (2026-06-04). The unsloth
+# mirror still lagged at 131072 as of then → bf16 sources from google.
 max_ctx_supported: 262144
 attention_k_eq_v: true
 weights:
@@ -25,7 +26,7 @@ weights:
     size_gb: 23.9
     format: bf16
     status: experimental
-    hf_repo: unsloth/gemma-4-12b-it
+    hf_repo: google/gemma-4-12B-it
     engine: vllm
     kind: main
     verify_glob: "*.safetensors"

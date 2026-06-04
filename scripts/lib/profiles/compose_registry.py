@@ -551,11 +551,12 @@ COMPOSE_REGISTRY = {
     # image (== today's vLLM main; Gemma-4 fixes baked in except the local
     # p-RoPE cache sizing overlay below).
     # bf16 weights (~24 GB) don't fit one 24 GB card with KV → TP=2 mandatory.
-    # Both EXPERIMENTAL: arch-preview image, sm_86 gemma4_unified support
-    # unverified, ephemeral tag (pin a digest before promotion). Max ctx 262144
-    # is enabled by the local vllm-gemma4-prope-longctx overlay, which sizes
-    # Gemma4 p-RoPE caches from runtime max_model_len (vllm#39914). kvcalc
-    # routes through the shared Gemma dense
+    # Both EXPERIMENTAL: arch-preview image, ephemeral tag (pin a digest before
+    # promotion). Max ctx 262144 works on the STOCK image — google/gemma-4-12B-it
+    # ships the corrected max_position_embeddings=262144 (upstream config fix,
+    # vllm#39914), so the former local vllm-gemma4-prope-longctx overlay was dropped
+    # 2026-06-04 (NIAH 140K–241K validated overlay-free, base + MTP). kvcalc routes
+    # through the shared Gemma dense
     # path (gemma4_unified TEXT backbone == gemma4-swa-dense KV family).
     "vllm/gemma-12b": _entry(
         model="gemma-4-12b", weights_variant="bf16", workload="fast-chat",
@@ -565,7 +566,7 @@ COMPOSE_REGISTRY = {
         default_port=8035,
         kvcalc_key="gemma-4-12b:gemma-dual",
         status="experimental",
-        status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16, no drafter. Ephemeral gemma4-unified arch-preview image; sm_86 support UNVERIFIED. Max ctx 262144 via local vllm-gemma4-prope-longctx p-RoPE cache overlay (vllm#39914). Pin a digest before any Production promotion.",
+        status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16, no drafter. Validated on 2x 3090 sm_86 (bench + 256K NIAH 2026-06-04). Ephemeral gemma4-unified arch-preview image. Max ctx 262144 works on the stock image (google/gemma-4-12B-it ships max_position_embeddings=262144, upstream config fix vllm#39914; the local p-RoPE overlay was dropped). Pin a digest before any Production promotion.",
     ),
     "vllm/gemma-12b-mtp": _entry(
         model="gemma-4-12b", weights_variant="bf16", workload="fast-chat",
@@ -575,7 +576,7 @@ COMPOSE_REGISTRY = {
         default_port=8036,
         kvcalc_key="gemma-4-12b:gemma-dual",
         status="experimental",
-        status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16 + assistant spec-dec (n=4). Ephemeral gemma4-unified arch-preview image; sm_86 support UNVERIFIED. Max ctx 262144 via local vllm-gemma4-prope-longctx p-RoPE cache overlay (vllm#39914). Pin a digest before any Production promotion.",
+        status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16 + assistant spec-dec (n=4). rebench-full 2026-06-04: bench + soak + 8-pack pass; 256K NIAH with MTP re-confirmed overlay-free. Ephemeral gemma4-unified arch-preview image. Max ctx 262144 works on the stock image (google/gemma-4-12B-it + assistant ship max_position_embeddings=262144, upstream config fix vllm#39914; the local p-RoPE overlay was dropped). Pin a digest before any Production promotion.",
     ),
 
     # Gemma-4-12B single-card GGUF (Q8_K_XL) — the two engine-native single-3090

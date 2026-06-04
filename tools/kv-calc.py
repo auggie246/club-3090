@@ -409,11 +409,13 @@ def kv_pool_per_card_bytes(spec, kv_format, max_ctx, max_num_seqs, tp, mtp_n=0):
       K and V stored independently → ×2 factor.
 
     For Gemma 4 (SWA + dense MLP):
-      Only the 10 full_attention layers grow KV (at global_head_dim=512).
-      The 50 sliding_attention layers hold a FIXED window of 1024 tokens
-      (constant in ctx, contributes a separate small term).
-      K==V tying IS exploited by vLLM's allocator → ×1 factor (calibrated
-      against BENCHMARKS data; see docs/KV_MATH.md).
+      Only the full_attention layers grow KV (at global_head_dim); the count is
+      read from the spec, not hardcoded — 10/50 full/sliding on the 31B, 8/40 on
+      the 12B. The sliding_attention layers hold a FIXED window (constant in ctx,
+      separate small term). K==V tying IS exploited by vLLM's allocator → ×1
+      factor (calibrated against BENCHMARKS data; see docs/KV_MATH.md).
+      gemma4_unified (12B) overrides the growing per-token with a MEASURED
+      constant (`measured_kv_growing_bpt_tp1`) — see the branch below.
     """
     bpe = KV_FORMAT_BYTES[kv_format]
 

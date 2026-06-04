@@ -24,6 +24,12 @@ model: gemma-4-12b
 # verdict stays correct (TIGHT, boots, peak < 24 GB). To close the residual, add a
 # gemma4-unified-specific overhead calibration ONLY with ≥3 more anchors across
 # KV-format / ctx / TP — do NOT fit the shared term to this single boot.
+#
+# SLIDING-FIXED (per Codex review): the 22,816 B/tok/card above is TOTAL available
+# KV / tokens — NOT net of the ~0.08 GB/card sliding-window fixed term, which kv-calc
+# then ADDS separately. That ~0.08 GB double-count is intentional + conservative
+# (keeps the override one clean measured number); it is NOT an exact growing-vs-fixed
+# decomposition.
 rows:
   - compose: vllm/gemma-12b-mtp
     vram_gb: 24

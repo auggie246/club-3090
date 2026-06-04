@@ -551,24 +551,15 @@ COMPOSE_REGISTRY = {
     # image (== today's vLLM main; Gemma-4 fixes baked in except the local
     # p-RoPE cache sizing overlay below).
     # bf16 weights (~24 GB) don't fit one 24 GB card with KV → TP=2 mandatory.
-    # Both EXPERIMENTAL: arch-preview image, ephemeral tag (pin a digest before
-    # promotion). Max ctx 262144 works on the STOCK image — google/gemma-4-12B-it
-    # ships the corrected max_position_embeddings=262144 (upstream config fix,
-    # vllm#39914), so the former local vllm-gemma4-prope-longctx overlay was dropped
-    # 2026-06-04 (NIAH 140K–241K validated overlay-free, base + MTP). kvcalc routes
-    # through the shared Gemma dense
-    # path (gemma4_unified TEXT backbone == gemma4-swa-dense KV family).
-    "vllm/gemma-12b": _entry(
-        model="gemma-4-12b", weights_variant="bf16", workload="fast-chat",
-        engine="vllm-gemma4-unified", drafter=None, kv_format="bf16",
-        tp=2, max_ctx=262144, max_num_seqs=4, mem_util=0.90,
-        compose_path="models/gemma-4-12b/vllm/compose/dual/bf16/base.yml",
-        default_port=8035,
-        kvcalc_key="gemma-4-12b:gemma-dual",
-        status="experimental",
-        status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16, no drafter. Validated on 2x 3090 sm_86 (bench + 256K NIAH 2026-06-04). Ephemeral gemma4-unified arch-preview image. Max ctx 262144 works on the stock image (google/gemma-4-12B-it ships max_position_embeddings=262144, upstream config fix vllm#39914; the local p-RoPE overlay was dropped). Pin a digest before any Production promotion.",
-    ),
-    "vllm/gemma-12b-mtp": _entry(
+    # Gemma-4-12B vLLM (gemma4_unified arch-preview image, ephemeral tag — pin a
+    # digest before promotion). 256K works on the STOCK image: google/gemma-4-12B-it
+    # ships max_position_embeddings=262144 (upstream config fix, vllm#39914), so the
+    # former local vllm-gemma4-prope-longctx overlay was dropped 2026-06-04 (NIAH
+    # 140K–241K validated overlay-free). kvcalc routes through the shared Gemma dense
+    # path (gemma4_unified TEXT backbone == gemma4-swa-dense KV family). Only the MTP
+    # variants ship (the no-drafter base composes were pruned — MTP is lossless and
+    # fits the full 262144, so the bases bought nothing).
+    "vllm/gemma-12b-dual-bf16-mtp": _entry(
         model="gemma-4-12b", weights_variant="bf16", workload="fast-chat",
         engine="vllm-gemma4-unified", drafter="gemma-12b-it-assistant", kv_format="bf16",
         tp=2, max_ctx=262144, max_num_seqs=4, mem_util=0.90,
@@ -576,25 +567,9 @@ COMPOSE_REGISTRY = {
         default_port=8036,
         kvcalc_key="gemma-4-12b:gemma-dual",
         status="experimental",
-        status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16 + assistant spec-dec (n=4). rebench-full 2026-06-04: bench + soak + 8-pack pass; 256K NIAH with MTP re-confirmed overlay-free. Ephemeral gemma4-unified arch-preview image. Max ctx 262144 works on the stock image (google/gemma-4-12B-it + assistant ship max_position_embeddings=262144, upstream config fix vllm#39914; the local p-RoPE overlay was dropped). Pin a digest before any Production promotion.",
+        status_note="Gemma-4-12B (gemma4_unified, vLLM PR #44429) dual-3090 bf16 + assistant spec-dec (n=4). rebench-full 2026-06-04: bench + soak PASS + 8-pack 94/150; 256K NIAH overlay-free. Ephemeral gemma4-unified arch-preview image; 256K from the stock config fix (vllm#39914, overlay dropped). Pin a digest before any Production promotion.",
     ),
-    # Gemma-4-12B single-card vLLM — Intel AutoRound INT8 (W8A16 on Ampere) on the
-    # gemma4_unified image. Validated single 3090 sm_86 2026-06-04: int8 loads, coherent,
-    # KV pool ~433K tokens holds the FULL 262144 (NIAH 140K-241K exact-recall). No overlay.
-    "vllm/gemma-12b-int8": _entry(
-        model="gemma-4-12b", weights_variant="autoround-int8", workload="fast-chat",
-        engine="vllm-gemma4-unified", drafter=None, kv_format="bf16",
-        tp=1, max_ctx=262144, max_num_seqs=4, mem_util=0.92,
-        compose_path="models/gemma-4-12b/vllm/compose/single/autoround-int8/base.yml",
-        default_port=8037,
-        kvcalc_key="gemma-4-12b:gemma-single-int8",
-        status="experimental",
-        status_note="Gemma-4-12B Intel AutoRound INT8 (W8A16) single 3090 on the gemma4_unified arch-preview image. Validated 2026-06-04: int8 loads on sm_86, coherent, KV pool ~433K tokens holds the full 262144 (NIAH exact-recall 140K/170K/200K/230K/241K). bf16 KV only (no fp8/INT8-PTH on this image). The high-fidelity single-card vLLM path; INT4 would trade quality for more concurrency. Ephemeral tag — pin a digest before any Production promotion.",
-    ),
-    # Same INT8, + assistant external-drafter spec-decode (n=4). MTP fits the full
-    # 262144 on one card (drafter resident, KV pool ~310K tok). n-sweep 2026-06-04
-    # (code-gen): n2 96.7 / n3 115.5 / n4 117.0 / n5 122.5 TPS vs ~50 no-MTP.
-    "vllm/gemma-12b-int8-mtp": _entry(
+    "vllm/gemma-12b-single-int8-mtp": _entry(
         model="gemma-4-12b", weights_variant="autoround-int8", workload="fast-chat",
         engine="vllm-gemma4-unified", drafter="gemma-12b-it-assistant", kv_format="bf16",
         tp=1, max_ctx=262144, max_num_seqs=4, mem_util=0.92,
@@ -602,7 +577,7 @@ COMPOSE_REGISTRY = {
         default_port=8038,
         kvcalc_key="gemma-4-12b:gemma-single-int8-mtp",
         status="experimental",
-        status_note="Gemma-4-12B Intel AutoRound INT8 (W8A16) + assistant external drafter (n=4) single 3090 on the gemma4_unified arch-preview image. MTP fits the full 262144 (drafter resident, KV pool ~310K tok, 1.18x at 262K, ~20.7 GB). n-sweep 2026-06-04 code-gen: n=4 117 TPS / accept_len 3.67 (n=5 122.5 for code-max via SPEC_N=5) vs ~50 no-MTP. Output is lossless vs base.yml. bf16 KV only. Ephemeral tag — pin a digest before any Production promotion.",
+        status_note="Gemma-4-12B Intel AutoRound INT8 (W8A16) + assistant external drafter (n=4) single 3090 on the gemma4_unified arch-preview image. MTP fits the full 262144 (drafter resident, KV pool ~310K tok, 1.18x at 262K, ~20.7 GB). n-sweep 2026-06-04 code-gen: n=4 117 TPS / accept_len 3.67 (n=5 122.5 code-max via SPEC_N=5) vs ~50 no-MTP. 8-pack 105/150 (on par with the bf16 dual's 94/150 — INT8≈bf16). bf16 KV only. Ephemeral tag — pin a digest before any Production promotion.",
     ),
 
     # Gemma-4-12B single-card GGUF (Q8_K_XL) — the two engine-native single-3090
@@ -610,7 +585,7 @@ COMPOSE_REGISTRY = {
     # (kvcalc SKIP, no vLLM kv-calc); 256K via `--override-kv` p-RoPE; no
     # spec-dec (gemma4 MTP draft arch unmerged, llama.cpp#23398). NIAH-clean to
     # 246K on a single 3090.
-    "beellama/gemma-12b": _entry(
+    "beellama/gemma-12b-single-q8kxl": _entry(
         model="gemma-4-12b", weights_variant="beellama-q8kxl", workload="fast-chat",
         engine="beellama-local", drafter=None, kv_format="q5_0",
         tp=1, max_ctx=262144, max_num_seqs=1, mem_util=None,
@@ -620,7 +595,7 @@ COMPOSE_REGISTRY = {
         status="experimental",
         status_note="Gemma-4-12B Q8_K_XL single-3090 on beellama.cpp (q5_0(K)/q4_1(V) KV, 256K via --override-kv, no spec-dec). NIAH-clean to 246K. Launchers inject Anbeeld's official server-cuda-v0.3.0 image (sm_86). v0.3.0 is a DEV branch → experimental; promote on a stable tag.",
     ),
-    "llamacpp/gemma-12b": _entry(
+    "llamacpp/gemma-12b-single-q8kxl": _entry(
         model="gemma-4-12b", weights_variant="unsloth-q8kxl", workload="fast-chat",
         engine="llama-cpp-local", drafter=None, kv_format="q8_0",
         tp=1, max_ctx=262144, max_num_seqs=1, mem_util=None,
@@ -628,7 +603,7 @@ COMPOSE_REGISTRY = {
         default_port=8069,
         kvcalc_key="SKIP",
         status="experimental",
-        status_note="Gemma-4-12B Q8_K_XL single-3090 on mainline llama.cpp (q8_0 KV, 256K via --override-kv, no spec-dec). NIAH-clean to 246K. The no-fork mainline sibling of beellama/gemma-12b; no Gemma-4 spec-dec until llama.cpp#23398 merges.",
+        status_note="Gemma-4-12B Q8_K_XL single-3090 on mainline llama.cpp (q8_0 KV, 256K via --override-kv, no spec-dec). NIAH-clean to 246K. The no-fork mainline sibling of beellama/gemma-12b-single-q8kxl; no Gemma-4 spec-dec until llama.cpp#23398 merges.",
     ),
 
     # Gemma-4-31B beellama.cpp DFlash — single-card DEFAULT (Q4_K_S target +

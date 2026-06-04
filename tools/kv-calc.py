@@ -110,7 +110,7 @@ def _load_model_specs_from_yaml(profiles):
     # (~13 GB, W8A16) + a small assistant drafter; there is no int4/awq variant,
     # so weights_int4_gb/weights_awq_gb point at the bf16 blob (23.9 GB) to keep
     # _weights_per_card_gb()'s branch from KeyError'ing, while weights_int8_gb
-    # carries the real INT8 footprint (the single-card vllm/gemma-12b-int8 path).
+    # carries the real INT8 footprint (vllm/gemma-12b-single-int8-mtp path).
     # Activation/overhead constants stay the SHARED Gemma dense constants (NOT
     # re-tuned). The ONE measured calibration is the growing KV per-token —
     # `measured_kv_growing_bpt_tp1` (see kv_pool_per_card_bytes): gemma4_unified's
@@ -254,7 +254,7 @@ COMPOSE_ALIAS_TEXT = {
     # bare `gemma-dual` string here is harmless — compat + the CLI always pass
     # an explicit --model, and the reverse map is keyed by (unique) registry
     # slug. `gemma-dual` → the MTP dual; `gemma-no-mtp` → the no-drafter dual.
-    "gemma-4-12b": "gemma-dual=vllm/gemma-12b-mtp gemma-no-mtp=vllm/gemma-12b gemma-single-int8=vllm/gemma-12b-int8 gemma-single-int8-mtp=vllm/gemma-12b-int8-mtp",
+    "gemma-4-12b": "gemma-dual=vllm/gemma-12b-dual-bf16-mtp gemma-single-int8-mtp=vllm/gemma-12b-single-int8-mtp",
     "gemma-4-26b-a4b": "gemma-a4b-single=vllm/gemma-a4b-single gemma-a4b=vllm/gemma-a4b gemma-a4b-awq=vllm/gemma-a4b-awq gemma-a4b-awq-mtp=vllm/gemma-a4b-awq-mtp",
 }
 COMPOSE_ALIASES = {model: tuple(part.split("=", 1) for part in text.split()) for model, text in COMPOSE_ALIAS_TEXT.items()}

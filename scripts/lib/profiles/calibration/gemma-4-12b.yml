@@ -31,7 +31,7 @@ model: gemma-4-12b
 # (keeps the override one clean measured number); it is NOT an exact growing-vs-fixed
 # decomposition.
 rows:
-  - compose: vllm/gemma-12b-mtp
+  - compose: vllm/gemma-12b-dual-bf16-mtp
     vram_gb: 24
     measured_peak_gb: 21.6
     ctx_override: null
@@ -39,11 +39,3 @@ rows:
     engine_pin: vllm-gemma4-unified
     genesis_pin: null
     source: "gemma4-unified boot log @2026-06-04 (KV 384,019 tok / 8.16 GiB avail / 2.93× conc, TP=2 bf16 131072 mem_util 0.90, MTP drafter resident)"
-  - compose: vllm/gemma-12b
-    vram_gb: 24
-    measured_peak_gb: 21.6
-    ctx_override: null
-    status: active
-    engine_pin: vllm-gemma4-unified
-    genesis_pin: null
-    source: "gemma4-unified boot log @2026-06-04 (no-drafter sibling of the MTP anchor; same budget-filling KV-pool reservation, peak ≈ budget)"

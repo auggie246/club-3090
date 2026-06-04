@@ -21,12 +21,13 @@
 #              silent-empty · 0 MiB growth · p50 115.7 TPS · 94.8% retention. rebench-full 2026-06-04.
 #   Best for:  the target config — dual-3090 Gemma-4-12B + assistant spec-dec (vLLM's recipe, Ampere-adapted)
 # ---------------------------------------------------------------------------
-# base.yml (no-draft sibling) + the assistant speculative-decode draft, mirroring
-# the gemma-4-31b dual's --speculative-config. Ampere form: TP=2 + the
+# Dual-3090 bf16 + the assistant speculative-decode draft, mirroring the
+# gemma-4-31b dual's --speculative-config. Ampere form: TP=2 + the
 # detect_nvlink.sh entrypoint that injects --disable-custom-all-reduce (PCIe,
-# no NVLink), bf16, gemma4 parsers.
+# no NVLink), bf16, gemma4 parsers. (The no-draft base compose was pruned —
+# MTP is lossless and fits the full 262144, so it bought nothing.)
 #
-# Validate base.yml first (the sm_86-kernel bring-up test). The draft model
+# The draft model
 # `gemma-4-12B-it-assistant` (google) carries the same max_position_embeddings=262144
 # config fix the 256K ceiling needs — fetch it from google:
 #   hf download google/gemma-4-12B-it-assistant --local-dir $MODEL_DIR/gemma-4-12b-it-assistant

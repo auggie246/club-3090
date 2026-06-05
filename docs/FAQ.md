@@ -149,6 +149,20 @@ AutoRound (Lorbus) gave us +9% TPS over AWQ on this model. GPTQ has a similar qu
 
 ---
 
+## Image & video generation
+
+### Can I generate images or video on the rig?
+
+Yes — but **not through the LLM stack.** The text models (Qwen3.6 / Gemma) and even **Qwen3-Omni generate text/speech only** (Omni adds *speech*, not images). For image/video **generation**, use **[ComfyUI](https://github.com/comfyanonymous/ComfyUI)** — the mature diffusion runtime (GGUF / NF4 / fp8 quants, LoRA, ControlNet, day-0 model support) — on a **free card** (these models want a dedicated 24 GB GPU, not co-residence with an LLM; see the next Q). For a unified UI, **[Open WebUI](https://github.com/open-webui/open-webui)** can drive both: chat against the LLM endpoints **and** trigger image gen via a ComfyUI backend.
+
+Open-weight models that fit one 3090 (run in ComfyUI): **FLUX.1-dev** (Q8 — aesthetic benchmark), **Qwen-Image** (best text-in-image), **FLUX.2-klein-4B** / **Z-Image-Turbo** (lighter/faster), **HiDream-I1**, **Ideogram-4** (top open quality, ~whole card). Video: **Cosmos3-Nano** / **LTX-2** are feasible on one card; **Wan2.2** / **HunyuanVideo-1.5** are tight. Worked-out shortlist + VRAM sizes: [`models/qwen3-omni-30b-a3b/vllm-omni/README.md`](../models/qwen3-omni-30b-a3b/vllm-omni/README.md).
+
+### Why does my image model OOM even though the transformer quant is small?
+
+The **text encoder.** Image models bundle a big one — FLUX.1 → T5-XXL (~5–8 GB), FLUX.2-klein / Z-Image → Qwen3-4B (~8 GB), Ideogram-4 → Qwen3-VL-8B, FLUX.2-*dev* → Mistral-3-24B. A "4 GB" transformer GGUF can still need **12–16 GB** once the encoder + VAE + activations load. **Always size the full pipeline, not just the transformer.** GGUF shrinks only the transformer; the encoder needs separate quant or CPU offload. (For diffusion, GGUF **Q5/Q6 ≈ near-lossless**, and FLUX-class tolerates Q4 well.)
+
+---
+
 ## Performance
 
 ### Why is single-card TPS lower than I expected?

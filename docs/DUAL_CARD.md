@@ -251,6 +251,16 @@ As more models land, they'll show up here with their dual-card compose set.
 
 ---
 
+## Heads-up: multimodal & image/video models on dual cards
+
+Two lessons that generalize beyond the LLM composes above (learned wiring up Qwen3-Omni + scoping image generation on 2× 3090):
+
+- **Size the *full pipeline*, not the transformer.** Multimodal and diffusion models bundle a large **text encoder** (8–24 GB: T5-XXL, Qwen3-4B, Qwen3-VL-8B, Mistral-3-24B). A small quantized transformer can still blow a 24 GB card once the encoder + VAE + activations load — so an image model generally **won't co-reside** with an LLM on one card. Give it a dedicated card or **time-share** (run it when the LLM isn't).
+- **Reach full context with fp8/int8 KV on a single card before reaching for TP/PP.** On PCIe-no-NVLink, tensor/pipeline parallelism pays a per-layer cross-card cost; halving the KV (fp8 / int8) often gets a model to its **full native context on *one* card** with zero cross-card traffic — strictly better here. (Qwen3-Omni's thinker reached its full 65 K single-card via fp8 KV — no TP/PP needed.)
+- **Image/video generation → use ComfyUI on a freed card**, not the LLM stack. Sized model shortlist + the Open WebUI → ComfyUI UI pattern: [FAQ.md → Image & video generation](FAQ.md#image--video-generation).
+
+---
+
 ## Deep dives
 
 ### Qwen3.6-27B

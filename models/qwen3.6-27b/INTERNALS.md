@@ -148,7 +148,7 @@ else:
     output = marlin_gemm(weight)         # original fast path
 ```
 
-Status: PR is **OPEN, MERGEABLE**, labeled `bug`, sitting in maintainer queue. When it lands, drop the `/opt/ai/engines/vllm/primary/` mount from the dual compose. Until then, the volume-mount path lets users get the fix without forking themselves.
+Status: PR is **OPEN, MERGEABLE**, labeled `bug`, sitting in maintainer queue. When it lands, drop the marlin-pad overlay from the dual composes. Until then, the vendored overlay (`vllm/patches/vllm-marlin-pad/{marlin.py,MPLinearKernel.py}`, mounted read-only into the stock image by each dual compose) gives users the fix with no fork or clone.
 
 ---
 
@@ -203,7 +203,7 @@ For Sandermage's documented numbers on his A5000 setup, see his [MODELS.md](http
 | [vllm#40914](https://github.com/vllm-project/vllm/pull/40914) | **OPEN, negative locally** | Synthetic-args K+1 route. Local rebase stabilized acceptance but corrupted output (`!` flood) and broke tool/multi-turn; dropping it improved to 5/7 but did not close needles. Not a P67-equivalent for this stack. |
 | [PR #40798](https://github.com/vllm-project/vllm/pull/40798) | Hypothesized fix that didn't pan out | Workspace-manager refactor. Probe 8 backported it; bug persisted. Useful negative result documented on the PR thread. |
 
-When PR #40361 lands, we drop the `/opt/ai/engines/vllm/primary/` mount from dual composes. Do not assume PR #40914 alone makes Genesis-free TQ+MTP shippable; re-test only when upstream has a P67-equivalent multi-query correctness fix.
+When PR #40361 lands, we drop the marlin-pad overlay from dual composes. Do not assume PR #40914 alone makes Genesis-free TQ+MTP shippable; re-test only when upstream has a P67-equivalent multi-query correctness fix.
 
 ---
 

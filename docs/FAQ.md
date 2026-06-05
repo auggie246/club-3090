@@ -368,6 +368,20 @@ You'll usually find out you're behind before you ask: `launch.sh` and `switch.sh
 
 If your *Genesis tree* (not the repo) is out of sync — the pin in `setup.sh` moved but you didn't re-run setup — `preflight_genesis_pin` warns separately and tells you to run `setup.sh`. That was the failure mode behind [#32](https://github.com/noonghunna/club-3090/issues/32) and wispborne's `_register_op_once` crash.
 
+### How do I run fully offline / air-gapped (no Hugging Face access)?
+
+Even with the weights already on disk and `--model` pointed at a local path, vLLM/transformers still reach out to Hugging Face to resolve config/tokenizer metadata — so a sealed network makes startup hang or fail. Two things:
+
+1. **Set `OFFLINE=1`** (or the individual `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`). Every vLLM compose passes these through to the container, default-off, so it's one flag:
+   ```bash
+   OFFLINE=1 docker compose -f <compose>.yml up    # or export it / put it in your .env
+   ```
+   With it set, vLLM uses local files only and never phones home.
+
+2. **Pre-download everything the compose loads — including gated drafters.** Speculative-decoding composes (`*-mtp.yml`, `dflash.yml`) also load an assistant/MTP drafter, often a **gated** repo (e.g. `google/gemma-4-12B-it-assistant`). If only the main model is local, boot will still try to fetch the drafter. Either grab it too (into `MODEL_DIR`, while you still have network), or drop the `--speculative-config` lines to run the main model alone.
+
+`MODEL_DIR` is the directory *containing* the model folder; the container serves `/root/.cache/huggingface/<MODEL_SUBDIR>`. On WSL2, keep weights on ext4 (not `/mnt/<drive>`) — see [WSL_SETUP.md](WSL_SETUP.md).
+
 ### My GPU isn't card 0 — how do I change it?
 
 Use the `--gpus` flag: `bash scripts/launch.sh --gpus 2` (single-card) or `bash scripts/launch.sh --gpus 2,3` (two cards). The wizard exports `CUDA_VISIBLE_DEVICES` for you. The older form `CUDA_VISIBLE_DEVICES=2 bash scripts/launch.sh --variant vllm/default` still works if you prefer to set the env yourself.

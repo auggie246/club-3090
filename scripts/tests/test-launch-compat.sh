@@ -31,25 +31,26 @@ assert_not_contains() {
 }
 
 out="$(python3 "$HELPER" filter-candidates \
-  --variants vllm/long-text,vllm/minimal,llamacpp/default \
+  --variants vllm/dual,vllm/minimal,llamacpp/default \
   --model qwen3.6-27b \
   --gpu-spec "$GPU_3090" \
   --tp 1 \
   --pp 1 \
   --workload fast-chat)"
 assert_contains "$out" "vllm/minimal"
-assert_not_contains "$out" "vllm/long-text"
+assert_not_contains "$out" "vllm/dual"
 
 out="$(python3 "$HELPER" filter-candidates \
-  --variants vllm/long-text,llamacpp/default,llamacpp/mtp \
+  --variants vllm/dual-dflash,vllm/minimal,llamacpp/default,llamacpp/mtp \
   --model qwen3.6-27b \
   --gpu-spec "$GPU_3090" \
   --tp 1 \
   --pp 1 \
   --stable)"
+assert_contains "$out" "vllm/minimal"
 assert_contains "$out" "llamacpp/default"
 assert_contains "$out" "llamacpp/mtp"
-assert_not_contains "$out" "vllm/long-text"
+assert_not_contains "$out" "vllm/dual-dflash"
 
 if out="$(python3 "$HELPER" validate-variant \
   --variant vllm/gemma-mtp-tp1 \
@@ -65,14 +66,14 @@ assert_contains "$out" "C1: tp=2 * pp=1 = 2 != 1 cards selected"
 assert_contains "$out" "C5: kv_format=fp8_e4m3 not supported by hardware: rtx-3090"
 
 out="$(python3 "$HELPER" validate-variant \
-  --variant vllm/long-text \
+  --variant vllm/minimal \
   --gpu-spec "$GPU_3090" \
   --tp 1 \
   --pp 1 \
   --no-project-vram \
   --verbose 2>&1)"
 assert_contains "$out" "Pass 1 fits()"
-assert_contains "$out" "Resolved compose: vllm/long-text"
+assert_contains "$out" "Resolved compose: vllm/minimal"
 assert_contains "$out" "Pass 2 fits()"
 
 out="$(python3 "$HELPER" resolve-engine-pin --engine-id vllm-nightly-mtp --format shell)"
@@ -88,8 +89,8 @@ assert_contains "$out" "install.spec is not a docker image"
 out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell)"
 assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.22.0"
 
-out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual-tq3-mtp --format shell)"
-assert_contains "$out" "VLLM_NIGHTLY_SHA=${MTP_SHA}"
+out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual-dflash --format shell)"
+assert_contains "$out" "VLLM_NIGHTLY_SHA=${DFLASH_SHA}"
 
 out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/gemma-int8-mtp --format shell)"
 assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.22.0"
@@ -107,14 +108,14 @@ from scripts.lib.profiles.compat import InstanceSpec
 from scripts.lib.profiles.estate_cli import compose_env
 
 clean = compose_env(InstanceSpec(name="qwen", compose_name="vllm/dual", gpu_indices=(0, 1), port=8010))
-tq3 = compose_env(InstanceSpec(name="qwen-tq3", compose_name="vllm/dual-tq3-mtp", gpu_indices=(0, 1), port=8010))
+dflash = compose_env(InstanceSpec(name="qwen-dflash", compose_name="vllm/dual-dflash", gpu_indices=(0, 1), port=8012))
 gemma = compose_env(InstanceSpec(name="gemma", compose_name="vllm/gemma-int8-mtp", gpu_indices=(0, 1), port=8032))
 print(clean["VLLM_IMAGE"])
-print(tq3["VLLM_NIGHTLY_SHA"])
+print(dflash["VLLM_NIGHTLY_SHA"])
 print(gemma["VLLM_IMAGE"])
 PY
 )"
 assert_contains "$out" "vllm/vllm-openai:v0.22.0"
-assert_contains "$out" "$MTP_SHA"
+assert_contains "$out" "$DFLASH_SHA"
 
 echo "test-launch-compat: ok"

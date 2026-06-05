@@ -10,10 +10,10 @@
 # Asserts:
 #   stratum-2: non-vLLM --profile-like (llamacpp/default) ->
 #              unsupported-runtime-engine; Path-A non-emittable
-#              (vllm/dual-turbo genesis) -> refuse; Path-A model/variant
+#              (synthetic Genesis profile) -> refuse; Path-A model/variant
 #              mismatch -> refuse.
 #   [C0]:      engine-supported happy (curated, loads:true, sm ok);
-#              loads:false arch row -> runtime-incompatible (non-bypassable);
+#              missing loads:true arch row -> runtime-incompatible (non-bypassable);
 #              no matrix row -> no-arch-row (bypassable tag);
 #              tp ∉ valid-TP -> runtime-incompatible;
 #              SM gate: Gemma-TQ3 / fp8_e4m3 required_sm 9.0 on simulated
@@ -41,6 +41,7 @@ sys.path.insert(0, str(root))
 from scripts.lib.profiles import gates as G  # noqa: E402
 from scripts.lib.profiles import deriver as D  # noqa: E402
 from scripts.lib.profiles.compat import load_profiles  # noqa: E402
+from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY  # noqa: E402
 
 failures: list[str] = []
 
@@ -124,16 +125,32 @@ check(
     "stratum-2: llamacpp/default -> unsupported-runtime-engine (Path A too)",
 )
 
-# Path-A non-emittable (vllm/dual-turbo is genesis_equipped:true) -> refuse
-# BEFORE [C0] (reuses [D] scope-gate).
+# Path-A non-emittable Genesis profile -> refuse BEFORE [C0]
+# (reuses [D] scope-gate). No Genesis-equipped compose remains in the
+# registry post-#254, so synthesize the registry/runtime bits consumed here.
+synth_registry = dict(COMPOSE_REGISTRY)
+synth_registry["synthetic/genesis"] = dict(COMPOSE_REGISTRY["vllm/minimal"])
+synth_registry["synthetic/genesis"]["engine"] = "vllm-nightly-mtp"
+synth_runtime = {
+    "profiles": {
+        "synthetic/genesis": {
+            "genesis_equipped": True,
+            "genesis_equipped_evidence": "synthetic test fixture",
+        }
+    }
+}
 s2_turbo = G.stratum2_profile_like(
-    "vllm/dual-turbo", path="A", derive_result=CURATED
+    "synthetic/genesis",
+    path="A",
+    derive_result=CURATED,
+    registry=synth_registry,
+    runtime=synth_runtime,
 )
 check(
     not s2_turbo.ok
     and s2_turbo.refusal is not None
     and s2_turbo.refusal.reason == "profile-not-emittable",
-    f"stratum-2: vllm/dual-turbo (genesis) -> profile-not-emittable "
+    f"stratum-2: synthetic Genesis profile -> profile-not-emittable "
     f"(got {s2_turbo.refusal})",
 )
 
@@ -184,12 +201,10 @@ check(
     "[C0]: engine-supported carries no bypass tag",
 )
 
-# loads:false arch row -> runtime-incompatible (non-bypassable). The MoE
-# arch Qwen3_5MoeForConditionalGeneration has the vllm-nightly-mtp@01d4d1ad
-# pin marked loads:false (Genesis re-anchor pending). Path-B: arch comes
-# from config; vllm/default's engine is vllm-nightly-mtp -> the [D]
-# engine-pin resolver hits the loads:false pin and refuses.
-from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY  # noqa: E402
+# Missing loads:true arch row -> runtime-incompatible (non-bypassable). The MoE
+# arch Qwen3_5MoeForConditionalGeneration has no loads:true row for the
+# vllm-nightly-dflash pin. Path-B: arch comes from config; vllm/dual-dflash's
+# engine is vllm-nightly-dflash -> the [D] engine-pin resolver refuses.
 
 MOE_DERIVED = mk_result(
     "fixtures/qwen-35b-a3b-moe",
@@ -200,13 +215,13 @@ MOE_DERIVED = mk_result(
     },
 )
 c0_loadsfalse = G.c0_engine_support(
-    "vllm/default", MOE_DERIVED, path="B", hardware_sm=SM_90
+    "vllm/dual-dflash", MOE_DERIVED, path="B", hardware_sm=SM_90
 )
 check(
     c0_loadsfalse.state == G.C0State.ENGINE_SUPPORT_UNKNOWN
     and c0_loadsfalse.sub_reason == G.C0SubReason.RUNTIME_INCOMPATIBLE
     and c0_loadsfalse.bypassable_by == (),
-    f"[C0]: loads:false pin -> runtime-incompatible NON-bypassable "
+    f"[C0]: missing loads:true pin -> runtime-incompatible NON-bypassable "
     f"(got {c0_loadsfalse.state}/{c0_loadsfalse.sub_reason}/"
     f"{c0_loadsfalse.bypassable_by}: {c0_loadsfalse.detail})",
 )
@@ -229,7 +244,7 @@ check(
 )
 
 # tp ∉ valid-TP -> runtime-incompatible. The MoE arch valid_tp.tp_divisors
-# is [1,2]; vllm/dual-turbo refused at stratum-2, so synthesise via a Gemma
+# is [1,2]; archived Genesis profiles are gone, so synthesise via a Gemma
 # MoE arch (tp_divisors [1,2]) on a tp=2 ... instead use a known case: pick
 # a profile whose tp is outside the arch's divisors. Llama arch divisors
 # [1,2]; no tp=4 Llama profile. Use Gemma4ForConditionalGenerationMoE

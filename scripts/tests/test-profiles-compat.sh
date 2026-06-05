@@ -415,7 +415,7 @@ run_test "estate self-test: Qwen plus Gemma on 4x3090" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, InstanceSpec, validate_estate
 p = load_profiles()
 instances = [
-    InstanceSpec("qwen", "vllm/dual-turbo", (0, 1), 8011),
+    InstanceSpec("qwen", "vllm/dual", (0, 1), 8010),
     InstanceSpec("gemma", "vllm/gemma-int8-mtp", (2, 3), 8032),
 ]
 r = validate_estate(instances, [p.hardware["rtx-3090"]] * 4, p, nvlink_active=False)

@@ -397,15 +397,10 @@ check(r.stratum is P.Stratum.PROFILE_LIKE
       f"g13: llamacpp/default -> stratum-2 unsupported-runtime-engine "
       f"(got {r.stratum.name}/{r.abort_reason})")
 
-# g0: Path-A non-emittable profile (vllm/dual-turbo, genesis_equipped) ->
-# stratum-2 profile-not-emittable BEFORE [C0].
-r = P.run_pull(CURATED_SLUG, "vllm/dual-turbo", path="A",
-                hardware_sm=SM_86, fetcher=NoNet(), profiles=profiles,
-                statvfs=BIG_DISK)
-check(r.stratum is P.Stratum.PROFILE_LIKE
-      and r.abort_reason == "profile-not-emittable",
-      f"g0: vllm/dual-turbo (genesis) -> stratum-2 profile-not-emittable "
-      f"(got {r.stratum.name}/{r.abort_reason})")
+# g0: Genesis profile-not-emittable coverage moved to test-pullgate-gates,
+# where the gate accepts synthetic registry/runtime fixtures. No
+# Genesis-equipped compose remains in COMPOSE_REGISTRY post-#254, and
+# run_pull() intentionally takes only real registry profile-like slugs.
 
 # g3b: Path-A model/variant mismatch -> stratum-2 profile-mismatch.
 # vllm/gemma-bf16-mtp is vLLM + emittable but model=gemma-4-31b != curated qwen.
@@ -530,8 +525,8 @@ check(r.ok and r.stratum is P.Stratum.DECIDED,
       "g6b: BOTH flags (+ --yes) -> clears stratum-3 -> Path-B verdict")
 
 # g10: runtime-incompatible is NON-bypassable; --experimental-arch does
-# NOT bypass it. Curated MoE arch with a loads:false pin (Path B, arch from
-# config) -> runtime-incompatible.
+# NOT bypass it. Curated MoE arch with no loads:true row for the selected
+# engine pin (Path B, arch from config) -> runtime-incompatible.
 s = "fixtures/qwen35-moe"
 moe = {
     "model_type": "qwen3_5_moe",
@@ -540,14 +535,14 @@ moe = {
     "num_attention_heads": 32, "num_key_value_heads": 8,
     "num_local_experts": 128, "torch_dtype": "bfloat16",
 }
-r = P.run_pull(s, "vllm/default", path="B", hardware_sm=SM_90,
+r = P.run_pull(s, "vllm/dual-dflash", path="B", hardware_sm=SM_90,
                 fetcher=ff_derived(s, moe), profiles=profiles,
                 statvfs=BIG_DISK)
 check(r.stratum is P.Stratum.C0
       and r.abort_reason == "engine-support-unknown/runtime-incompatible",
-      f"g10: loads:false pin -> stratum-3 runtime-incompatible "
+      f"g10: missing loads:true pin -> stratum-3 runtime-incompatible "
       f"(got {r.stratum.name}/{r.abort_reason})")
-r = P.run_pull(s, "vllm/default", path="B", hardware_sm=SM_90,
+r = P.run_pull(s, "vllm/dual-dflash", path="B", hardware_sm=SM_90,
                 fetcher=ff_derived(s, moe), profiles=profiles,
                 statvfs=BIG_DISK, experimental_arch=True)
 check(r.stratum is P.Stratum.C0
@@ -839,7 +834,7 @@ for _pl in ("vllm/minimal", "vllm/dual"):
 # Path-B structural isolation: NO Path-B run can ever set emitted/
 # compose_text. Sweep a representative matrix.
 pathb_emit = False
-for pl in ("vllm/minimal", "vllm/dual", "vllm/tools-text"):
+for pl in ("vllm/minimal", "vllm/dual", "vllm/qwen-35b-a3b-dual"):
     rb = P.run_pull(CURATED_SLUG, pl, dry_run=True, hardware_sm=SM_86,
                     fetcher=NoNet(), profiles=profiles, statvfs=BIG_DISK,
                     yes=True, force_download=True)
@@ -944,7 +939,7 @@ r_norow = P.run_pull(s, "vllm/minimal", path="B", hardware_sm=SM_86,
 check(r_norow.ok or r_norow.stratum is not P.Stratum.C0,
       "scope: --experimental-arch BYPASSES no-arch-row")
 check(
-    P.run_pull("fixtures/qwen35-moe2", "vllm/default", path="B",
+    P.run_pull("fixtures/qwen35-moe2", "vllm/dual-dflash", path="B",
                hardware_sm=SM_90,
                fetcher=ff_derived("fixtures/qwen35-moe2", {
                    "model_type": "qwen3_5_moe",

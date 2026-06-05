@@ -210,8 +210,28 @@ def expect_refuse(profile: str, code: int, needle: str, accept_degraded=False,
                     os.environ[k] = v
 
 
-# genesis_equipped:true -> clean refuse (vllm/tools-text is genesis_equipped).
-expect_refuse("vllm/tools-text", gc.EXIT_REFUSE, "genesis_equipped:true")
+# genesis_equipped:true -> clean scope-gate refuse. No Genesis-equipped
+# compose remains in the registry post-#254, so synthesize the profile_runtime
+# bit that scope_gate consumes.
+genesis_runtime = {
+    "profiles": {
+        "synthetic/genesis": {
+            "genesis_equipped": True,
+            "genesis_equipped_evidence": "synthetic test fixture",
+        }
+    }
+}
+try:
+    gc.scope_gate(
+        "vllm-nightly-mtp",
+        gc.load_engine(root, "vllm-nightly-mtp"),
+        genesis_runtime,
+        "synthetic/genesis",
+    )
+    errors.append("synthetic/genesis: expected genesis_equipped:true refuse")
+except gc.Refuse as r:
+    check("genesis_equipped:true" in str(r),
+          f"synthetic/genesis: refuse message {str(r)!r} missing genesis_equipped:true")
 
 # llama.cpp profile is outside the generator scope; current fixture lacks its engine profile.
 expect_refuse("llamacpp/default", gc.EXIT_REFUSE, "engine profile not found")

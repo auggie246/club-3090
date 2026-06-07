@@ -379,7 +379,7 @@ COMPOSE_REGISTRY = {
         default_port=8033, required_engine_features=["int8_per_token_head"],
         kvcalc_key="SKIP",
         status="experimental",
-        status_note="Gemma-4-31B unsloth QAT W4A16 (compressed-tensors int4) + int8-PTH KV (#40391) + assistant MTP n=4, dual TP=2 @262K. QAT-int4 fidelity alt to the autoround-int4 int8.yml. NOT yet boot-validated — pending the vision-embedder / num_soft_tokens checks (cf. vLLM #44494 on the 12B gemma4_unified arch; the 31B is the tower-based Gemma4ForConditionalGeneration, so the vision-quant bug may or may not recur).",
+        status_note="Gemma-4-31B unsloth QAT W4A16 (compressed-tensors int4) + int8-PTH KV (#40391) + assistant MTP n=4, dual TP=2 @262K. Boots clean on stock vllm-gemma-stable (NO #44494 workaround — tower-based Gemma4ForConditionalGeneration, unlike the 12B unified arch). 8-pack A/B 2026-06-07: 109/150 vs the autoround-int4 int8.yml's 105 (+4, within ±5-7 8-pack noise ≈ tie; real instructfollow edge IF 15-vs-8 offset by hermes/cli/TC/RM). WEAKER spec-decode though: MTP accept-len ~2.4 (bench) vs autoround's ~3.9 → less speedup (bench 71.6/87.8 @370W vs autoround 106/139 @230W — power not matched, but the w4a16 is slower despite MORE power; the AL gap is the clean power-independent signal). Comparable QUALITY but slower — autoround-int4 (gemma-int8-mtp) stays the clear default. NIAH/soak not yet run.",
     ),
 
     # Gemma-4-12B (gemma4_unified arch — vLLM PR #44429, merged 2026-06-03),

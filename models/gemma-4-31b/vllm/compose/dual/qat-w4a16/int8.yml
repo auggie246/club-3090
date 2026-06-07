@@ -2,7 +2,7 @@
 # Profile (at-a-glance):
 #   Model:     Gemma 4 31B — unsloth QAT W4A16 (compressed-tensors int4)
 #   Topology:  Dual 3090 (TP=2, NVLink auto-detected via NVLINK_MODE)
-#   Drafter:   MTP n=4 (Google's official `gemma-4-31B-it-assistant`, BF16 0.5B)
+#   Drafter:   MTP n=3 (Google's official `gemma-4-31B-it-assistant`, BF16 0.5B) — n-swept optimum for this quant
 #   KV:        int8_per_token_head (1 byte/token, via vendored PR #40391 overlay — compressed-tensors can't do fp8 KV)
 #   Vision:    yes
 #   Max ctx:   262K native default (dual-card max-ctx rule) @ 4-stream cap
@@ -11,14 +11,16 @@
 #   Quality:   8-pack 109/150 (73%) thinking-OFF (2026-06-07) — TC12·IF15·SO14·DE11·RM13·BF15·HA12·CLI17.
 #                +4 vs the autoround-int4 `int8.yml` (105/150) — within ±5-7 8-pack noise (≈ a quality TIE),
 #                driven by a real instructfollow edge (IF 15 vs autoround's think-OFF 8) offset by
-#                hermes/cli/TC/RM (−2/−2/−1/−1). BUT weaker spec-decode: MTP mean accept-len ~2.4 (bench) vs
+#                hermes/cli/TC/RM (−2/−2/−1/−1). BUT weaker spec-decode: MTP accept-len ~2.3 (n=3 default) vs
 #                autoround's ~3.9 — the QAT-int4 logits align worse with the assistant drafter, so less MTP
-#                speedup. Bench 71.6 narr / 87.8 code wall-TPS @370W (vs autoround 106/139 @230W — power NOT
-#                matched, but the w4a16 is slower despite MORE power; the AL gap 2.4-vs-3.9 is the clean
-#                power-independent signal). Boots clean on stock vllm-gemma-stable (NO #44494 workaround —
-#                tower-based Gemma4ForConditionalGeneration). NIAH/soak not yet run.
+#                speedup. Bench @370W (n-swept default n=3): 74.0 narr / 87.7 code wall-TPS — n barely moves
+#                TPS (n2 72.9/86.1 · n3 74.0/87.7 · n4 71.6/87.8, all within ~3%; n=3 = top narr + tied code
+#                + ~20% less drafting). Still slower than autoround (106/139 @230W — power not matched, but
+#                the AL gap ~2.3-vs-3.9 is the clean power-independent signal). Boots clean on stock
+#                vllm-gemma-stable (NO #44494 workaround — tower-based Gemma4ForConditionalGeneration).
+#                NIAH/soak not yet run.
 #   Best for:  QAT-int4 data point — comparable QUALITY to autoround-int4 but weaker drafter alignment
-#                (AL ~2.4 vs ~3.9 → slower); autoround (vllm/gemma-int8-mtp) stays the clear default ⭐
+#                (AL ~2.3 vs ~3.9 → slower); autoround (vllm/gemma-int8-mtp) stays the clear default ⭐
 # ---------------------------------------------------------------------------
 # Gemma-4-31B-it (Intel AutoRound INT4) + Google MTP "assistant" drafter
 # 2× RTX 3090 TP=2 + per-token-head INT8 KV + ~120K ctx target.
@@ -251,9 +253,10 @@ services:
       - gemma4
       - --chat-template
       - /vllm-workspace/examples/tool_chat_template_gemma4.jinja
-      # SPEC_N_MAX overridable for matched-config head-to-head against
-      # qwen3.6-27b/vllm/compose/dual/autoround-int4/int8.yml (Qwen's built-in MTP caps at
-      # n=3 architecturally, so the canonical apples-to-apples bench uses
-      # SPEC_N_MAX=3 here).
+      # SPEC_N_MAX defaults to 3 — the n-swept TPS optimum for THIS quant (2026-06-07,
+      # dual @370W): the QAT-int4's fast acceptance decay (67/42/26/14% per-pos) makes
+      # n=3 the best balance — top narrative (74.0 TPS), code tied with n=4 (87.7), and
+      # ~20% less wasted drafting than n=4. n=2 dips on code; n=4 wastes the low-accept
+      # tail. (autoround-int4's slower decay earns its n=4 — see autoround-int4/int8.yml.)
       - --speculative-config
-      - '{"model":"/root/.cache/huggingface/gemma-4-31b-it-assistant","num_speculative_tokens":${SPEC_N_MAX:-4}}'
+      - '{"model":"/root/.cache/huggingface/gemma-4-31b-it-assistant","num_speculative_tokens":${SPEC_N_MAX:-3}}'

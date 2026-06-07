@@ -1,16 +1,18 @@
 # Multi-card (3+ GPUs) — derivation, constraints, scaling recipe
 
 You have **3 or more GPUs** and want to know if club-3090 applies. Short
-answer: yes. We ship one community-validated 4×3090 baseline and keep
-other 3+ GPU configs as derivation recipes until someone measures them.
-This page explains what scales (and what doesn't) when going beyond TP=2,
-the constraints to know, and how to derive your own compose when `multi4.yml`
-isn't your topology.
+answer: yes. We ship a community-validated 4×3090 fp8/MTP baseline (now the
+`vllm/qwen-27b-multi-fast` slug) plus a matching FP8 + int8-PTH "max accuracy"
+variant (`vllm/qwen-27b-multi-max`), and keep other 3+ GPU configs as derivation
+recipes until someone measures them. This page explains what scales (and what
+doesn't) when going beyond TP=2, the constraints to know, and how to derive your
+own compose when the shipped `multi4` composes aren't your topology.
 
 > **Model not in the configs here / want any HF safetensors repo?** → [`docs/PULL.md`](PULL.md): `scripts/pull.sh` evaluates any model against the KV math (honest, no download) and boots it if it passes. The recipes on this page are the measured/derivation path; both work.
 
 > **Validation note:** the maintainer rig is **2× RTX 3090 PCIe**, but
-> Whamp's 4× RTX 3090 PCIe rig validated the TP=4 fp8/MTP baseline in
+> Whamp's 4× RTX 3090 PCIe rig validated the TP=4 fp8/MTP baseline (the config
+> now shipped as `vllm/qwen-27b-multi-fast`) in
 > [discussion #26](https://github.com/noonghunna/club-3090/discussions/26)
 > on 2026-05-03. The TP=8+ sections remain derived expectations. If you
 > have 4× / 8× hardware and run additional configs, please share results via
@@ -26,10 +28,10 @@ isn't your topology.
 |---|---|---|---|---|
 | Per-card weight share | 100% (~14 GB) | 50% (~7 GB) | 25% (~3.5 GB) | 12.5% (~1.75 GB) |
 | KV pool capacity | smallest | 2× | ~4× | ~8× |
-| Per-card peak VRAM (262K target) | 23.5+ GB tight | 23.6 GB tight | **23.5 GB fp8 / 22.0 GB DFlash** | ~10-12 GB |
+| Per-card peak VRAM (262K target) | 23.5+ GB tight | 23.6 GB tight | **23.5 GB fp8** (cross-rig) | ~10-12 GB |
 | Cliff 2 single-prompt | fires at ~60K | doesn't fire (verified at 237K) | **passes 91K needle** | shouldn't fire |
-| Per-stream TPS (PCIe-only) | baseline | ~same as TP=1 | **63/76 fp8, 64/104 DFlash** | lower still |
-| Concurrent throughput (multi-stream) | 1× | ~1.7-3.6× | KV pre-check **6.77× fp8, 2.27× DFlash @ 262K** | derived ~3-12× |
+| Per-stream TPS (PCIe-only) | baseline | ~same as TP=1 | **63/76 fp8** (cross-rig = `multi-fast`) | lower still |
+| Concurrent throughput (multi-stream) | 1× | ~1.7-3.6× | KV pre-check **6.77× fp8 @ 262K** (cross-rig) | derived ~3-12× |
 | Marlin pad-sub-tile-n patch | not needed | required | required | required |
 
 **Two key takeaways:**
@@ -60,7 +62,7 @@ for a subset.
 | Class | What it means | Example | Recommended |
 |---|---|---|---|
 | `single_card` | 1 GPU detected | 1x RTX 3090 | Use the largest single-card compose that fits (`vllm/default`, `vllm/long-text`, `llamacpp/default`). |
-| `homogeneous` | All cards have matched VRAM and matched SM | 2x RTX 3090 | TP=N is the optimal default; use the shipped `vllm/dual*` or `vllm/dual4*` composes. |
+| `homogeneous` | All cards have matched VRAM and matched SM | 2x RTX 3090 | TP=N is the optimal default; use the shipped `vllm/dual*` (2-card) or `vllm/qwen-27b-multi-*` (4-card) composes. |
 | `vram_matched_compute_mismatched` | Same VRAM, different compute tier | RTX 3090 + RTX 4090 | TP=N works correctly, but faster cards wait at NCCL allreduce. Estate planner is better for multi-model workloads. |
 | `vram_mismatched` | Different VRAM sizes | RTX 3060 12 GB + RTX 3090 24 GB | Prefer llama.cpp `--tensor-split`, manual PP=N experiments, or estate planner. Avoid TP=N across the full mismatched set. |
 | `heterogeneous_mixed` | Multiple VRAM and compute tiers | RTX 3060 + RTX 3090 + RTX 4090 | Manual selection. Run one model on the largest matched subset or use estate planner for separate endpoints. |
@@ -165,48 +167,56 @@ work or differs in topology.
 
 ---
 
-## Shipped TP=4 baselines — `vllm/dual4` and `vllm/dual4-dflash`
+## Shipped TP=4 baselines — `vllm/qwen-27b-multi-fast` and `vllm/qwen-27b-multi-max`
 
-For 4× RTX 3090 PCIe, start with the measured fp8/MTP compose:
+For 4× RTX 3090 PCIe, two TP=4 composes mirror the 2-card fast/max tiers (see
+[DUAL_CARD.md](DUAL_CARD.md)). Each is **byte-identical to its 2-card sibling**
+apart from `--tensor-parallel-size` and the gpu-count, so the duals are the
+on-rig validation proxies (the maintainer rig is 2× 3090) — both ship
+🧪 Experimental until re-confirmed on your 4-card host.
+
+### `vllm/qwen-27b-multi-fast` — AutoRound INT4 + fp8 KV + MTP (the proven path)
 
 ```bash
-bash scripts/switch.sh vllm/dual4
+bash scripts/switch.sh vllm/qwen-27b-multi-fast
 ```
 
-`multi4/autoround-int4/fp8-mtp.yml` keeps the `dual.yml` fp8/MTP feature set and
-changes TP/streams from 2 → 4. Validation on Whamp's 4× 3090 PCIe rig:
+`multi4/autoround-int4/mtp.yml` keeps the `dual.yml` (≡ `vllm/qwen-27b-dual-fast`)
+fp8/MTP feature set and changes TP/streams from 2 → 4. This is the exact config
+Whamp measured on a 4× 3090 PCIe rig — **cross-rig numbers** (the compose was
+since renamed `fp8-mtp.yml` → `mtp.yml`; config unchanged):
 
-- boots at `max_model_len=262144`, `max_num_seqs=4`
+- boots at `max_model_len=262144`
 - vLLM reports GPU KV cache size **483,200 tokens** and **6.77×** maximum concurrency for 262K-token requests
 - `verify-full.sh` passes
 - `verify-stress.sh` passes 7/7; probe 7 recalls **58,569-token** and **91,070-token** needles
 - `bench.sh`: **63.01 narr / 76.25 code wall TPS**, peak **23,494 MiB/card**
 
-Use the DFlash variant when code throughput matters more than stream count
-and you can download the gated `z-lab/Qwen3.6-27B-DFlash` draft:
+(Validation thread: [discussion #26](https://github.com/noonghunna/club-3090/discussions/26), 2026-05-03.)
+
+### `vllm/qwen-27b-multi-max` — FP8 weights + int8-PTH KV (highest fidelity)
 
 ```bash
-WITH_DFLASH_DRAFT=1 bash scripts/setup.sh qwen3.6-27b
-bash scripts/switch.sh vllm/dual4-dflash
+bash scripts/switch.sh vllm/qwen-27b-multi-max
 ```
 
-`multi4/autoround-int4/dflash.yml` keeps full 262K context but uses FP16 KV
-and admits two full-context streams:
+`multi4/fp8/mtp.yml` mirrors the 2-card `vllm/qwen-27b-dual-max`: official **FP8**
+weights (Marlin W8A16 on Ampere — memory win, no FP8 compute speedup) + **int8-PTH**
+KV (8-bit, higher fidelity than fast's fp8_e5m2) + MTP n=3 @ 262K. Validated via the
+dual-max proxy at TP=2 (KV pool **295K tok / 1.13×** @262K, MTP active) — the tight
+2-card KV pool is exactly what TP=4 relieves. **No 4-card bench on this layout yet**,
+and the quality A/B vs the fast tier is pending.
 
-- boots at `max_model_len=262144`, `max_num_seqs=2`
-- vLLM reports GPU KV cache size **207,264 tokens** and **2.27×** maximum concurrency for 262K-token requests
-- `verify-full.sh` passes
-- `verify-stress.sh` passes 7/7; probe 7 recalls **58,570-token** and **91,070-token** needles
-- `bench.sh`: **64.00 narr / 104.40 code wall TPS**, peak **21,960 MiB/card**
-- DFlash AL during code bench: **4.43 / 4.37 / 4.35** last observed samples
-
-Single-stream TPS is lower than the 2-card DFlash variants on PCIe-only
-allreduce, so use TP=4 DFlash for full-262K code-heavy work and two admitted
-streams — not as a replacement for the fastest 2-card short-prompt DFlash path.
+> **DFlash on TP=4 was removed.** The former `vllm/dual4-dflash`
+> (`multi4/autoround-int4/dflash.yml`) is gone — DFlash on Qwen3-Next vLLM is blocked
+> by DeltaNet KV rollback ([vllm#39931](UPSTREAM.md), the same block as the dual-card
+> path). DFlash-for-Qwen now lives on beellama (`beellama/qwen-dflash-dual`, v0.3.0 🧪);
+> see [DUAL_CARD.md](DUAL_CARD.md).
 
 ## Recipe — derive your own config from `dual.yml`
 
-`dual.yml` is the tested 2-card baseline and `multi4.yml` is the measured
+The 2-card `dual/autoround-int4/fp8-mtp.yml` (`vllm/dual`) is the tested baseline
+and `multi4/autoround-int4/mtp.yml` (`vllm/qwen-27b-multi-fast`) is the measured
 4-card baseline. To scale to another TP=N, copy one of those and change
 **three lines**:
 
@@ -234,8 +244,9 @@ Everything else stays the same:
   needed, not less
 
 Container name + port: pick something distinct so it doesn't collide
-with your other variants. `multi4.yml` uses `vllm-qwen36-27b-multi4` and
-port `8015`; reserve a different name/port for further experiments:
+with your other variants. `multi-fast` uses `vllm-qwen36-27b-multi4` on port
+`8014` and `multi-max` uses `vllm-qwen36-27b-multi4-max` on port `8015`;
+reserve a different name/port for further experiments:
 
 ```yaml
 container_name: vllm-qwen36-27b-octa
@@ -257,19 +268,17 @@ Measured 2026-05-03 on Whamp's 4× RTX 3090 PCIe rig:
 - **fp8/MTP TPS:** 63.01 narrative / 76.25 code wall TPS.
 - **MTP AL:** last three code-bench metrics showed mean acceptance length
   3.42 / 3.53 / 3.62.
-- **DFlash boot time:** 375s cold after model/image cache populated.
-- **DFlash pre-check:** `max_model_len=262144`, `max_num_seqs=2`, GPU KV
-  cache size 207,264 tokens, max concurrency 2.27× at 262K.
-- **DFlash VRAM:** 21,940 MiB idle after boot; 21,960 MiB/card peak during
-  canonical bench.
-- **DFlash TPS:** 64.00 narrative / 104.40 code wall TPS.
-- **DFlash AL:** last three code-bench metrics showed mean acceptance length
-  4.43 / 4.37 / 4.35.
 - **Cliff 2:** canonical `verify-stress.sh` probe 7 passes at both large
-  rungs on both TP=4 variants: ~58.6K tokens and 91K tokens recalled correctly.
+  rungs: ~58.6K tokens and 91K tokens recalled correctly.
 - **Trade-off:** PCIe allreduce makes single-stream decode slower than
   TP=2, but TP=4 provides more full-context concurrency and the first
   published 4×3090 Cliff 2 boundary data.
+
+> The same 4×3090 run also measured a **now-removed** DFlash TP=4 variant
+> (64.00 / 104.40 narr/code TPS, AL ~4.4, KV pool 207,264 tok / 2.27× @262K).
+> That compose was dropped — DFlash on Qwen3-Next vLLM is blocked by DeltaNet KV
+> rollback ([vllm#39931](UPSTREAM.md)) — so the numbers are kept only as historical
+> cross-rig context; DFlash-for-Qwen now lives on beellama.
 
 ---
 
@@ -322,18 +331,22 @@ Specifically interested in:
 
 ---
 
-## Why we ship only one pre-baked 4-card config
+## Why we ship only a fast/max pair of pre-baked 4-card configs
 
-We now ship `multi4.yml` because a community rig validated that exact
+We ship two TP=4 composes — `vllm/qwen-27b-multi-fast` (fp8/MTP) and
+`vllm/qwen-27b-multi-max` (FP8 + int8-PTH) — mirroring the 2-card fast/max tiers.
+The `multi-fast` config is here because a community rig validated that exact
 4× RTX 3090 PCIe topology with `verify-full.sh`, `verify-stress.sh`, and
-`bench.sh`. We still avoid a broad matrix of untested 4+ GPU composes:
+`bench.sh`; `multi-max` is its higher-fidelity sibling (validated via the
+`dual-max` proxy at TP=2, 🧪 pending a 4-card bench). We still avoid a broad
+matrix of untested 4+ GPU composes:
 
 1. **Hardware combinations explode.** 4× 3090 vs 4× A5000 vs 4× A6000 vs
    2×3090 + 2×4090 vs 4× modded 3080 — each has different VRAM, topology,
    power profile, and allreduce characteristics.
-2. **Variant count needs discipline.** A single measured fp8/MTP TP=4
-   baseline is useful; a directory full of derived-but-unvalidated variants
-   would create false confidence.
+2. **Variant count needs discipline.** A measured fp8/MTP TP=4 baseline
+   (plus its FP8 fidelity sibling) is useful; a directory full of
+   derived-but-unvalidated variants would create false confidence.
 3. **Users at this scale are typically experienced.** If you have a
    workstation chassis or rack with 4-8 GPUs, you've already done the
    hardware homework. What you need from us is the methodology, the

@@ -107,10 +107,15 @@ def _load_model_specs_from_yaml(profiles):
     # "gemma4-swa-dense" prediction path — we set model_family to that internal
     # KV-family tag (NOT its ModelProfile family "gemma4-unified", which is the
     # vLLM arch name). It ships bf16 weights + an Intel AutoRound INT8 variant
-    # (~13 GB, W8A16) + a small assistant drafter; there is no int4/awq variant,
-    # so weights_int4_gb/weights_awq_gb point at the bf16 blob (23.9 GB) to keep
-    # _weights_per_card_gb()'s branch from KeyError'ing, while weights_int8_gb
-    # carries the real INT8 footprint (vllm/gemma-12b-single-int8-mtp path).
+    # (~13 GB, W8A16) + an unsloth QAT W4A16 int4 variant (~9.6 GB,
+    # compressed-tensors) + a small assistant drafter. weights_int4_gb/weights_awq_gb
+    # carry the REAL int4 (qat-w4a16) footprint; weights_int8_gb the INT8 footprint
+    # (vllm/gemma-12b-single-int8-mtp path). NOTE: int4/awq FORMERLY pointed at the
+    # bf16 blob (23.9 GB) as a placeholder when no int4 variant existed — that
+    # over-priced the int4 SINGLE-card path by ~14 GB (false-FAIL'd
+    # vllm/gemma-12b-qat-w4a16-single at 27.9 GB vs the ~22.6 GB it actually boots
+    # at; the dual path hid it via /tp). Shared activation/overhead + the measured
+    # `measured_kv_growing_bpt_tp1` term are UNCHANGED — this is a weight-SIZE fix only.
     # Activation/overhead constants stay the SHARED Gemma dense constants (NOT
     # re-tuned). The ONE measured calibration is the growing KV per-token —
     # `measured_kv_growing_bpt_tp1` (see kv_pool_per_card_bytes): gemma4_unified's
@@ -118,7 +123,8 @@ def _load_model_specs_from_yaml(profiles):
     # formula predicts, so we ride the measurement for the 12B only.
     g12_bf16 = _weight_size(gemma12, "bf16")
     g12_int8 = _weight_size(gemma12, "autoround-int8")
-    g12spec = {"model_id": gemma12.id, "model_family": "gemma4-swa-dense", **{k: getattr(gemma12, k) for k in g_fields}, "valid_tp": list(gemma12.valid_tp), "weights_int4_gb": g12_bf16, "weights_awq_gb": g12_bf16, "weights_bf16_gb": g12_bf16, "weights_int8_gb": g12_int8, "drafter_mtp_gb": float(profiles.drafters["gemma-12b-it-assistant"].vram_footprint_gb), "measured_kv_growing_bpt_tp1": 45632, "mtp_n_default": profiles.drafters["gemma-12b-it-assistant"].n_default}
+    g12_int4 = _weight_size(gemma12, "qat-w4a16")
+    g12spec = {"model_id": gemma12.id, "model_family": "gemma4-swa-dense", **{k: getattr(gemma12, k) for k in g_fields}, "valid_tp": list(gemma12.valid_tp), "weights_int4_gb": g12_int4, "weights_awq_gb": g12_int4, "weights_bf16_gb": g12_bf16, "weights_int8_gb": g12_int8, "drafter_mtp_gb": float(profiles.drafters["gemma-12b-it-assistant"].vram_footprint_gb), "measured_kv_growing_bpt_tp1": 45632, "mtp_n_default": profiles.drafters["gemma-12b-it-assistant"].n_default}
     return {
         "qwen3.6-27b": qspec,
         "qwen3.6-35b-a3b": qmspec,

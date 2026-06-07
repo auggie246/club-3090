@@ -369,6 +369,19 @@ COMPOSE_REGISTRY = {
         kvcalc_key="gemma-4-31b:gemma-dual-int8",
     ),
 
+    # Gemma-4-31B unsloth QAT W4A16 (compressed-tensors int4) — QAT-int4 fidelity alt to
+    # autoround-int4. Same dual / int8-PTH-KV(#40391) / assistant-MTP path as gemma-int8-mtp.
+    "vllm/gemma-31b-qat-w4a16-dual": _entry(
+        model="gemma-4-31b", weights_variant="qat-w4a16", workload="multi-stream-tenant",
+        engine="vllm-gemma-stable", drafter="gemma-it-assistant", kv_format="int8_per_token_head",
+        tp=2, max_ctx=262144, max_num_seqs=4, mem_util=0.95,
+        compose_path="models/gemma-4-31b/vllm/compose/dual/qat-w4a16/int8.yml",
+        default_port=8033, required_engine_features=["int8_per_token_head"],
+        kvcalc_key="SKIP",
+        status="experimental",
+        status_note="Gemma-4-31B unsloth QAT W4A16 (compressed-tensors int4) + int8-PTH KV (#40391) + assistant MTP n=4, dual TP=2 @262K. QAT-int4 fidelity alt to the autoround-int4 int8.yml. NOT yet boot-validated — pending the vision-embedder / num_soft_tokens checks (cf. vLLM #44494 on the 12B gemma4_unified arch; the 31B is the tower-based Gemma4ForConditionalGeneration, so the vision-quant bug may or may not recur).",
+    ),
+
     # Gemma-4-12B (gemma4_unified arch — vLLM PR #44429, merged 2026-06-03),
     # dual-3090 bf16 on the ephemeral vllm/vllm-openai:gemma4-unified preview
     # image (== today's vLLM main; Gemma-4 fixes baked in except the local
@@ -401,6 +414,20 @@ COMPOSE_REGISTRY = {
         kvcalc_key="gemma-4-12b:gemma-single-int8-mtp",
         status="caveats",
         status_note="Gemma-4-12B Intel AutoRound INT8 (W8A16) + assistant external drafter (n=4) single 3090 on the gemma4_unified arch-preview image. ⚠️ Production w/ caveats: validated 2026-06-04 (bench + 256K NIAH + 8-pack 105/150 + soak PASS). MTP fits the full 262144 (drafter resident, KV pool ~310K tok, 1.18x at 262K, ~20.7 GB). n-sweep code-gen: n=4 117 TPS / accept_len 3.67 (n=5 122.5 code-max via SPEC_N=5) vs ~50 no-MTP. 8-pack on par with the bf16 dual's 94/150 (INT8≈bf16). bf16 KV only. CAVEAT: ephemeral arch-preview image (0.1.dev) — pin a digest; promotes to Production on a STABLE vLLM gemma4_unified release.",
+    ),
+    # QAT W4A16 (compressed-tensors int4) single-card — the sub-24 GB path: int4
+    # weights (~7 GB) fit 16 GB cards where the INT8 (~13 GB) won't. Loses ~10pp to
+    # the INT8 single on the 8-pack (int4-vs-int8 fidelity), so on a 24 GB card prefer
+    # the INT8. Needs the vendored gemma4-unified-vision-unquant workaround (vLLM #44494).
+    "vllm/gemma-12b-qat-w4a16-single": _entry(
+        model="gemma-4-12b", weights_variant="qat-w4a16", workload="fast-chat",
+        engine="vllm-gemma4-unified", drafter="gemma-12b-it-assistant", kv_format="bf16",
+        tp=1, max_ctx=262144, max_num_seqs=4, mem_util=0.94,
+        compose_path="models/gemma-4-12b/vllm/compose/single/qat-w4a16/mtp.yml",
+        default_port=8039,
+        kvcalc_key="SKIP",
+        status="experimental",
+        status_note="Gemma-4-12B unsloth QAT W4A16 (compressed-tensors int4) + assistant external drafter (n=4) single 3090 on the gemma4_unified arch-preview image. 🧪 Experimental — for sub-24 GB VRAM: the int4 weights (~7 GB) fit 16 GB cards where the INT8 (~13 GB) won't (vLLM #44494 commenter ran the same checkpoint on a 16 GB 4060 Ti). Full gate 2026-06-06: bench 99/131 TPS (MTP accept_len 2.37), 262K NIAH clean to 240K, 8-pack 95/150 — ~10pp below the INT8 single's 105 (the int4-vs-int8 cost), so on a 24 GB card the INT8 single is preferred. CAVEAT: requires the vendored gemma4-unified-vision-unquant workaround (sitecustomize forces the vision embedder unquantized — vLLM #44494 + missing num_soft_tokens) + the ephemeral gemma4-unified arch-preview image. Re-test on the upstream #44494 fix + a stable gemma4_unified release.",
     ),
 
     # Gemma-4-12B single-card GGUF (Q8_K_XL) — the two engine-native single-3090

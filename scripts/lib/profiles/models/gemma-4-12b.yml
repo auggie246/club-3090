@@ -40,6 +40,16 @@ weights:
     engine: vllm
     kind: main
     verify_glob: "*.safetensors"
+  qat-w4a16:
+    path: gemma-4-12b-qat-w4a16
+    local_subdir: gemma-4-12b-qat-w4a16
+    size_gb: 9.6
+    format: compressed-tensors
+    status: experimental
+    hf_repo: unsloth/gemma-4-12B-it-qat-w4a16
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
   assistant:
     path: gemma-4-12b-it-assistant
     local_subdir: gemma-4-12b-it-assistant

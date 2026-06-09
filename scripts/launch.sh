@@ -861,6 +861,9 @@ suggest_default_variant() {
       # vllm/tools-text explicitly.
       echo "llamacpp/default"
     fi
+  elif [[ "$MODEL_NAME" == "qwen3.6-40b-deckard" ]]; then
+    # Deckard: only one compose (dual llama.cpp MTP). Dual-only (31 GB > 24 GB).
+    echo "llamacpp/deckard40B-dual-mtp"
   else
     if (( cards >= 2 )); then
       echo "vllm/gemma-bf16-mtp"

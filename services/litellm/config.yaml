@@ -43,3 +43,12 @@ model_list:
   # SM86-blocked (Marlin K-dim 704/128). The working AWQ variant
   # (vllm/gemma-a4b-awq, :8042) is not a gpu-mode primary; add a route here if
   # it gets promoted.
+
+  # Qwen3.6-40B-Deckard (dense 40B uncensored, llama.cpp dual 3090, MTP n=2).
+  # Launched via `launch.sh llamacpp/deckard40B-dual-mtp` → llama-cpp-deckard-40b at :8199.
+  # Both-cards mode (GPU-mutex with image-studio and all single-card services).
+  - model_name: deckard-40b
+    litellm_params:
+      model: openai/deckard-40b
+      api_base: http://host.docker.internal:8199/v1
+      api_key: EMPTY

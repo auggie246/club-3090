@@ -60,6 +60,7 @@ def _entry(
     required_sm=None,
     status="production",
     status_note=None,
+    category=None,
 ):
     if status not in STATUS_VALUES:
         raise ValueError(
@@ -90,6 +91,8 @@ def _entry(
         entry["recommended_engine_features"] = list(recommended_engine_features)
     if required_sm is not None:
         entry["required_sm"] = required_sm
+    if category is not None:
+        entry["category"] = category
     return entry
 
 
@@ -634,6 +637,22 @@ COMPOSE_REGISTRY = {
         default_port=8051,
         kvcalc_key="qwen3.6-35b-a3b:qwen-35b-a3b-dual",
     ),
+
+    # Qwen3.6-40B-Deckard — dense 40B uncensored community merge, llama.cpp dual.
+    # First dual llama.cpp compose in the catalog. Q6_K GGUF (31 GB) requires both
+    # cards; layer-split via -ts 1,1. MTP n=2 sweet spot (41.6 tok/s, 0.81 accept).
+    # kv_format q8_0 (K+V). kvcalc SKIP (llama.cpp family — no vLLM kv-calc).
+    "llamacpp/deckard40B-dual-mtp": _entry(
+        model="qwen3.6-40b-deckard", weights_variant="mtp-q6k", workload="fast-chat",
+        engine="llama-cpp-local", drafter="qwen-mtp-builtin", kv_format="q8_0",
+        tp=2, max_ctx=131072, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-40b-deckard/llama-cpp/compose/dual/mtp-q6k/mtp.yml",
+        default_port=8199,
+        kvcalc_key="SKIP",
+        status="experimental",
+        status_note="Dense 40B uncensored Qwen3.6 merge (Q6_K MTP GGUF, 31 GB) on dual 3090 llama.cpp. MTP n=2 sweet spot (~41.6 tok/s, 0.81 accept). 128K ctx ceiling @q8_0 KV (192K OOMs). Dual-only. verify-full 8/8, 8-pack 105/150 (MTP off==on, spec-dec lossless), soak-continuous PASS (0 MiB growth, 0/25 silent-empty). 🧪 pending profile config.json arch confirm before ✅.",
+        category="uncensored",
+    ),
 }
 
 
@@ -657,6 +676,8 @@ DEFAULTS = {
     ("gemma-4-26b-a4b", "vllm", "dual"): "vllm/gemma-26ba4b-dual",
     ("qwen3.6-35b-a3b", "vllm", "single"): "vllm/qwen-a3b-preview-single",
     ("qwen3.6-35b-a3b", "vllm", "dual"): "vllm/qwen-35b-a3b-dual",
+    # Deckard: only one compose (dual llama.cpp MTP), so the dual default is trivial.
+    ("qwen3.6-40b-deckard", "llamacpp", "dual"): "llamacpp/deckard40B-dual-mtp",
 }
 
 

@@ -24,7 +24,7 @@ run_test "load_profiles parses all profile groups" <<'PY'
 from scripts.lib.profiles.compat import load_profiles
 p = load_profiles()
 assert len(p.hardware) == 9
-assert len(p.models) == 5
+assert len(p.models) == 6
 assert len(p.workloads) == 5
 assert len(p.engines) == 11
 assert len(p.drafters) == 9

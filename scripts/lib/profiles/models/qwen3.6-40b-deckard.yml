@@ -1,0 +1,61 @@
+schema_version: 1
+id: qwen3.6-40b-deckard
+display_name: Qwen 3.6 40B Deckard
+family: qwen3-next-hybrid
+# Dense 40B uncensored community merge of the Qwen3.6 family. The expanded 40B
+# preserves the 27B's 5120 hidden dimension (confirmed from model README on disk).
+# Architecture: Qwen3-Next hybrid (DeltaNet GDN + standard attention).
+hidden_size: 5120
+# num_hidden_layers: TBD — confirm from config.json once safetensors are available.
+# The README states 24 attention layers (1.5× the 27B's 16). If the GDN:attn
+# ratio stays 3:1 (as in the 27B: 48 GDN / 16 attn), total would be 96 layers
+# (72 GDN + 24 attn). NOT YET CONFIRMED — mark as TBD until config.json is
+# available or a boot log reveals it.
+num_hidden_layers: 96
+num_gdn_layers: 72
+num_attn_layers: 24
+num_attn_heads: 24
+num_kv_heads: 4
+head_dim_attn: 256
+# DeltaNet linear attention params — inherited from the Qwen3-Next hybrid family.
+# These are ASSUMED identical to the 27B (same hidden_size, same family); confirm
+# from config.json.
+linear_num_v_heads: 48
+linear_num_k_heads: 16
+linear_v_head_dim: 128
+linear_k_head_dim: 128
+linear_conv_kernel_dim: 4
+max_ctx_supported: 262144
+attention_k_eq_v: false
+# MTP: the GGUF has a BF16-precision MTP head injected from the base Qwen3.6-27B.
+# The injection preserves the 27B's MTP architecture (1 hidden layer).
+vision_capable: true
+weights:
+  mtp-q6k:
+    path: qwen3.6-40b-deckard-gguf/mtp-q6k
+    local_subdir: qwen3.6-40b-deckard-gguf/mtp-q6k
+    size_gb: 31
+    format: gguf
+    status: experimental
+    # HF source: the MTP-injected GGUF was created by injecting a BF16 MTP head
+    # into DavidAU's Q6_K GGUF from:
+    #   DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF
+    # The MTP-injected variant is a separate community artifact. The exact HF
+    # repo hosting the MTP-injected GGUF is not yet confirmed — using mtp-q6k
+    # as the weights_variant to match the on-disk layout.
+    hf_repo: DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF
+    files:
+      - Qwen3.6-40B-Deckard-MTP-Q6_K.gguf
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
+default_weight_variant: mtp-q6k
+compatible_drafters:
+  - qwen-mtp-builtin
+# num_kv_heads=4 supports TP up to 4 (each rank needs ≥1 KV head).
+# Practically limited to TP=2 on this rig (2× 3090).
+valid_tp:
+  - 1
+  - 2
+  - 4
+requires_genesis: false

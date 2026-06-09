@@ -15,6 +15,9 @@ COMPOSE_BASE="$CLUB3090_DIR/services"
 DUAL_27B_DIR="$CLUB3090_DIR/models/qwen3.6-27b/vllm/compose/dual/autoround-int4"
 GEMMA_DUAL_DIR="$CLUB3090_DIR/models/gemma-4-31b/vllm/compose/dual/autoround-int4"
 GEMMA_DUAL_AWQ_DIR="$CLUB3090_DIR/models/gemma-4-31b/vllm/compose/dual/awq"
+# Image-studio chat brain: gemma-4-12b single-card (llama.cpp), pinned to the spare GPU
+# so it coexists with ComfyUI image gen (different card). See `gpu-mode image-studio`.
+GEMMA_12B_DIR="$CLUB3090_DIR/models/gemma-4-12b/llama-cpp/compose/single/unsloth-q8kxl"
 
 # Estate planner state file (v0.7.0+). Instances booted via launch.sh --estate
 # or --estate-file are tracked here and persist via Docker `restart:
@@ -54,6 +57,23 @@ compose_at() {
             env_args=(--env-file "$CLUB3090_DIR/.env")
         fi
         (cd "$dir" && sudo docker compose "${env_args[@]}" -f "$file" $action)
+    fi
+}
+
+# Like compose_at, but injects per-invocation env assignments that survive `sudo`.
+# `sudo docker compose` sanitizes the caller's environment, so vars set in the shell
+# don't reach compose interpolation — pass them as leading `VAR=val` args to the
+# command instead (`sudo VAR=val docker compose ...`).
+# Args: <dir> <action> <file> [VAR=val ...]
+compose_at_env() {
+    local dir=$1 action=$2 file=$3; shift 3
+    local envs=("$@")
+    if [ -f "$dir/$file" ]; then
+        local env_args=()
+        if [ -f "$CLUB3090_DIR/.env" ]; then
+            env_args=(--env-file "$CLUB3090_DIR/.env")
+        fi
+        (cd "$dir" && sudo "${envs[@]}" docker compose "${env_args[@]}" -f "$file" $action)
     fi
 }
 
@@ -126,6 +146,26 @@ start_comfyui() {
 stop_comfyui() {
     printf "  ${RED}▼${NC} Stopping comfyui..."
     compose_at "$COMPOSE_BASE/comfyui" "down" && echo "done" || echo "skipped"
+}
+
+# ComfyUI pinned to GPU 0 (image-studio split — leaves the other card for the chat LLM).
+start_comfyui_gpu0() {
+    printf "  ${GREEN}▲${NC} Starting comfyui (GPU0)..."
+    compose_at_env "$COMPOSE_BASE/comfyui" "up -d" docker-compose.yml COMFYUI_CUDA_VISIBLE_DEVICES=0 \
+        && echo "done" || echo "failed"
+}
+
+# --- gemma-4-12b chat brain (llama.cpp single-card) — image-studio's coexisting LLM ---
+# Pinned to the spare GPU (1) so it runs alongside ComfyUI on GPU0. Serves OpenAI API :8069.
+start_gemma_12b_chat() {
+    printf "  ${GREEN}▲${NC} Starting gemma-4-12b-chat (GPU1)..."
+    compose_at_env "$GEMMA_12B_DIR" "up -d" base.yml ESTATE_GPUS=1 CTX_SIZE=32768 PORT=8069 \
+        && echo "done" || echo "failed"
+}
+stop_gemma_12b_chat() {
+    printf "  ${RED}▼${NC} Stopping gemma-4-12b-chat..."
+    compose_at_env "$GEMMA_12B_DIR" "down" base.yml ESTATE_GPUS=1 CTX_SIZE=32768 PORT=8069 \
+        && echo "done" || echo "skipped"
 }
 
 # --- Gemma 4 31B dual-card serving variants ---------------------------------
@@ -206,6 +246,11 @@ show_status() {
         local m
         m=$(curl -sf -m 2 http://localhost:8032/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} gemma-int8 @ :8032        → ${m:-unknown} (INT8 PTH KV)"
+    fi
+    if curl -sf -m 2 http://localhost:8069/v1/models >/dev/null 2>&1; then
+        local m
+        m=$(curl -sf -m 2 http://localhost:8069/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
+        echo -e "  ${GREEN}▶${NC} gemma-4-12b @ :8069      → ${m:-unknown} (image-studio chat brain, GPU1, llama.cpp)"
     fi
     if curl -sf -m 2 http://localhost:8188/ >/dev/null 2>&1; then
         echo -e "  ${GREEN}▶${NC} ComfyUI @ :8188          → image/video generation (GPU-bound, mutex with LLM)"
@@ -457,6 +502,40 @@ mode_comfyui() {
     echo -e "${YELLOW}Tail: sudo docker logs -f comfyui${NC}"
 }
 
+mode_image_studio() {
+    echo -e "${CYAN}═══ Switching to IMAGE-STUDIO mode (image gen + chat, 2-card split) ═══${NC}"
+    echo "Starting: ComfyUI/Ideogram-4 on GPU0 + gemma-4-12b chat on GPU1 + Open WebUI"
+    echo "Stopping: all dual-card LLM serving (Qwen + Gemma-31B)"
+    echo ""
+    local ngpu
+    ngpu=$(nvidia-smi -L 2>/dev/null | wc -l)
+    stop_service ollama
+    stop_all_27b
+    stop_all_gemma
+    if [ "${ngpu:-0}" -lt 2 ]; then
+        echo -e "${YELLOW}⚠ Only ${ngpu:-0} GPU detected — image gen + a local chat model can't coexist"
+        echo -e "  (both are GPU-resident). Starting ComfyUI image gen only.${NC}"
+        echo -e "  ${YELLOW}For chat: use 'gpu-mode chat' (LiteLLM) or run gemma-4-12b when ComfyUI is down.${NC}"
+        start_comfyui   # default (all GPUs) — single-card box, nothing to split
+    else
+        start_comfyui_gpu0
+        start_gemma_12b_chat
+    fi
+    start_service openwebui
+    start_service litellm
+    start_service searxng
+    echo ""
+    echo -e "${GREEN}Image-studio mode active.${NC}"
+    echo -e "  Open WebUI:  http://192.168.86.33:8080   (chat + 🖼️ image button)"
+    echo -e "  ComfyUI:     http://192.168.86.33:8188   (full node graph / control)"
+    if [ "${ngpu:-0}" -ge 2 ]; then
+        echo -e "  Chat model:  gemma-4-12b @ :8069 (GPU1) — OpenWebUI default"
+    fi
+    echo -e "${YELLOW}First ComfyUI boot ~2-3 min (clones HEAD + nodes); first image ~2 min cold / ~70 s warm.${NC}"
+    echo -e "${YELLOW}If the OpenWebUI image button is missing on an existing volume: Admin → Settings → Images.${NC}"
+    echo -e "${YELLOW}Tail: sudo docker logs -f comfyui | sudo docker logs -f llama-cpp-gemma4-12b${NC}"
+}
+
 mode_bigmodel() {
     echo -e "${CYAN}═══ Switching to BIG MODEL mode ═══${NC}"
     echo "Stopping ALL containers to maximize RAM + VRAM..."
@@ -638,8 +717,10 @@ usage() {
     echo "  gemma-int8         alias for 'gemma' (INT8 PTH KV; 98K default, CTX=262144 MAX_NUM_SEQS=1 for native 262K)"
     echo "  gemma-mtp          bf16 KV fallback — 32K, stock vLLM v0.22.0, no overlay (:8030)"
     echo ""
-    echo "  Image / Video Gen (mutex with all LLM modes — GPU-bound):"
-    echo "  comfyui            ComfyUI :8188 (FLUX, HunyuanVideo, Wan2.2-Animate)"
+    echo "  Image / Video Gen:"
+    echo "  image-studio       ⭐ Ideogram-4 image gen (GPU0) + gemma-4-12b chat (GPU1) + Open WebUI"
+    echo "                     — chat + image coexist on 2 cards (alias: imagestudio)"
+    echo "  comfyui            ComfyUI :8188 only, all GPUs (FLUX/Hunyuan/Wan; mutex with LLM)"
     echo ""
     echo "  bigmodel           Stop everything, max RAM+VRAM for one-off llama-server / custom workloads"
     echo "  off                Stop all services"
@@ -665,6 +746,7 @@ case "${1:-}" in
     gemma-int8)         mode_gemma_int8 ;;
     gemma-mtp)          mode_gemma ;;
     comfyui)            mode_comfyui ;;
+    image-studio|imagestudio) mode_image_studio ;;
     bigmodel)           mode_bigmodel ;;
     off)                mode_off ;;
     status)             show_status ;;

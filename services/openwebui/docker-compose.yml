@@ -1,17 +1,33 @@
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    # Pinned (was :main) — v0.9.6 live-validated 2026-06-09: image-gen + chat config
+    # survive the migration. Bump deliberately, re-validate the image-gen wiring.
+    image: ghcr.io/open-webui/open-webui:v0.9.6
     container_name: open-webui
     restart: unless-stopped
     ports:
       - "8080:8080"
     volumes:
       - open-webui-data:/app/backend/data
+    env_file:
+      # Image generation: Ideogram-4 → ComfyUI (:8188). PersistentConfig — applies on a
+      # FRESH volume; on an existing volume set it in Admin → Settings → Images instead.
+      - ./imagegen.env
     environment:
+      # Chat model — DEFAULT: gemma-4-12b on the spare GPU (coexists with ComfyUI image gen).
+      # Bring it up with `gpu-mode image-studio`; it serves an OpenAI API on :8069 (no auth).
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8069/v1
+      - OPENAI_API_KEY=sk-noauth
+      # Alternative — route chat through LiteLLM (the full catalog, but GPU-mutex with
+      # ComfyUI). Swap the two lines above for these:
+      #   - OPENAI_API_BASE_URL=http://host.docker.internal:4000/v1
+      #   - OPENAI_API_KEY=sk-litellm-master-key
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - OPENAI_API_BASE_URL=http://host.docker.internal:4000/v1
-      - OPENAI_API_KEY=sk-litellm-master-key
-      - WEBUI_SECRET_KEY=change-this-secret-key
+      # Leave empty → Open WebUI generates a strong random key on first boot and persists it
+      # in the data volume (.webui_secret_key). NEVER ship a hardcoded shared secret (it would
+      # let anyone forge session tokens). Override via the host env only to share sessions
+      # across replicas: WEBUI_SECRET_KEY=<your-secret> docker compose up -d
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
 
       # --- Web search / RAG ---
       - ENABLE_RAG_WEB_SEARCH=true

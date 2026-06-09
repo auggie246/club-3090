@@ -3,6 +3,14 @@
 # pulls latest on subsequent runs, then launches the ComfyUI server on :8188.
 set -euo pipefail
 
+# Optional GPU pin: confine ComfyUI to specific card(s) so a chat LLM can use the rest
+# (the `gpu-mode image-studio` 2-card split passes "0"). Only export when non-empty —
+# CUDA_VISIBLE_DEVICES="" would hide ALL GPUs.
+if [ -n "${COMFYUI_CUDA_VISIBLE_DEVICES:-}" ]; then
+    export CUDA_VISIBLE_DEVICES="$COMFYUI_CUDA_VISIBLE_DEVICES"
+    echo "[bootstrap] CUDA_VISIBLE_DEVICES pinned to $CUDA_VISIBLE_DEVICES"
+fi
+
 COMFY_ROOT="/workspace/ComfyUI"
 PIP_OPTS="--no-input --retries 10 --timeout 60"
 
@@ -23,20 +31,43 @@ clone_or_update() {
 #    so host-side hf download / file moves work after container has touched them as root.
 chmod -R a+rwX /workspace/ComfyUI/models /workspace/ComfyUI/input /workspace/ComfyUI/output /workspace/ComfyUI/user 2>/dev/null || true
 
-# 1. ComfyUI core — clone into a tmp dir then sync over (target dir is non-empty due to bind mounts)
+# 1. ComfyUI core — PINNED to a known-good commit (reproducible; this commit has
+#    native Ideogram-4 support and is validated on this stack). Floating on HEAD would
+#    let an upstream change silently break users. Set COMFYUI_REF=HEAD (or 'latest') to
+#    float on origin/master instead (needed for bleeding-edge models — re-pin after
+#    validating). Bump this default in the same change that re-validates image gen.
+COMFYUI_REF="${COMFYUI_REF:-cb9f6394160808f7d25163f6cc2ea300c6841ef9}"
+checkout_comfy_ref() {  # $1 = repo dir
+    local r="$1"
+    if [ "$COMFYUI_REF" = "HEAD" ] || [ "$COMFYUI_REF" = "latest" ]; then
+        echo "[bootstrap] ComfyUI: floating on origin/master (COMFYUI_REF=$COMFYUI_REF)"
+        git -C "$r" fetch --depth 1 origin 2>/dev/null || true
+        git -C "$r" reset --hard origin/master 2>/dev/null || git -C "$r" pull --ff-only || true
+    else
+        echo "[bootstrap] ComfyUI: pinned to ${COMFYUI_REF:0:12}"
+        git -C "$r" fetch --depth 1 origin "$COMFYUI_REF" 2>/dev/null || git -C "$r" fetch origin 2>/dev/null || true
+        git -C "$r" checkout -q -f "$COMFYUI_REF" 2>/dev/null \
+          || git -C "$r" reset --hard "$COMFYUI_REF" 2>/dev/null \
+          || echo "[bootstrap] WARN: could not checkout $COMFYUI_REF (offline?) — using current tree"
+    fi
+}
 if [ ! -f "$COMFY_ROOT/main.py" ]; then
     echo "[bootstrap] Cloning ComfyUI into temp..."
     rm -rf /tmp/_comfy_clone
-    git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git /tmp/_comfy_clone
+    # Full clone (not --depth 1) so an arbitrary pinned commit is checkout-able.
+    git clone https://github.com/comfyanonymous/ComfyUI.git /tmp/_comfy_clone
+    if [ "$COMFYUI_REF" != "HEAD" ] && [ "$COMFYUI_REF" != "latest" ]; then
+        git -C /tmp/_comfy_clone checkout -q -f "$COMFYUI_REF" 2>/dev/null \
+          || echo "[bootstrap] WARN: pinned ref $COMFYUI_REF not found in fresh clone — using HEAD"
+    fi
     mkdir -p "$COMFY_ROOT"
-    # Move everything except dirs that exist as bind mounts (models, input, output, user)
+    # Copy everything except dirs that exist as bind mounts (models, input, output, user)
     cp -an /tmp/_comfy_clone/. "$COMFY_ROOT/"
     rm -rf /tmp/_comfy_clone
 elif [ -d "$COMFY_ROOT/.git" ]; then
-    echo "[bootstrap] ComfyUI already present, pulling..."
-    git -C "$COMFY_ROOT" pull --ff-only || true
+    checkout_comfy_ref "$COMFY_ROOT"
 else
-    echo "[bootstrap] ComfyUI present without .git; skipping pull."
+    echo "[bootstrap] ComfyUI present without .git; skipping pin/update."
 fi
 
 cd "$COMFY_ROOT"

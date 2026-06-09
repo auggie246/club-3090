@@ -27,6 +27,7 @@ Start here if you want to run a model.
 | [`FAQ.md`](FAQ.md) | Common setup and operational questions. |
 | [`COMPARISONS.md`](COMPARISONS.md) | Self-host vs cloud APIs — cost crossover and when each wins. |
 | [`EXAMPLES.md`](EXAMPLES.md) | Worked end-to-end usage examples. |
+| [`IMAGE_STUDIO.md`](IMAGE_STUDIO.md) | **Local image generation** (Ideogram-4 via ComfyUI) + chat in one UI (Open WebUI), coexisting on 2 GPUs. |
 
 ---
 

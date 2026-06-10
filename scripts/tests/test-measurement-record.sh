@@ -34,7 +34,17 @@ export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 # We append a synthetic GPU-state block + power.limit line because BENCH_MOCK
 # short-circuits before the nvidia-smi section; the format mirrors what
 # bench.sh emits from `nvidia-smi --query-gpu=...,memory.used,...,power.draw`.
-BENCH_SAMPLE="$(BENCH_MOCK=1 bash scripts/bench.sh 2>/dev/null)"
+#
+# Pin the engine + skip rig autodetect so the mock branch is DETERMINISTIC.
+# bench.sh's BENCH_MOCK has two branches: PP_MODE=log emits the NARRATIVE block
+# (with decode_TPS — what this test asserts), while PP_MODE=fallback (engaged
+# when ENGINE_KIND=llamacpp) emits a prompt-processing block with NO decode_TPS.
+# With autodetect on, bench.sh adopts whatever container is running; if it lands
+# on a llama.cpp one (e.g. a Deckard/ik dual is up), the fallback mock fires and
+# the measured-record build raises MeasuredRecordError — a flaky, rig-state-
+# dependent failure (#478). CONTAINER=none + PREFLIGHT_NO_AUTODETECT=1 +
+# ENGINE_KIND=vllm keeps this hermetic regardless of what's running on the host.
+BENCH_SAMPLE="$(PREFLIGHT_NO_AUTODETECT=1 CONTAINER=none ENGINE_KIND=vllm BENCH_MOCK=1 bash scripts/bench.sh 2>/dev/null)"
 BENCH_SAMPLE+="
 === GPU state ===
 0, 99 %, 22310 MiB, 24576 MiB, 351.20 W, 71

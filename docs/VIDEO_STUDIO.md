@@ -62,6 +62,37 @@ This is the **P2 / video** sibling of [IMAGE_STUDIO.md](IMAGE_STUDIO.md) (Ideogr
 Attach an **image** instead of (or with) text → it auto-routes to the **image→video**
 lane (animates your still).
 
+## How to prompt
+
+**You don't write the cinematic prompt — the director does.** Give it the *intent* in a
+line or two; it fills in camera, lens, lighting, palette, mood, and ambient sound. A
+throwaway *"a fox in a neon city"* becomes a full shot. If you *do* want specific control,
+just name it and the director keeps it — e.g. *"…top-down drone shot, golden hour, melancholic"*.
+
+- **Length** — put a duration in the message: *"a **30-second** timelapse…"*, *"make it **1
+  minute**"*. No duration → ~10 s. Over 15 s auto-chains ~10 s segments into one clip
+  (capped ~120 s); each segment adds ~2.5 min of render time.
+- **Lane** — pick the model: **🎬 LTX-2.3** (video + audio) or **🔓 Sulphur** (uncensored).
+- **Image → video** — attach an image (optionally with a motion note like *"slow zoom in,
+  leaves drifting"*); it animates your still.
+- **Refine** — just reply with the change: *"more moody"*, *"make it night"*, *"slower
+  camera"*, *"add rain"*. It evolves the last prompt; a brand-new idea starts fresh.
+
+**Works best:** one clear subject + one continuous camera move or action; slow / cinematic
+/ ambient scenes; a defined mood or time of day — these render most cleanly, and chain
+most seamlessly for long clips.
+
+**Weaker / avoid:** fast or chaotic action (especially across long-clip segment joins — a
+cut has no motion carry-over); lots of on-screen **text or logos**; many distinct subjects
+or hard scene-cuts inside one segment; exact object counts. Keep one segment = one coherent
+moment; use a longer duration (more segments) for a scene that needs to evolve.
+
+**Examples**
+- *"a hummingbird at a red flower, macro, soft morning light"* → a clean ~10 s macro shot.
+- *"a 40-second drone flight over a foggy coastline at dawn, slow push forward"* → 4 chained
+  segments → one combined ~40 s clip.
+- then *"make it stormy, darker"* → re-crafts from that and regenerates.
+
 ## What it can generate
 
 | | |

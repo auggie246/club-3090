@@ -14,6 +14,36 @@ render, since the video DiT's weights sit on GPU1). Pick by intent:
 Refine any of them by replying with the change (*"monochrome"*, *"tighter crop"*, *"at night"*,
 *"flat vector style"*) — the director evolves the previous prompt and regenerates. No approval gate.
 
+## Architecture
+
+```
+                          Browser
+                             │  "a logo for a coffee shop" · "a photoreal red fox at dusk"
+                             ▼
+              ┌──────────────────────────────────────────────────┐
+              │  Open WebUI   :8080   (the front-end)             │
+              │  image lanes: ✨ HiDream-O1 · 🖼️ Ideogram-4 · 🔓 Chroma │
+              └───────┬──────────────────────────────────┬───────┘
+                  (1) │ craft the prompt              (2) │ render the still
+                      ▼                                   ▼
+        ┌──────────────────────────┐   ┌───────────────────────────┐
+        │ Director   :8090         │   │ ComfyUI        :8188       │
+        │ qwen3.5-4b · GPU0 ~4.6GB │   │ HiDream-O1 / Ideogram-4 /  │
+        │ idea → Ideogram JSON     │   │ Chroma · single-device GPU0│
+        │   caption · or HiDream / │   │ → .png                     │
+        │   Chroma prose           │   └─────────────┬─────────────┘
+        └──────────────────────────┘                 ▼
+                                          ┌───────────────────────────┐
+        OWUI's native 🖼️ button →          │ Gallery   :8189            │
+        image-shim :8191 rewrites the     │ nginx over /output —       │
+        plain text into an Ideogram       │ links survive ComfyUI down │
+        JSON caption, then → ComfyUI      └─────────────┬─────────────┘
+                                                        ▼  🖼️ link back in chat
+                                                     Browser  (reply "monochrome" to refine)
+```
+
+All three image lanes are **single-device on GPU0** (the video DiT, when present, lives on GPU1) and coexist with the director. See [README.md](README.md) for the full studio substrate.
+
 ---
 
 ## ✨ HiDream-O1 (top-quality / photoreal)

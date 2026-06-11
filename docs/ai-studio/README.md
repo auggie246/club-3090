@@ -41,7 +41,41 @@ Video lanes can also mix a **Kokoro voiceover** onto the clip (a directive in th
 [audio.md](audio.md)). _(Text chat / agentic serving is the core rig stack, not a Studio lane — the
 Studio only borrows a small qwen "director" to craft prompts.)_
 
-## Architecture: lanes vs. modes
+## Architecture
+
+```
+                              Browser  —  Open WebUI :8080
+                                 │  pick a lane · type an idea · reply to refine
+                                 ▼
+                    ┌──────────────────────────────────────────┐
+                    │  Studio pipe  (OWUI Function)             │
+                    │  routes the lane · returns gallery links  │
+                    └───────┬──────────────────────────┬───────┘
+                   craft (1)│                  render (2)│
+                            ▼                            ▼
+              ┌──────────────────────┐   ┌──────────────────────────────────────┐
+              │ Director   :8090     │   │ Renderers                            │
+              │ qwen3.5-4b · GPU0    │   │  • ComfyUI :8188 — image · video ·   │
+              │ idea → crafted prompt│   │      music · SFX  (GPU0; video uses  │
+              │ (JSON / prose /      │   │      both GPUs via DisTorch)         │
+              │  tags / sound)       │   │  • step-voice :8193 — premium voice  │
+              └──────────────────────┘   │      (isolated, transformers 4.53.3) │
+              ┌──────────────────────┐   │  • studio-tts :8192 — Kokoro (CPU)   │
+              │ image-shim :8191     │   │      voiceover ducked onto a clip    │
+              │ proxy for OWUI's 🖼️  │   └──────────────────┬───────────────────┘
+              │ button → JSON caption│   long video >15s → orchestrator :8190
+              └──────────────────────┘        (chains ~10s segments + mux)
+                                                           ▼
+                                           ┌───────────────────────────┐
+                                           │ Gallery :8189 (nginx)      │
+                                           │ /output — survives ComfyUI │
+                                           │ down; ▶️/🖼️/🎧 links in chat │
+                                           └───────────────────────────┘
+```
+
+The qwen **director** crafts the right prompt shape per lane; **ComfyUI** renders image/video/music/SFX; the **step-voice** and **studio-tts** services handle premium + narration voice; the **orchestrator** chains long videos; everything lands in the always-on **gallery**. Text/LLM chat is the separate core stack (this is image/video/audio only).
+
+### Lanes vs. modes
 
 > A **lane** is anything light enough to coexist with the director on **GPU0** — it's just a pipe
 > route, no GPU-mode switch. A **mode** (`gpu-mode <name>`) is for anything that needs **both

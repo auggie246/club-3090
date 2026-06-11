@@ -15,6 +15,38 @@ director, output `.mp3`/`.wav` into the gallery, and refine by reply like every 
 > separate overlapping voices (SepFormer) — feeds the future realtime voice-agent (calling /
 > bookings) and is tracked in the private design notes, not yet built.
 
+## Architecture
+
+```
+                          Browser
+                             │  "a lofi beat" · "rain on a tin roof" · "say: welcome to the show"
+                             ▼
+              ┌──────────────────────────────────────────────────┐
+              │  Open WebUI   :8080   (the front-end)             │
+              │  audio lanes: 🎵 Music · 🔊 SFX · 🎙️ Voice          │
+              └───────┬──────────────────────────────────┬───────┘
+                  (1) │ craft the spec                (2) │ render
+                      ▼                                   ▼
+        ┌──────────────────────────┐   ┌───────────────────────────────────┐
+        │ Director   :8090         │   │ Renderer (per lane)               │
+        │ qwen3.5-4b · GPU0        │   │  🎵 Music · 🔊 SFX → ComfyUI :8188 │
+        │ idea → tags + lyrics     │   │     ACE-Step / Stable Audio (GPU0) │
+        │   (music) · sound prompt │   │  🎙️ Voice → step-voice :8193       │
+        │   (SFX) · voice speaks   │   │     Step-Audio-EditX (isolated,    │
+        │   the text verbatim      │   │     transformers 4.53.3, GPU)      │
+        └──────────────────────────┘   └─────────────┬─────────────────────┘
+                                                      ▼
+        voiceover-on-video:                ┌───────────────────────────┐
+        studio-tts :8192 (Kokoro, CPU)     │ Gallery   :8189            │
+        ducks a voice onto the clip's      │ nginx over /output         │
+        native bed via ffmpeg              │ (.mp3 / .wav)              │
+                                           └─────────────┬─────────────┘
+                                                         ▼  🎧 link back in chat
+                                                      Browser  (reply "more upbeat" to refine)
+```
+
+Music/SFX are ComfyUI lanes on GPU0; the **premium voice** runs in its own isolated `step-voice` service; **Kokoro narration** is the over-video path (CPU). See [README.md](README.md) for the full substrate.
+
 ---
 
 ## 🎙️ Premium voice — Step-Audio-EditX (clone + edit)

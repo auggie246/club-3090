@@ -54,9 +54,8 @@
 #   1. Pull the image (Anbeeld official sm_86/89 = 3090/4090):
 #        docker pull ghcr.io/anbeeld/beellama.cpp:server-cuda-v0.3.0-e0663be2713c
 #   2. Get the GGUF (Q5_K_M, embedded MTP head):
-#        /opt/ai/hf-download.sh Jackrong/Qwopus3.6-27B-Coder-MTP-GGUF \
-#          $MODEL_DIR/qwopus3.6-27b-coder-gguf/jackrong-mtp-q5km \
-#          Qwopus3.6-27B-Coder-MTP-Q5_K_M.gguf
+#        hf download Jackrong/Qwopus3.6-27B-Coder-MTP-GGUF Qwopus3.6-27B-Coder-MTP-Q5_K_M.gguf \
+#          --local-dir "$MODEL_DIR/qwopus3.6-27b-coder-gguf/jackrong-mtp-q5km"
 #   3. From this directory:
 #        MODEL_DIR=/your/models/dir docker compose -f mtp.yml up -d
 #   4. curl http://localhost:8067/v1/models  → should list the model.

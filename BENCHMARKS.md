@@ -338,6 +338,15 @@ New `gemma4_unified` arch (vLLM PR #44429 / llama.cpp #24077, merged 2026-06-03)
 
 ---
 
+## DiffusionGemma 26B-A4B (dLLM — experimental)
+
+Block-diffusion LLM (`DiffusionGemmaForBlockDiffusion`), not autoregressive — it emits **blocks** of tokens per step, so decode TPS reads much higher than AR models and is high-variance (entropy-dependent). Runs on Ampere via the official `vllm/vllm-openai:gemma` image + our 3 bind-mounted Ampere/TP fixes (Marlin-K-pad ×2 + diffusion_gemma TP-vocab/dtype) — the Marlin-pad is what clears the sm_86 FP8 shared-mem tile wall (`Padding FP8 MoE Marlin intermediate 352→384`). Slug `vllm/diffusiongemma-dual` (🧪, `--force`).
+
+| Config | Rig | KV | Max ctx | Narr / Code TPS | KV pool | Peak VRAM | Date | Notes |
+| --- | --- | --- | ---: | ---: | --- | ---: | --- | --- |
+| `vllm/diffusiongemma-dual` (TP=2, fp8) — **maintainer** | @noonghunna (2× 3090 **PCIe, no NVLink**) | bf16 | 262K | ~177 / 180 (peak ~1100 low-entropy) | 413K tok · 1.58× | ~23 GB/card | 2026-06-11 | Reference numbers from the shipped compose `status_note`. dLLM block-diffusion; 8-pack 100/150 (5-pack 84%); NIAH→250K; eager-only; `max_new_tokens` 16384 (self-terminates ~1.2–1.8K words). |
+| `vllm/diffusiongemma-dual` (TP=2, fp8) — **cross-rig ⭐** | @steamEngineer (2× 3090 **NVLink** NV4, X299 i9-10920X quad-channel, PCIe 3.0 ×16, Proxmox LXC, 350 W) | bf16 | 262K | **294 / 370** (decode, n=5, CV 8.5% / 21%; wall 209 / 242) | 413,470 tok · 1.58× | ~23.1 / 22.9 GB/card | 2026-06-14 | **First cross-rig confirmation of the shipped compose** ([#405](https://github.com/noonghunna/club-3090/issues/405)) — same image digest `9c719fc…` (vLLM `0.22.1rc1.dev357`), our Marlin-pad mounts visible working in the boot log. **Decode notably above the PCIe reference (294 vs ~177)** — plausibly NVLink lifting the TP=2 all-reduce, though block-diffusion variance is high (CV up to 21%), so not a clean attribution. TTFT ~1.4 s narr / ~1.1 s. `verify-stress` 8/8 (NIAH usable to **184K**, quality ceiling 214K — recall miss at 81%); `verify-full` 8/9 (the lone fail is the SSE-chunk check — a **false-fail for block-diffusion**, which emits whole blocks, not token-by-token; the text was correct). Soak not run (was blocked by the auto-detect bug, fixed in #414). Agentic: O(n)-like TTFT growth + 3/12 tool-call misses at depth. 8-pack not run. |
+
 <a id="moe-models"></a>
 
 ## MoE models (v0.7.3 — preview track)

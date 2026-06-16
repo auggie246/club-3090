@@ -34,6 +34,23 @@ weights:
       with headroom; no KV quant needed. Sampling per the technical report:
       temperature=1.0, top_p=0.95, top_k=-1. Give clients a generous max_tokens
       (8K-32K) — the model reasons inline and its own generation_config caps at 2048.
+  prithivmlmods-q8:
+    path: vibethinker-3b-gguf/prithivmlmods-q8
+    local_subdir: vibethinker-3b-gguf/prithivmlmods-q8
+    size_gb: 3.3
+    format: gguf
+    status: incubating
+    hf_repo: prithivMLmods/VibeThinker-3B-GGUF
+    files:
+      - VibeThinker-3B.Q8_0.gguf
+    engine: llamacpp
+    kind: gguf
+    verify_glob: "*.gguf"
+    manual_note: >-
+      prithivMLmods Q8_0 GGUF (~3.3 GB, plain qwen2 conversion — NO MTP head). The
+      performance-max VibeThinker path on llama.cpp: Q8_0 is near-lossless (quality
+      intact where vLLM fp8 weights broke it), ~166 TPS, ~6.2 GB at full 131K with
+      q8_0 KV + -b 4096 -ub 2048. Served by llamacpp/vibethinker-3b-single.
 default_weight_variant: bf16
 valid_tp:
   - 1

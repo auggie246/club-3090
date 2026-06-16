@@ -191,6 +191,19 @@ weights:
     kind: gguf
     verify_glob: "*.gguf"
     manual_note: "stuchapin Carnice-V2-27B (kai-os/Carnice-V2-27b — Hermes-style agentic SFT of Qwen3.6-27B) — Q5_K_M GGUF with EMBEDDED MTP head (beellama --spec-type draft-mtp; no separate draft download). mtp_num_hidden_layers=1 → DRAFT_N_MAX=1 (author: n=3 'wrong by a wide margin'). Drives beellama/carnice-v2-single-q5km-mtp (single 3090, kvarn4 KV @ 160K + MTP; 176K ceiling). 8-pack reasoning-on 110/150 (beats qwopus-coder 103). 2026-06-14."
+  carnice-v2-q8:
+    path: carnice-v2-27b-gguf/stuchapin-q8
+    local_subdir: carnice-v2-27b-gguf/stuchapin-q8
+    size_gb: 29.4
+    format: gguf
+    status: experimental
+    hf_repo: stuchapin/Carnice-V2-27B-MTP-GGUF
+    files:
+      - Carnice-V2-27B-Q8_0-mtp.gguf
+    engine: beellama
+    kind: gguf
+    verify_glob: "*.gguf"
+    manual_note: "Carnice-V2-27B Q8_0 GGUF (embedded MTP head) — the higher-quant DUAL-card variant (#403). Drives beellama/carnice-v2-dual-q8-mtp (embedded MTP, q8_0/q8_0 KV, full 262K). KV A/B chose q8_0 over the originally-spec'd kvarn6 (q8_0 +17% prefill, higher fidelity, reference path, fits 262K on dual — kvarn's compression only pays off on a tight single card). DFlash A/B ruled out (base-27B drafter ~10% accept on the fine-tune; no Carnice-matched drafter exists) → MTP-only. 2026-06-15."
   beellama-q8kxl-dflash:
     path: qwen3.6-27b-gguf/unsloth-mtp-q8kxl
     local_subdir: qwen3.6-27b-gguf/unsloth-mtp-q8kxl

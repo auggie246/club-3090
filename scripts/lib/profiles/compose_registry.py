@@ -328,6 +328,16 @@ COMPOSE_REGISTRY = {
         status="experimental",
         status_note="Carnice-V2-27B (stuchapin — kai-os/Carnice-V2-27b, Hermes-style agentic SFT of Qwen3.6-27B) Q5_K_M GGUF + EMBEDDED MTP head (--spec-type draft-mtp, n=1) + KVarN-4 KV, single 3090. Launch with --force (experimental). REQUIRES the KVarN engine build (beellama v0.3.2 PREVIEW, digest-pinned) — v0.3.0/earlier reject --cache-type-k kvarn4. FULLY VALIDATED 2026-06-14 (rebench-full, reasoning-on): engine-compat PASS (beellama LOADS the PR#22673-fused GGUF — the card's 'mainline fails to load' does NOT apply), verify-full all-pass, verify-stress 8/8 (NIAH clean to 150K), soak PASS (0-growth, 0/100 silent-empty, 100.5% retention, p50 49.5 TPS), bench 46.8/50.5 TPS narr/code, MTP accept ~94%. 8-pack reasoning-on 110/150 — BEATS sibling beellama/qwopus-coder 103/150 (edge is agentic/instruct: hermes 13 vs 10, instructfollow 15, reasonmath 13; dataextract 10 = Qwen-family number-format floor). Ships 160K (MTP-on default; 176K measured ceiling, 192K OOMs; 230K via the no-MTP env opt-in). n=1 default; n=2 is a +12%-TPS opt-in (DRAFT_N_MAX=2, doesn't crash on our single-card kvarn4 unlike the author's 2×3090) pending a dedicated soak. beellama v0.3.2 is a rolling PRE-RELEASE → stays experimental (un-park on a stable Anbeeld tag, #455).",
     ),
+    "beellama/carnice-v2-dual-q8-mtp": _entry(
+        model="qwen3.6-27b", weights_variant="carnice-v2-q8", workload="fast-chat",
+        engine="beellama-local", drafter="carnice-mtp-gguf", kv_format="q8_0",
+        tp=2, max_ctx=262144, max_num_seqs=1, mem_util=None,
+        compose_path="models/qwen3.6-27b/beellama/compose/dual/carnice-v2-q8/mtp-q8kv.yml",
+        default_port=8070,
+        kvcalc_key="SKIP",
+        status="experimental",
+        status_note="Carnice-V2-27B Q8_0 + EMBEDDED MTP head (--spec-type draft-mtp, n=1) + q8_0/q8_0 KV, DUAL 3090 (layer-split -ts 0.55,0.45). The dual / higher-quant follow-through requested in #403 (Q5_K_M single = beellama/carnice-v2-single-q5km-mtp). FULLY VALIDATED 2026-06-16 (rebench-full): verify-full ALL-PASS, bench n=5 narr 40.7/code 44.0 decode TPS, verify-stress 8/8 (NIAH->240K), soak fresh 20x5 PASS (0 growth, 0/100 silent-empty, p50 42.2, 100% retention), 8-pack think-OFF 103/150 / think-ON 105/150 (in-band, q8_0 KV held quality). MTP accept ~81%, full 262K fits @ -ts 0.55,0.45 (21.9/21.2 GB/card, ~2.5GB free). KV A/B: chose q8_0 over the originally-spec'd kvarn6 — q8_0 prefills +17% (1003 vs 860 t/s; kvarn6's software-compression compute throttled prefill), higher-fidelity (q8 > q6-class), reference path (kvarn6 = Anbeeld 'experimental'), fits 262K on dual. -b/-ub/--no-mmap A/B'd FLAT; n=2 = +13% validated-stable opt-in (DRAFT_N_MAX=2). DFlash A/B RULED OUT (base-27B drafter ~10% accept on the fine-tune; no Carnice-matched drafter exists) → MTP-only. Launch --force. beellama v0.3.2 rolling pre-release → experimental (#455).",
+    ),
 
     # Qwen3.6-27B PRISM-PRO-DQ (Ex0bit dynamic-quant GGUF) — community-experimental, ik-llama.
     "ik-llama/prism-pro-dq-mtp": _entry(

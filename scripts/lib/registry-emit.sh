@@ -349,6 +349,155 @@ raise SystemExit(1)
 PY_MODEL_DEFAULT
 }
 
+# registry_variant_rows_json ROOT  →  one JSON object on stdout.
+#
+# Direct-invocation companion to the SOURCED registry_variant_rows tab emitter
+# (which stays byte-identical — this is purely additive). Emits the registry
+# variants + defaults + the profile catalog (engines / models / hardware /
+# drafters) as a single JSON object for structured consumers (e.g. the cockpit
+# TUI). The variants/defaults blocks are derived by feeding the EXISTING
+# registry_variant_rows tab output through club3090_tui_core.registry's
+# parse_variant_rows, so the field names/order stay locked to the shared
+# dataclass; profiles are sourced via the EXISTING scripts.lib.profiles loaders
+# (compat.load_profiles + compose_registry.DEFAULTS) — never re-derived here.
+registry_variant_rows_json() {
+  local root="$1"
+  # Reuse the byte-identical tab emitter for the variants/defaults rows, then
+  # hand both the rows and the root to the python serializer on stdin so the
+  # JSON is built from the SAME parser the cockpit/c3t use.
+  local rows
+  if ! rows="$(registry_variant_rows "$root")"; then
+    echo "[registry-emit] ERROR: registry_variant_rows failed" >&2
+    return 2
+  fi
+  # Pass the tab rows via the environment (not stdin) so the heredoc below can
+  # still serve as the python script's stdin.
+  REGISTRY_TAB="$rows" python3 - "$root" <<'PY_JSON'
+from __future__ import annotations
+
+import dataclasses
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+
+# Reuse the shared registry-row parser from club3090_tui_core WITHOUT importing
+# the package __init__ (it pulls httpx, not guaranteed in this interpreter).
+# Load the submodule file directly; register it in sys.modules first so its
+# @dataclass decorator resolves its own module namespace.
+_reg_path = root / "tools" / "tui-core" / "club3090_tui_core" / "registry.py"
+_spec = importlib.util.spec_from_file_location("_c3_tui_registry", _reg_path)
+_tui_registry = importlib.util.module_from_spec(_spec)
+sys.modules["_c3_tui_registry"] = _tui_registry
+_spec.loader.exec_module(_tui_registry)
+
+from scripts.lib.profiles.compat import load_profiles  # noqa: E402
+from scripts.lib.profiles.compose_registry import DEFAULTS  # noqa: E402
+
+tab = os.environ.get("REGISTRY_TAB", "")
+
+# --- variants: exactly the fields parse_variant_rows produces from the tab form,
+#     trimmed to the contract's variant schema (+ 'source' default "curated"). ---
+variants = []
+for vr in _tui_registry.parse_variant_rows(tab):
+    d = dataclasses.asdict(vr)
+    variants.append(
+        {
+            "slug": d["slug"],
+            "switch_engine": d["switch_engine"],
+            "launch_engine": d["launch_engine"],
+            "compose_dir": d["compose_dir"],
+            "file": d["file"],
+            "port": d["port"],  # int (parse_variant_rows coerces)
+            "model": d["model"],
+            "engine": d["engine"],
+            "kvcalc_key": d["kvcalc_key"],
+            "container": d["container"],
+            "compose_path": d["compose_path"],
+            "status": d["status"],
+            "ctx_label": d["ctx_label"],
+            "status_note": d["status_note"],
+            "source": "curated",
+        }
+    )
+
+# --- defaults: from the registry DEFAULTS map (model, engine, topology -> slug). ---
+defaults = [
+    {
+        "model": model,
+        "engine": engine,
+        "topology": topology,
+        "slug": slug,
+        "source": "curated",
+    }
+    for (model, engine, topology), slug in DEFAULTS.items()
+]
+
+# --- profiles: sourced via the EXISTING loaders (never re-derived). ---
+profiles = load_profiles()
+
+
+def _engine(e):
+    return {
+        "image": (e.install or {}).get("spec"),
+        "min_sm": e.min_sm,
+        "supported_kv_formats": list(e.supported_kv_formats),
+        "supported_weight_formats": list(e.supported_weight_formats),
+        "supported_drafters": list(e.supported_drafters),
+        "supported_model_families": list(e.supported_model_families),
+    }
+
+
+def _model(m):
+    # model-level hf_repo: surface the default weight variant's hf_repo (the
+    # canonical artifact); per-variant repos live under weights.<v>.hf_repo.
+    default_meta = m.weights.get(m.default_weight_variant) or {}
+    return {
+        "family": m.family,
+        "valid_tp": list(m.valid_tp),
+        "max_ctx": m.max_ctx_supported,
+        "hf_repo": default_meta.get("hf_repo"),
+        "weights": m.weights,
+    }
+
+
+def _hardware(h):
+    return {
+        "vram_gb": h.vram_gb,
+        "sm": h.sm,
+        "supported_kv_formats": list(h.supported_kv_formats),
+    }
+
+
+def _drafter(dr):
+    return {
+        # the drafter profile's spec_method is its "type"; there is no separate
+        # accept-rate field in the schema today (emit null so the key is stable).
+        "type": dr.spec_method,
+        "accept": None,
+    }
+
+
+payload = {
+    "variants": variants,
+    "defaults": defaults,
+    "profiles": {
+        "engines": {eid: _engine(e) for eid, e in profiles.engines.items()},
+        "models": {mid: _model(m) for mid, m in profiles.models.items()},
+        "hardware": {hid: _hardware(h) for hid, h in profiles.hardware.items()},
+        "drafters": {did: _drafter(dr) for did, dr in profiles.drafters.items()},
+    },
+}
+
+json.dump(payload, sys.stdout, sort_keys=True)
+sys.stdout.write("\n")
+PY_JSON
+}
+
 # x_default_dispatch ROOT TOKEN TOPOLOGY MODEL  →  resolved slug on stdout.
 #
 # Parses an `X/default` token (design §13.1): if X is an engine name →
@@ -389,3 +538,24 @@ PY_DISPATCH
       ;;
   esac
 }
+
+# --- Direct-invocation entrypoint (additive) ---------------------------------
+#
+# This file is normally SOURCED for its functions (registry_variant_rows etc.).
+# When run DIRECTLY (`bash scripts/lib/registry-emit.sh --json [ROOT]`) it emits
+# the structured JSON catalog via registry_variant_rows_json. Sourcing the file
+# never reaches this guard, so the sourced contract is unchanged.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  set -euo pipefail
+  case "${1:-}" in
+    --json)
+      # ROOT defaults to the repo root (two levels up from scripts/lib/).
+      root="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+      registry_variant_rows_json "$root"
+      ;;
+    *)
+      echo "usage: bash ${BASH_SOURCE[0]} --json [ROOT]" >&2
+      exit 2
+      ;;
+  esac
+fi

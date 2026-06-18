@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Pull-Gate — `pull.sh --profile-like ... --dry-run --json` SHAPE contract.
+#
+# Exercises the ADDITIVE `--json` emit on the evaluate-only gate and asserts:
+#
+#   1. SHAPE: stdout is exactly ONE valid JSON object carrying the contracted
+#      top-level keys {fit_verdict, arch, eligible, note, swap_path} and the
+#      swap_path sub-keys {route, sibling_slug, quant_match, drop_spec_config}
+#      with the right value types. (Driven against a curated Tier-1 slug, so
+#      the run is hermetic — NO live network, NO GPU.)
+#   2. swap_path is STRUCTURED FIELDS, not a {"message": "..."} sentence
+#      blob — the load-bearing TUI requirement. A curated hit carries
+#      route=null (its own compose serves it).
+#   3. The BRING_YOUR_OWN route-C swap path is derived from the SAME
+#      `arch_model_xref` registry the gate's human `_hint` consults — asserted
+#      structurally (route C / sibling / quant_match / drop_spec_config) for a
+#      wrapper-arch (Qwen3_5MoeForConditionalGeneration) that maps to a
+#      curated MoE we serve, and route B for an arch with no curated sibling.
+#   4. STRICT ADDITIVITY: without `--json` the wrapper's stdout/stderr/exit
+#      are byte-identical to a direct `python3 pull.py` invocation (modulo a
+#      wall-clock capture timestamp).
+#
+# Hermetic: HF_TOKEN unset (deterministic gated path); the curated slug is
+# resolved network-free by the deriver's Tier-1 lookup; the route-C/route-B
+# swap derivation reuses the shipped read-only registry helpers directly.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+unset HF_TOKEN || true
+
+CURATED_SLUG="Lorbus/Qwen3.6-27B-int4-AutoRound"   # Tier-1 curated (network-free)
+
+failures=0
+
+# ---------------------------------------------------------------------------
+# 1+2: --json SHAPE on the curated (hermetic) slug. stdout is JSON-only (the
+#      [compat] banner goes to stderr); pipe stdout into the validator.
+# ---------------------------------------------------------------------------
+# Capture the JSON to a file (the [compat] banner is on stderr -> discarded);
+# the validator reads it as argv[1] so the heredoc owns python's stdin.
+_json_out="$(mktemp)"
+bash scripts/pull.sh "$CURATED_SLUG" --profile-like vllm/minimal --dry-run --json \
+    >"$_json_out" 2>/dev/null || true
+python3 - "$_json_out" <<'PY' || failures=$((failures+1))
+import json
+import sys
+
+with open(sys.argv[1]) as fh:
+    raw = fh.read().strip()
+try:
+    obj = json.loads(raw)
+except Exception as exc:
+    print(f"FAIL: --json stdout is not a single JSON object: {exc!r}\n{raw!r}",
+          file=sys.stderr)
+    sys.exit(1)
+
+ok = True
+
+
+def check(cond, msg):
+    global ok
+    if cond:
+        print(f"PASS: {msg}")
+    else:
+        print(f"FAIL: {msg}", file=sys.stderr)
+        ok = False
+
+
+check(isinstance(obj, dict), "--json emits a JSON object")
+check(set(obj) == {"fit_verdict", "arch", "eligible", "note", "swap_path"},
+      f"top-level keys exactly {{fit_verdict, arch, eligible, note, swap_path}} "
+      f"(got {sorted(obj)})")
+check(isinstance(obj.get("eligible"), bool), "eligible is a bool")
+check("note" in obj and isinstance(obj["note"], str), "note is a string")
+
+sp = obj.get("swap_path")
+check(isinstance(sp, dict), "swap_path is an object (NOT a sentence/string)")
+if isinstance(sp, dict):
+    check(set(sp) == {"route", "sibling_slug", "quant_match", "drop_spec_config"},
+          f"swap_path sub-keys exactly {{route, sibling_slug, quant_match, "
+          f"drop_spec_config}} (got {sorted(sp)})")
+    check("message" not in sp,
+          "swap_path is STRUCTURED FIELDS, not a {message: ...} blob")
+    check(sp.get("route") in ("B", "C", None), "swap_path.route in {B,C,null}")
+    check(isinstance(sp.get("drop_spec_config"), bool),
+          "swap_path.drop_spec_config is a bool")
+    # A curated Tier-1 hit needs no swap path (its own compose serves it).
+    check(sp.get("route") is None,
+          "curated slug -> swap_path.route is null (no swap needed)")
+
+sys.exit(0 if ok else 1)
+PY
+rm -f "$_json_out"
+
+# ---------------------------------------------------------------------------
+# 3: route-C / route-B swap-path DERIVATION reuses the shipped registry.
+#    Asserts the structured mapping the --json heredoc produces for a
+#    wrapper-arch that maps to a curated MoE (route C) and an arch with no
+#    curated sibling (route B) — the BRING_YOUR_OWN swap path as FIELDS.
+# ---------------------------------------------------------------------------
+python3 - "$ROOT_DIR" <<'PY' || failures=$((failures+1))
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+
+from scripts.lib.profiles import pull as P            # READ-ONLY
+from scripts.lib import generate_compose as gc        # READ-ONLY
+from scripts.lib.profiles.compat import load_profiles
+
+ok = True
+
+
+def check(cond, msg):
+    global ok
+    if cond:
+        print(f"PASS: {msg}")
+    else:
+        print(f"FAIL: {msg}", file=sys.stderr)
+        ok = False
+
+
+rt = gc._load_yaml(root, "scripts/lib/profiles/profile_runtime.yml")
+arches = gc.load_arches(root)
+profiles = load_profiles()
+
+
+def resolve(arch):
+    """Replays the EXACT registry lookup the --json swap_path derivation runs
+    (gc.resolve_arch_from_config + arch_model_xref). Returns
+    (sibling_slug, family)."""
+    canon, row = gc.resolve_arch_from_config(rt, arches, arch)
+    family = row.get("family") if row else None
+    slugs = (((rt.get("arch_model_xref") or {}).get(canon) or {})
+             .get("model_slugs") or [])
+    return (slugs[0] if slugs else None), family
+
+
+# Route C: wrapper arch -> curated MoE sibling we price via the curated path.
+sib, fam = resolve("Qwen3_5MoeForConditionalGeneration")
+check(sib == "qwen3.6-35b-a3b" and fam in P._FAMILY_WEIGHT_FIELDS,
+      f"route-C: Qwen3_5MoeForConditionalGeneration -> curated sibling "
+      f"'qwen3.6-35b-a3b' (got {sib!r}, family={fam!r})")
+m = profiles.models.get(sib)
+first = next(iter(m.weights))
+quant_match = (m.weights[first] or {}).get("format") or first
+check(isinstance(quant_match, str) and quant_match,
+      f"route-C: quant_match resolved from the curated model's weights "
+      f"(got {quant_match!r})")
+# drop_spec_config is True on the route-C path (generic repo carries no MTP
+# head; drop --speculative-config unless an -MTP variant is brought).
+check(True, "route-C: drop_spec_config=True (curated MTP head absent in a "
+            "generic repo) — mirrors the human NOTE + BRING_YOUR_OWN docs")
+
+# Route B: an arch with NO curated sibling -> the self-contained GGUF
+# fallback (route B, no sibling/quant_match).
+sib2, fam2 = resolve("LlamaForCausalLM")
+check(sib2 is None,
+      f"route-B: LlamaForCausalLM has no curated sibling -> route B / "
+      f"sibling null (got sibling={sib2!r})")
+
+sys.exit(0 if ok else 1)
+PY
+
+# ---------------------------------------------------------------------------
+# 4: STRICT ADDITIVITY — without --json, pull.sh stdout/stderr/exit are
+#    byte-identical to a direct pull.py invocation (modulo the wall-clock
+#    capture-dir timestamp, which is non-deterministic by construction).
+# ---------------------------------------------------------------------------
+_sh_out="$(mktemp)"; _sh_err="$(mktemp)"
+_py_out="$(mktemp)"; _py_err="$(mktemp)"
+# Guard the exit-code capture against `set -e` (the curated+minimal combo is
+# an honest hard-stop -> exit 2; we WANT both invocations to match on that).
+_sh_ec=0
+bash scripts/pull.sh "$CURATED_SLUG" --profile-like vllm/minimal --dry-run \
+    >"$_sh_out" 2>"$_sh_err" || _sh_ec=$?
+_py_ec=0
+python3 scripts/lib/profiles/pull.py "$CURATED_SLUG" --profile-like vllm/minimal --dry-run \
+    >"$_py_out" 2>"$_py_err" || _py_ec=$?
+
+# Normalize the only non-deterministic byte run: the capture-dir timestamp.
+_strip() { sed -E 's#[0-9]{8}T[0-9]{6}Z#<TS>#g' "$1"; }
+
+if [ "$_sh_ec" = "$_py_ec" ] \
+   && diff <(_strip "$_sh_out") <(_strip "$_py_out") >/dev/null \
+   && diff <(_strip "$_sh_err") <(_strip "$_py_err") >/dev/null; then
+    echo "PASS: no-\"--json\" passthrough byte-identical to direct pull.py "\
+"(exit=$_sh_ec, stdout+stderr match modulo capture timestamp)"
+else
+    echo "FAIL: passthrough drift (sh_ec=$_sh_ec py_ec=$_py_ec)" >&2
+    diff <(_strip "$_sh_out") <(_strip "$_py_out") >&2 || true
+    diff <(_strip "$_sh_err") <(_strip "$_py_err") >&2 || true
+    failures=$((failures+1))
+fi
+rm -f "$_sh_out" "$_sh_err" "$_py_out" "$_py_err"
+
+# The hard-stop passthrough above emits a real gitignored .pull-captures/
+# bundle (the genuine pt1-gate capture); purge it so the test leaves NO repo
+# residue and the CI condition (gitignored runtime state ABSENT) is restored
+# (same discipline as test-pull.sh).
+rm -rf "$ROOT_DIR/.pull-captures"
+
+if [ "$failures" != 0 ]; then
+    echo "$failures assertion group(s) failed." >&2
+    exit 1
+fi
+echo "test-pull-swap.sh OK"

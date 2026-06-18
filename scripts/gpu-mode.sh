@@ -851,6 +851,84 @@ mode_off() {
     echo -e "${GREEN}All services stopped.${NC}"
 }
 
+# --- Scene catalog (`--list-modes [--json]`) --------------------------------
+# Machine-readable mirror of the dispatch case + what each mode_* function
+# actually starts. Each row: name (the dispatch keyword), group, description,
+# services (logical service/container names the mode brings up), ports, gpus.
+# Groups follow the contract: serving / studio / ops. This is hand-maintained
+# alongside the dispatch case below — keep them in lockstep when adding a mode.
+#
+# Format is a TSV heredoc (name \t group \t description \t services \t ports \t
+# gpus) so the data lives in one readable place; we render it to a plain table
+# or to JSON via python3 (already a hard dep of show_status). The plain render
+# is the default; --json emits the [{name,group,description,services,ports,gpus}]
+# array the contract specifies. services/ports are comma-joined in the TSV and
+# split into JSON arrays; gpus is the human GPU-usage note.
+list_modes_data() {
+    # name<TAB>group<TAB>description<TAB>services<TAB>ports<TAB>gpus
+    cat <<'TSV'
+chat	serving	Open WebUI + LiteLLM + Qdrant + SearXNG (browser chat, no GPU model)	openwebui,litellm,qdrant,searxng	8080,4000	none
+27b	serving	Qwen3.6-27B MTP n=3 + fp8 KV + 262K + vision (TP=2) — default	vllm-qwen36-27b-dual,litellm,qdrant,openwebui,searxng	8010,8080,4000	both
+gemma	serving	Gemma 4 31B INT8 PTH KV + 262K + vision (TP=2) — dual default	vllm-gemma-4-31b-mtp-int8,litellm,qdrant,openwebui,searxng	8032,8080,4000	both
+gemma-int8	serving	alias for gemma (Gemma 4 31B INT8 PTH KV, 262K, TP=2)	vllm-gemma-4-31b-mtp-int8,litellm,qdrant,openwebui,searxng	8032,8080,4000	both
+gemma-mtp	serving	Gemma 4 31B bf16 KV fallback — 32K, stock vLLM, no overlay (TP=2)	vllm-gemma-4-31b-mtp,litellm,qdrant,openwebui,searxng	8030,8080,4000	both
+deckard	serving	Qwen3.6-40B-Deckard Q6_K + MTP n=2 + q8_0 KV + 128K (llama.cpp, dual)	llama-cpp-deckard-40b,litellm,qdrant,openwebui,searxng	8199,8080,4000	both
+bigmodel	serving	Stop everything; max RAM+VRAM for one-off llama-server / custom workloads		none
+comfyui	studio	ComfyUI image/video gen only, all GPUs (mutex with LLM)	comfyui	8188	both
+image-studio	studio	Ideogram-4 image gen (GPU0) + gemma-4-12b chat (GPU1) + Open WebUI	comfyui,llama-cpp-gemma4-12b,studio-director,studio-image-shim,openwebui,litellm,searxng	8188,8069,8090,8191,8080,4000	split
+video-studio	studio	text/image to video (LTX/Sulphur) — ComfyUI both GPUs + studio sidecars + Open WebUI	comfyui,studio-director,studio-gallery,studio-orchestrator,studio-image-shim,studio-tts,openwebui,litellm,searxng	8188,8090,8189,8190,8191,8192,8080,4000	both
+diffusiongemma	studio	DiffusionGemma 26B-A4B dLLM (fp8, TP=2, 262K, both cards)	vllm-diffusiongemma-26b-a4b-fp8-tp2,litellm,qdrant,openwebui,searxng	8199,8080,4000	both
+off	ops	Stop all services	all-stopped		none
+power-cap	ops	GPU power-cap controls (on/off/status; both 3090s, 230W default cap)			both
+prune	ops	docker image prune -a (safe — only unreferenced images)			none
+prune-all	ops	+ build cache (keep 5 GB) + dangling networks (volumes safe)			none
+TSV
+}
+
+list_modes() {
+    local as_json=0
+    [[ "${1:-}" == "--json" ]] && as_json=1
+    if [[ "$as_json" -eq 1 ]]; then
+        list_modes_data | python3 -c '
+import sys, json
+rows = []
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    parts = line.split("\t")
+    # pad to 6 fields so trailing-empty columns survive split
+    while len(parts) < 6:
+        parts.append("")
+    name, group, desc, services, ports, gpus = parts[:6]
+    rows.append({
+        "name": name,
+        "group": group,
+        "description": desc,
+        "services": [s for s in services.split(",") if s],
+        "ports": [p for p in ports.split(",") if p],
+        "gpus": gpus,
+    })
+print(json.dumps(rows, indent=2))
+'
+    else
+        echo ""
+        echo -e "${CYAN}═══ Scene Catalog ═══${NC}"
+        local cur_group=""
+        while IFS=$'\t' read -r name group desc services ports gpus; do
+            [[ -z "$name" ]] && continue
+            if [[ "$group" != "$cur_group" ]]; then
+                cur_group="$group"
+                echo ""
+                echo -e "${CYAN}[$group]${NC}"
+            fi
+            printf "  %-16s %s\n" "$name" "$desc"
+        done < <(list_modes_data)
+        echo ""
+        echo -e "${YELLOW}--list-modes --json for the machine-readable catalog.${NC}"
+    fi
+}
+
 usage() {
     echo ""
     echo -e "${CYAN}GPU Mode Switcher${NC} — AI Inference Stack Manager"
@@ -913,5 +991,6 @@ case "${1:-}" in
     power-cap|powercap) mode_powercap "${2:-status}" ;;
     prune)              mode_prune ;;
     prune-all)          mode_prune_all ;;
+    --list-modes)       list_modes "${2:-}" ;;
     *)                  usage ;;
 esac

@@ -18,6 +18,8 @@
 #   bash scripts/switch.sh --down               # just bring down whatever's up
 #   bash scripts/switch.sh --set-default <slug>  # pin <slug> as YOUR default for its model (.env)
 #   bash scripts/switch.sh --clear-default <model>  # remove your pinned default for <model>
+#   bash scripts/switch.sh --explain <slug>      # one slug's full story: registry row + engine/model/hardware/drafter facts + kv-calc fit verdict + measured BENCHMARKS row
+#   bash scripts/switch.sh --explain <slug> --json  # same, as a structured JSON object
 #
 # `<…>/default` tokens auto-resolve to a concrete slug (design §13.1):
 #   <engine>/default        e.g. vllm/default — the maintainer's recommended
@@ -102,8 +104,25 @@ fi
 # Surface the resolved MODEL_DIR + its source so the precedence is unambiguous
 # (the exact confusion behind #425 / #187). Unset → the compose's built-in
 # default applies; preflight_compose_deps notes that case.
+#
+# Routing: normally stdout (unchanged). But on the new `--explain … --json`
+# emit path, the notice goes to stderr instead so the stdout stream stays clean
+# machine-parseable JSON. This is additive — every pre-existing invocation
+# (none of which is `--explain --json`) keeps stdout byte-identical. The guard
+# requires BOTH tokens so a bare (still-erroring) `--json` is untouched.
 if [[ -n "${MODEL_DIR:-}" ]]; then
-  echo "[switch] MODEL_DIR=${MODEL_DIR}"
+  _switch_json_emit=0 _switch_saw_explain=0 _switch_saw_json=0
+  for _switch_arg in "$@"; do
+    [[ "$_switch_arg" == "--explain" ]] && _switch_saw_explain=1
+    [[ "$_switch_arg" == "--json" ]] && _switch_saw_json=1
+  done
+  [[ "$_switch_saw_explain" -eq 1 && "$_switch_saw_json" -eq 1 ]] && _switch_json_emit=1
+  if [[ "$_switch_json_emit" -eq 1 ]]; then
+    echo "[switch] MODEL_DIR=${MODEL_DIR}" >&2
+  else
+    echo "[switch] MODEL_DIR=${MODEL_DIR}"
+  fi
+  unset _switch_json_emit _switch_saw_explain _switch_saw_json _switch_arg
 fi
 
 # Variant tables are DERIVED from the single source of truth
@@ -505,6 +524,273 @@ defaults_view_standalone() {
   exit 0
 }
 
+# --- --explain: one slug's full story ----------------------------------------
+#
+# `--explain <slug> [--json]` prints ONE slug's full story: its registry
+# variant row (status / port / container / ctx) joined with the engine / model
+# / hardware / drafter facts, the kv-calc fit verdict for the local card(s),
+# and the measured BENCHMARKS.md row if one exists. `--json` emits the same
+# data as a structured object; the default is a readable block.
+#
+# This is a READ-ONLY, terminal action — it never brings a container up/down,
+# never touches .env, and is strictly additive to the existing flag set.
+
+# Map the local GPU (nvidia-smi name) to a hardware-profile id under
+# scripts/lib/profiles/hardware/<id>.yml, which is what kv-calc's `--fit --card`
+# expects. Falls back to rtx-3090 (this rig's card) when detection is
+# unavailable so --explain still produces a fit verdict offline. CLUB3090_CARD
+# overrides the detection explicitly. Echoes the card id.
+explain_detect_card() {
+  if [[ -n "${CLUB3090_CARD:-}" ]]; then
+    printf '%s' "$CLUB3090_CARD"
+    return 0
+  fi
+  local name=""
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    name="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || true)"
+  fi
+  case "$name" in
+    *"RTX 3090 Ti"*) printf 'rtx-3090-ti' ;;
+    *"RTX 3090"*)    printf 'rtx-3090' ;;
+    *"RTX 4090"*)    printf 'rtx-4090' ;;
+    *"RTX 5090"*)    printf 'rtx-5090' ;;
+    *"A5000"*)       printf 'rtx-a5000' ;;
+    *"A100"*)        printf 'a100-40gb' ;;
+    *"H100"*)        printf 'h100-80gb' ;;
+    *)               printf 'rtx-3090' ;;   # this rig's default
+  esac
+}
+
+# Emit the joined registry/engine/model/hardware/drafter facts for one slug as
+# a single JSON object on stdout (reuses COMPOSE_REGISTRY + the slug helpers —
+# never reimplements the row). Exits non-zero with a message on an unknown slug.
+explain_registry_json() {
+  local root="$1" slug="$2"
+  python3 - "$root" "$slug" <<'PY_EXPLAIN_REG'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from scripts.lib.profiles.compose_registry import (  # noqa: E402
+    COMPOSE_REGISTRY,
+    model_of_slug,
+    slug_topology,
+)
+
+slug = sys.argv[2]
+entry = COMPOSE_REGISTRY.get(slug)
+if entry is None:
+    print(f"unknown slug {slug!r} — run: scripts/switch.sh --list", file=sys.stderr)
+    raise SystemExit(1)
+
+cp = entry["compose_path"]
+serving = cp.rsplit("/", 1)[-1] if "/" in cp else cp
+out = {
+    "slug": slug,
+    "model": entry.get("model") or model_of_slug(slug),
+    "engine": entry.get("engine"),
+    "topology": slug_topology(slug),
+    "weights_variant": entry.get("weights_variant"),
+    "workload": entry.get("workload"),
+    "drafter": entry.get("drafter"),
+    "kv_format": entry.get("kv_format"),
+    "tp": entry.get("tp"),
+    "pp": entry.get("pp"),
+    "max_ctx": entry.get("max_ctx"),
+    "max_num_seqs": entry.get("max_num_seqs"),
+    "mem_util": entry.get("mem_util"),
+    "vision": bool(entry.get("category") == "vision")
+    or "vision" in (entry.get("workload") or ""),
+    "requires_nvlink": entry.get("requires_nvlink", False),
+    "required_sm": entry.get("required_sm"),
+    "default_port": entry.get("default_port"),
+    "kvcalc_key": entry.get("kvcalc_key"),
+    "status": entry.get("status") or "production",
+    "status_note": entry.get("status_note") or "",
+    "compose_path": cp,
+    "serving_file": serving,
+}
+print(json.dumps(out))
+PY_EXPLAIN_REG
+}
+
+# Call the sibling kv-calc `--fit <slug> --card <id> --json` contract and echo
+# its JSON on stdout. That flag is being built in parallel; if it isn't wired
+# yet (or errors), echo an "unavailable" object so --explain still completes —
+# the LIVE integration is asserted in the Guard phase, not here.
+explain_fit_json() {
+  local root="$1" slug="$2" card="$3" out
+  # Capture kv-calc's output regardless of exit status: it emits a structured
+  # {"verdict":"unknown",...} (RC=2) for an unresolved card, which we want to
+  # surface — not hide behind the "unavailable" stub. Only fall back to the
+  # stub when there is genuinely no output (kv-calc absent / crashed).
+  out="$(python3 "${root}/tools/kv-calc.py" --fit "$slug" --card "$card" --json 2>/dev/null)" || true
+  if [[ -n "$out" ]]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  printf '{"available": false, "card": "%s", "reason": "kv-calc --fit not available"}' "$card"
+}
+
+# Find the measured BENCHMARKS.md row(s) for a slug's compose serving-file, if
+# any. BENCHMARKS rows reference the compose by its `<serving>.yml` filename in
+# a backtick-quoted leading table cell (e.g. "| `minimal.yml` (…) | …"). We emit
+# a JSON array of {row, columns[]} objects (empty array when none match) so the
+# assembler stays language-agnostic. Pure stdlib — no markdown dependency.
+explain_benchmarks_json() {
+  local root="$1" serving="$2"
+  python3 - "$root" "$serving" <<'PY_EXPLAIN_BENCH'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+serving = sys.argv[2]
+
+bench = root / "BENCHMARKS.md"
+rows = []
+if bench.is_file() and serving:
+    needle = "`" + serving + "`"
+    for line in bench.read_text().splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if not cells:
+            continue
+        # Match only when the FIRST (Compose) cell names this serving file, so
+        # we don't pick up incidental mentions elsewhere in the table.
+        if needle in cells[0]:
+            rows.append({"row": s, "columns": cells})
+
+print(json.dumps(rows))
+PY_EXPLAIN_BENCH
+}
+
+# Assemble the full story object (registry row + fit verdict + benchmarks) for
+# one slug and print it as a single JSON object on stdout. Exits non-zero (and
+# the heredoc message goes to stderr) when the slug is unknown.
+explain_assemble_json() {
+  local root="$1" slug="$2" card reg fit bench
+  card="$(explain_detect_card)"
+  if ! reg="$(explain_registry_json "$root" "$slug")"; then
+    return 1
+  fi
+  fit="$(explain_fit_json "$root" "$slug" "$card")"
+  local serving
+  serving="$(printf '%s' "$reg" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("serving_file",""))')"
+  bench="$(explain_benchmarks_json "$root" "$serving")"
+  python3 - "$reg" "$fit" "$bench" "$card" <<'PY_EXPLAIN_ASSEMBLE'
+import json
+import sys
+
+reg = json.loads(sys.argv[1])
+fit = json.loads(sys.argv[2])
+bench = json.loads(sys.argv[3])
+card = sys.argv[4]
+
+out = {
+    "slug": reg["slug"],
+    "registry": reg,
+    "card": card,
+    "fit": fit,
+    "benchmarks": bench,
+}
+print(json.dumps(out, indent=2))
+PY_EXPLAIN_ASSEMBLE
+}
+
+# Render the assembled story object as a readable human block on stdout.
+explain_render_human() {
+  local obj="$1"
+  python3 - "$obj" <<'PY_EXPLAIN_HUMAN'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+reg = obj["registry"]
+
+
+def show(label, value):
+    if value is None or value == "":
+        value = "—"
+    print(f"  {label:<14} {value}")
+
+
+print(f"{obj['slug']}  —  {reg.get('model') or '?'}  ({reg.get('topology') or '?'})")
+status = reg.get("status") or "production"
+note = reg.get("status_note") or ""
+status_line = status if not note else f"{status}  ·  {note}"
+print(f"  status:        {status_line}")
+print()
+print("  Config (registry):")
+show("engine", reg.get("engine"))
+show("weights", reg.get("weights_variant"))
+show("workload", reg.get("workload"))
+show("drafter", reg.get("drafter"))
+show("KV", reg.get("kv_format"))
+show("TP / PP", f"{reg.get('tp')} / {reg.get('pp')}")
+show("max ctx", reg.get("max_ctx"))
+show("max seqs", reg.get("max_num_seqs"))
+show("mem-util", reg.get("mem_util"))
+show("vision", "yes" if reg.get("vision") else "no")
+show("port", reg.get("default_port"))
+show("compose", reg.get("compose_path"))
+
+fit = obj.get("fit") or {}
+print()
+print(f"  Fit verdict (card={obj.get('card')}):")
+if not fit.get("available", True) or "verdict" not in fit:
+    reason = fit.get("reason") or "no fit data"
+    print(f"    (unavailable — {reason})")
+else:
+    verdict = fit.get("verdict", "?")
+    vram = fit.get("vram_est_gb")
+    band = fit.get("band_gb")
+    mctx = fit.get("max_ctx")
+    line = f"    {verdict}"
+    if vram is not None:
+        line += f"  (~{vram:.1f} GB"
+        if band is not None:
+            line += f" ±{band:.1f}"
+        line += ")"
+    if mctx is not None:
+        line += f"  max ctx {mctx}"
+    print(line)
+    if fit.get("error"):
+        print(f"      - {fit['error']}")
+
+bench = obj.get("benchmarks") or []
+print()
+print("  Measured (BENCHMARKS.md):")
+if not bench:
+    print("    (no measured row for this compose yet)")
+else:
+    for b in bench:
+        print(f"    {b['row']}")
+PY_EXPLAIN_HUMAN
+}
+
+explain_variant() {
+  local slug="$1" as_json="$2" resolved obj
+  # Honour the same `<…>/default` token resolution as a normal launch, so
+  # `--explain vllm/default` explains the slug it WOULD launch.
+  resolved="$(resolve_default_variant "$slug")"
+  if ! obj="$(explain_assemble_json "$ROOT_DIR" "$resolved")"; then
+    echo "[switch] ERROR: cannot explain '${slug}'." >&2
+    echo "[switch]        Run: bash scripts/switch.sh --list" >&2
+    exit 1
+  fi
+  if [[ "$as_json" == "1" ]]; then
+    printf '%s\n' "$obj"
+  else
+    explain_render_human "$obj"
+  fi
+  exit 0
+}
+
 down_running() {
   # Closed-world teardown: bring down ONLY containers switch.sh manages — those
   # whose name is in the registry-derived VARIANT_CONTAINER set — each via its
@@ -780,6 +1066,10 @@ VARIANT=""
 LIST_REQUESTED=0
 LIST_ALL=0
 OWUI_REGISTER=0
+EXPLAIN_REQUESTED=0
+EXPLAIN_SLUG=""
+EXPLAIN_JSON=0
+JSON_FLAG_SEEN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage ;;
@@ -788,6 +1078,20 @@ while [[ $# -gt 0 ]]; do
     --list) LIST_REQUESTED=1 ;;
     --all) LIST_ALL=1 ;;
     --list-all) LIST_REQUESTED=1; LIST_ALL=1 ;;
+    # --explain <slug> [--json] is a deferred terminal action (like --list), so
+    # `--explain X --json` and `--explain --json X` both work. The slug is the
+    # next non-flag token; --json (below) toggles structured output.
+    --explain)
+      EXPLAIN_REQUESTED=1
+      if [[ -n "${2:-}" && "$2" != --* ]]; then
+        EXPLAIN_SLUG="$2"
+        shift
+      fi
+      ;;
+    # --json only modifies --explain. We record it so a standalone --json (no
+    # --explain) still falls through to the same "Unknown flag" error as before
+    # (preserved byte-for-byte below the loop).
+    --json) EXPLAIN_JSON=1; JSON_FLAG_SEEN=1 ;;
     --defaults) defaults_view_standalone ;;
     --set-default)
       [[ -n "${2:-}" ]] || { echo "ERROR: --set-default needs a <slug> (e.g. vllm/dual)." >&2; exit 1; }
@@ -812,6 +1116,27 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# --explain (possibly with --json) is a deferred terminal action — resolve it
+# once after the whole arg vector is parsed, so token order doesn't matter. The
+# slug may have landed in EXPLAIN_SLUG (caught next to --explain) or, if it was
+# separated from --explain by --json, in VARIANT (the positional catch-all).
+if [[ "$EXPLAIN_REQUESTED" -eq 1 ]]; then
+  if [[ -z "$EXPLAIN_SLUG" && -n "$VARIANT" ]]; then
+    EXPLAIN_SLUG="$VARIANT"
+    VARIANT=""
+  fi
+  if [[ -z "$EXPLAIN_SLUG" ]]; then
+    echo "ERROR: --explain needs a <slug> (e.g. vllm/dual). Add --json for structured output." >&2
+    exit 1
+  fi
+  explain_variant "$EXPLAIN_SLUG" "$EXPLAIN_JSON"   # exits
+fi
+# --json only applies to --explain. A standalone --json reproduces the original
+# "Unknown flag" rejection byte-for-byte (it used to hit the --* case).
+if [[ "$JSON_FLAG_SEEN" -eq 1 ]]; then
+  echo "Unknown flag: --json"; exit 1
+fi
 
 # --list (possibly with --all) is a terminal action — run it once, after the
 # whole arg vector is parsed, so order doesn't matter.

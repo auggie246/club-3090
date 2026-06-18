@@ -125,10 +125,10 @@ services:
         # stability. See docs/HARDWARE.md "Note for WSL2 / Windows users".
         # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
         source /etc/club3090/detect_nvlink.sh
-        if [ "${_NVLINK_ENABLED:-0}" = "1" ]; then
-          exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@"
         else
-          exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$@"
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@"
         fi
       - --
     command:

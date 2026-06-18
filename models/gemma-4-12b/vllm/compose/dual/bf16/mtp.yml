@@ -79,10 +79,10 @@ services:
       - |
         # PCIe (no NVLink) → inject --disable-custom-all-reduce; NVLink rigs skip it.
         source /etc/club3090/detect_nvlink.sh
-        if [ "${_NVLINK_ENABLED:-0}" = "1" ]; then
-          exec vllm serve "$@"
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
         else
-          exec vllm serve --disable-custom-all-reduce "$@"
+          exec vllm serve --disable-custom-all-reduce "$$@"
         fi
       - --
     command:

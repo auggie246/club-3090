@@ -183,10 +183,10 @@ services:
         bash /etc/club3090/pr42006/install.sh
         # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
         source /etc/club3090/detect_nvlink.sh
-        if [ "${_NVLINK_ENABLED:-0}" = "1" ]; then
-          exec vllm serve "$@"
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
         else
-          exec vllm serve --disable-custom-all-reduce "$@"
+          exec vllm serve --disable-custom-all-reduce "$$@"
         fi
       - --
     command:

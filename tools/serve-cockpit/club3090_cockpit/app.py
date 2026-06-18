@@ -1964,8 +1964,12 @@ class CockpitApp(App):
         Binding("q", "quit", "Quit", show=True),
         Binding("question_mark", "help", "Help", show=True),
         Binding("r", "refresh", "Refresh", show=True),
-        Binding("slash", "filter_catalog", "Filter", show=True),
-        Binding("e", "explain", "Explain", show=True),
+        # Sub-tab cycle — shown only in modes that have sub-tabs (check_action gates).
+        Binding("left_square_bracket", "prev_subtab", "Prev tab", show=False),
+        Binding("right_square_bracket", "next_subtab", "Next tab", show=False),
+        # Context-sensitive — check_action enables/shows them only in the right mode.
+        Binding("slash", "filter_catalog", "Filter", show=False),
+        Binding("e", "explain", "Explain", show=False),
         Binding("1", "mode_discover", "Discover", show=True),
         Binding("2", "mode_serve", "Serve", show=True),
         Binding("3", "mode_estate", "Estate", show=True),
@@ -2028,6 +2032,106 @@ class CockpitApp(App):
         display: block;
     }
     """
+
+    # ── Dynamic binding visibility ─────────────────────────────────────────────────
+
+    # Actions that are always active regardless of mode or focused widget.
+    _ALWAYS_ON: frozenset[str] = frozenset({
+        "quit", "help", "refresh",
+        "mode_discover", "mode_serve", "mode_estate", "mode_validate",
+        "primary_action",
+    })
+
+    # Context key → (modes, subtabs) where it should be enabled.
+    # modes: set of _active_mode integers.  subtabs: set of active tab IDs, or
+    # None meaning "any sub-tab in those modes" (used for whole-mode keys).
+    # The sub-tab cycle keys are handled separately below.
+    _CONTEXT_KEYS: dict[str, tuple[set[int], Optional[set[str]]]] = {
+        # Discover / Catalog only
+        "filter_catalog":   ({0, 3}, {"tab-catalog", "tab-benchmarks"}),  # Discover·Catalog or Validate·Benchmarks
+        "explain":          ({0}, None),          # Discover (any sub-tab — no-ops on BYO, harmless)
+        "set_default":      ({0}, None),          # Discover · Catalog (guards inside action)
+        "clear_default":    ({0}, None),          # Discover · Catalog
+        "promote_catalog":  ({0}, None),          # Discover
+        "optimize_card":    ({0, 1}, None),       # Discover + Serve
+        # Estate · Orchestration
+        "estate_off":       ({2}, {"tab-orchestration"}),
+        "power_cap_toggle": ({2}, {"tab-orchestration"}),
+        "power_cap_sweep":  ({2}, {"tab-orchestration"}),
+        "prune_images":     ({2}, {"tab-orchestration"}),
+        "evaluate_target":  ({2}, None),          # Estate (either tab)
+        # Estate · Containers
+        "container_logs":   ({2}, {"tab-containers"}),
+        # [s] restart only on Estate (any tab, action guards internally) +
+        # [s] submit on Validate·Evidence; no sub-tab constraint at this level.
+        "s_key":            ({2, 3}, None),  # Containers (restart) + Evidence (submit)
+        "container_stop":   ({2}, {"tab-containers"}),
+        "container_rm":     ({2}, {"tab-containers"}),
+        "context_t":        ({2, 3}, {"tab-containers", "tab-benchmarks"}),
+    }
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Return True (enabled + shown in footer), False (disabled + hidden in footer).
+
+        Rules (in priority order):
+        1. Always-on set — True unconditionally.
+        2. A filter Input is focused — Textual's Input.is_printable already calls
+           event.stop() for letter/digit keys, so they never reach app bindings.
+           We still return False for all context keys here to hide them from the
+           footer (avoids misleading `e Explain` hint while typing a query).
+           Mode-switch keys (1–4) and sub-tab keys are kept visible/active because
+           digits are printable and are stopped by Input, making this safe.
+        3. Context key — True only in the (mode, subtab) set defined above;
+           False otherwise (hidden from footer so the footer is mode-accurate).
+        4. Sub-tab cycle keys — True only in modes that have sub-tabs.
+        5. Everything else — True (pass-through; modals handle their own capture).
+        """
+        from textual.widgets import Input as _Input
+
+        if action in self._ALWAYS_ON:
+            return True
+
+        # When a filter Input is focused, hide all context-key bindings from the
+        # footer.  The Input's own _on_key stops printable characters before they
+        # reach app bindings, but we hide them for footer accuracy.
+        focused = self.focused
+        if isinstance(focused, _Input):
+            if action in self._CONTEXT_KEYS:
+                return False
+            if action in ("prev_subtab", "next_subtab"):
+                return False
+
+        # Sub-tab cycle keys: only meaningful in modes with sub-tabs (0, 2, 3).
+        if action in ("prev_subtab", "next_subtab"):
+            return self._active_mode in (0, 2, 3)
+
+        # Context keys.
+        if action in self._CONTEXT_KEYS:
+            modes, subtabs = self._CONTEXT_KEYS[action]
+            if self._active_mode not in modes:
+                return False
+            if subtabs is not None:
+                active_tab = self._current_subtab()
+                if active_tab not in subtabs:
+                    return False
+            return True
+
+        return True
+
+    def _current_subtab(self) -> str:
+        """Return the active tab ID for the current mode's TabbedContent, or ''."""
+        tab_ids = {
+            0: "#discover-tabs",
+            2: "#estate-tabs",
+            3: "#validate-tabs",
+        }
+        tc_id = tab_ids.get(self._active_mode, "")
+        if not tc_id:
+            return ""
+        try:
+            return self.query_one(tc_id, TabbedContent).active
+        except Exception:
+            return ""
 
     def __init__(self, repo_root: Path, *, data: Optional[CockpitData] = None, **kwargs):
         super().__init__(**kwargs)
@@ -2311,12 +2415,56 @@ class CockpitApp(App):
         except Exception:
             pass
         self._active_mode = index
+        # Refresh the footer so bindings shown/hidden update immediately.
+        self.refresh_bindings()
+        # Move focus to the mode's primary interactive widget so context
+        # keys and ⏎ act on the right thing immediately.
+        self._focus_mode_primary(index)
         # Estate is live — poll on entry.
         if index == 2:
             self.load_estate()
         # Validate is live too — load the doctor/benchmarks/evidence reads.
         elif index == 3:
             self._load_validate()
+
+    def _focus_mode_primary(self, index: int) -> None:
+        """Move focus to the mode's primary interactive widget after a mode switch.
+
+        Deferred via call_after_refresh so this runs AFTER any pending
+        call_after_refresh callbacks from on_tabbed_content_tab_activated (which
+        are enqueued during mount) — ensuring mode-switch focus wins."""
+        def _do() -> None:
+            try:
+                if index == 0:  # Discover — catalog table
+                    self.query_one("#catalog-table", DataTable).focus()
+                elif index == 1:  # Serve — launch button (or serve-plan if present)
+                    try:
+                        self.query_one("#serve-launch-btn", Button).focus()
+                    except Exception:
+                        pass
+                elif index == 2:  # Estate — scene table (Orchestration) or containers table
+                    try:
+                        tc = self.query_one("#estate-tabs", TabbedContent)
+                        if tc.active == "tab-containers":
+                            self.query_one("#containers-table", DataTable).focus()
+                        else:
+                            self.query_one("#scene-table", DataTable).focus()
+                    except Exception:
+                        pass
+                elif index == 3:  # Validate — run ladder table
+                    try:
+                        tc = self.query_one("#validate-tabs", TabbedContent)
+                        if tc.active == "tab-run":
+                            self.query_one("#run-ladder-table", DataTable).focus()
+                        elif tc.active == "tab-benchmarks":
+                            self.query_one("#bmk-table", DataTable).focus()
+                        elif tc.active == "tab-evidence":
+                            self.query_one("#evidence-table", DataTable).focus()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        self.call_after_refresh(_do)
 
     def _load_validate(self) -> None:
         """Kick the three Validate read workers (doctor / benchmarks / evidence).
@@ -2903,7 +3051,98 @@ class CockpitApp(App):
         except Exception:
             pass
 
+    # ── Sub-tab cycle actions ─────────────────────────────────────────────────────────
+
+    def action_prev_subtab(self) -> None:
+        """[ — cycle to the previous sub-tab in the active mode."""
+        self._cycle_subtab(-1)
+
+    def action_next_subtab(self) -> None:
+        """] — cycle to the next sub-tab in the active mode."""
+        self._cycle_subtab(1)
+
+    def _cycle_subtab(self, direction: int) -> None:
+        """Cycle the TabbedContent for the current mode by direction (+1 / -1)."""
+        tab_widget_ids = {
+            0: "#discover-tabs",
+            2: "#estate-tabs",
+            3: "#validate-tabs",
+        }
+        tc_id = tab_widget_ids.get(self._active_mode, "")
+        if not tc_id:
+            return
+        try:
+            tc = self.query_one(tc_id, TabbedContent)
+            panes = [p.id for p in tc.query(TabPane)]
+            if not panes:
+                return
+            current = tc.active
+            try:
+                idx = panes.index(current)
+            except ValueError:
+                idx = 0
+            new_idx = (idx + direction) % len(panes)
+            tc.active = panes[new_idx]
+        except Exception:
+            pass
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Refresh footer bindings whenever a sub-tab changes so context keys
+        show/hide correctly (e.g. [/] appears only on Discover·Catalog or
+        Validate·Benchmarks).  Also move focus to the new tab's primary widget.
+
+        Focus is deferred via call_after_refresh because the new TabPane's content
+        is not yet visible at the point the event fires, so an immediate .focus()
+        call is silently lost.  Deferring one render cycle ensures the widget is
+        fully displayed before we ask for focus.
+
+        Note: Textual prefixes the Tab widget's id with `--content-tab-` when the
+        TabbedContent creates the tab bar (e.g. the TabPane id `tab-run` becomes
+        `--content-tab-tab-run` on the Tab object).  We strip that prefix so the
+        focus map can use the clean TabPane IDs.
+
+        We only apply focus for the TabbedContent that belongs to the *active* mode
+        panel.  Events from mode panels that are currently hidden (display:none) are
+        ignored so startup/background activations don't steal focus."""
+        self.refresh_bindings()
+        raw_tab_id = event.tab.id if event.tab else ""
+        # Strip the Textual internal prefix if present.
+        _PREFIX = "--content-tab-"
+        tab_id = raw_tab_id[len(_PREFIX):] if raw_tab_id.startswith(_PREFIX) else raw_tab_id
+        # Only respond to tabs that belong to the current mode's active panel.
+        _mode_tabs: dict[int, set[str]] = {
+            0: {"tab-catalog", "tab-byo"},
+            2: {"tab-orchestration", "tab-containers"},
+            3: {"tab-run", "tab-doctor", "tab-benchmarks", "tab-evidence"},
+        }
+        allowed_tabs = _mode_tabs.get(self._active_mode, set())
+        if tab_id not in allowed_tabs:
+            return
+        _focus_map: dict[str, str] = {
+            "tab-catalog":        "#catalog-table",
+            "tab-run":            "#run-ladder-table",
+            "tab-benchmarks":     "#bmk-table",
+            "tab-evidence":       "#evidence-table",
+            "tab-orchestration":  "#scene-table",
+            "tab-containers":     "#containers-table",
+        }
+        widget_id = _focus_map.get(tab_id, "")
+        if widget_id:
+            def _do_focus() -> None:
+                try:
+                    self.query_one(widget_id, DataTable).focus()
+                except Exception:
+                    pass
+            self.call_after_refresh(_do_focus)
+
     # ── Widget event handlers ─────────────────────────────────────────────────────────
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """DataTable emits RowSelected when the user presses Enter (select_cursor).
+        Route it to the app's primary action so focusing a DataTable doesn't break
+        the ⏎ → primary_action contract that the tests (and help text) document."""
+        event.stop()
+        self.action_primary_action()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id

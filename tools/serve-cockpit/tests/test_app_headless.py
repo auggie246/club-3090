@@ -35,6 +35,7 @@ from club3090_cockpit.app import (
     CatalogPane,
     ConfirmActionScreen,
     ExplainScreen,
+    HelpScreen,
     ModeSwitcher,
     ByoPane,
     ServePane,
@@ -1727,3 +1728,511 @@ class TestPhase5NoLiveEffect:
             # Nothing was launched / written; no c3t, no guard suite, no scripts/.
             assert wr.started == []
             assert all("scripts/c3t" not in " ".join(c) for c in runner.calls)
+
+
+# ===========================================================================
+# Keyboard-hotkey UX fixes (keybindings-ux branch)
+# ===========================================================================
+#
+# Bug-class coverage:
+#   (a) typing a hotkey letter into a filter Input types into the field and
+#       fires NO action / mode-switch / quit
+#   (b) check_action enables the right keys per mode/sub-tab
+#   (c) each modal: Esc closes, Confirm commits on Enter, q/digit keys do NOT
+#       act while the modal is open
+#   (d) sub-tab cycle key switches tabs
+#   (e) mode-switch moves focus to the mode's primary interactive widget
+
+
+from textual.widgets import Footer  # noqa: E402
+
+
+class TestFilterInputSafety:
+    """(a) Typing hotkey letters into a filter Input never fires actions."""
+
+    @pytest.mark.asyncio
+    async def test_typing_q_into_catalog_filter_types_not_quit(self):
+        """Pressing 'q' while catalog-filter is focused must type into the field,
+        not quit the app."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            # Open the filter — brings up the Input.
+            await pilot.press("slash")
+            await pilot.pause()
+            inp = app.query_one("#catalog-filter", Input)
+            assert "visible" in inp.classes  # filter is open
+            assert app.focused is inp         # Input has focus
+            # Typing 'q' must go into the input, NOT quit the app.
+            await pilot.press("q")
+            await pilot.pause()
+            assert app.is_running, "app must not have quit"
+            assert inp.value == "q"
+
+    @pytest.mark.asyncio
+    async def test_typing_e_into_catalog_filter_types_not_explain(self):
+        """Pressing 'e' in the filter Input must NOT open the ExplainScreen."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            await pilot.press("slash")
+            await pilot.pause()
+            inp = app.query_one("#catalog-filter", Input)
+            await pilot.press("e")
+            await pilot.pause()
+            assert not isinstance(app.screen, ExplainScreen), "ExplainScreen must not open"
+            assert inp.value == "e"
+
+    @pytest.mark.asyncio
+    async def test_typing_qwen36_into_filter_stays_in_input_no_action(self):
+        """Typing a multi-char query containing hotkeys must all land in the
+        input and fire no actions."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            await pilot.press("slash")
+            await pilot.pause()
+            inp = app.query_one("#catalog-filter", Input)
+            # Type each character — includes q,e,s,w,c,p,o which are all hotkeys.
+            for ch in "qwen36":
+                await pilot.press(ch)
+            await pilot.pause()
+            assert app.is_running, "app must not have quit after typing 'q'"
+            assert inp.value == "qwen36"
+            # No mode switch must have happened (still in Discover = mode 0).
+            assert app._active_mode == 0
+
+    @pytest.mark.asyncio
+    async def test_check_action_hides_context_keys_while_input_focused(self):
+        """check_action returns False for all context keys while an Input is
+        focused, so the footer never shows misleading hints during typing."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            await pilot.press("slash")
+            await pilot.pause()
+            assert isinstance(app.focused, Input)
+            # Context keys must be hidden while typing.
+            for action in ("filter_catalog", "explain", "set_default", "container_logs",
+                           "estate_off", "power_cap_toggle", "evaluate_target"):
+                result = app.check_action(action, ())
+                assert result is False, (
+                    f"check_action({action!r}) should return False while Input focused, "
+                    f"got {result!r}"
+                )
+            # Always-on keys must still be enabled.
+            for action in ("quit", "help", "refresh", "mode_discover", "mode_serve"):
+                result = app.check_action(action, ())
+                assert result is True, (
+                    f"check_action({action!r}) should return True (always-on), got {result!r}"
+                )
+
+
+class TestCheckActionPerModeSubtab:
+    """(b) check_action enables the right bindings per mode/sub-tab."""
+
+    @pytest.mark.asyncio
+    async def test_discover_catalog_enables_explain_and_filter(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            assert app._active_mode == 0
+            assert app.check_action("explain", ()) is True
+            assert app.check_action("filter_catalog", ()) is True
+            assert app.check_action("promote_catalog", ()) is True
+
+    @pytest.mark.asyncio
+    async def test_discover_catalog_disables_estate_keys(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            assert app._active_mode == 0
+            for action in ("container_logs", "estate_off", "power_cap_toggle",
+                           "prune_images", "evaluate_target", "context_t"):
+                result = app.check_action(action, ())
+                assert result is False, (
+                    f"Discover must not enable estate action {action!r}, got {result!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_estate_orchestration_enables_orch_keys(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            assert app._active_mode == 2
+            # On orchestration tab (default first tab)
+            tc = app.query_one("#estate-tabs", TabbedContent)
+            tc.active = "tab-orchestration"
+            await pilot.pause()
+            for action in ("estate_off", "power_cap_toggle", "power_cap_sweep", "prune_images"):
+                result = app.check_action(action, ())
+                assert result is True, (
+                    f"Estate·Orchestration must enable {action!r}, got {result!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_estate_orchestration_disables_containers_keys(self):
+        """On the Orchestration sub-tab, container-specific keys are disabled."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            tc = app.query_one("#estate-tabs", TabbedContent)
+            tc.active = "tab-orchestration"
+            await pilot.pause()
+            for action in ("container_logs", "container_stop", "container_rm"):
+                result = app.check_action(action, ())
+                assert result is False, (
+                    f"Estate·Orchestration must disable container action {action!r}, "
+                    f"got {result!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_estate_containers_enables_containers_keys(self):
+        """On the Containers sub-tab, container-specific keys are enabled."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            tc = app.query_one("#estate-tabs", TabbedContent)
+            tc.active = "tab-containers"
+            await pilot.pause()
+            for action in ("container_logs", "container_stop", "container_rm", "context_t"):
+                result = app.check_action(action, ())
+                assert result is True, (
+                    f"Estate·Containers must enable {action!r}, got {result!r}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_validate_benchmarks_enables_filter_and_sort(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            tc = app.query_one("#validate-tabs", TabbedContent)
+            tc.active = "tab-benchmarks"
+            await pilot.pause()
+            assert app.check_action("filter_catalog", ()) is True
+            assert app.check_action("context_t", ()) is True
+
+    @pytest.mark.asyncio
+    async def test_validate_evidence_enables_s_key(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            tc = app.query_one("#validate-tabs", TabbedContent)
+            tc.active = "tab-evidence"
+            await pilot.pause()
+            # s_key (submit) is enabled in Validate mode regardless of subtab.
+            assert app.check_action("s_key", ()) is True
+
+    @pytest.mark.asyncio
+    async def test_serve_mode_disables_explain_and_filter(self):
+        """In Serve mode there is no catalog — explain and filter must be off."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
+            await pilot.pause()
+            assert app._active_mode == 1
+            assert app.check_action("explain", ()) is False
+            assert app.check_action("filter_catalog", ()) is False
+
+    @pytest.mark.asyncio
+    async def test_always_on_keys_active_in_every_mode(self):
+        """quit/help/refresh/mode-switch must be True in every mode."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            for mode_key in ("1", "2", "3", "4"):
+                await pilot.press(mode_key)
+                await pilot.pause()
+                for action in ("quit", "help", "refresh",
+                               "mode_discover", "mode_serve", "mode_estate", "mode_validate"):
+                    result = app.check_action(action, ())
+                    assert result is True, (
+                        f"Always-on {action!r} must be True in mode {mode_key}, got {result!r}"
+                    )
+
+
+class TestModalKeyCapture:
+    """(c) Modals fully capture keys — q/digits don't act while a modal is open;
+    Esc closes, Enter commits ConfirmActionScreen."""
+
+    @pytest.mark.asyncio
+    async def test_q_does_not_quit_while_help_modal_open(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("question_mark")  # open help
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen)
+            # Pressing 'q' must NOT quit the app (the HelpScreen is a ModalScreen
+            # so app-level bindings don't fire).
+            await pilot.press("q")
+            await pilot.pause()
+            # Either still on the help screen OR the q was consumed by the modal.
+            # Either way the app must still be running.
+            assert app.is_running
+
+    @pytest.mark.asyncio
+    async def test_esc_closes_help_modal(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, HelpScreen)
+
+    @pytest.mark.asyncio
+    async def test_esc_closes_explain_modal(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.query_one("#catalog-table", DataTable).move_cursor(row=0)
+            await pilot.press("e")
+            await _settle(pilot)
+            assert isinstance(app.screen, ExplainScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, ExplainScreen)
+
+    @pytest.mark.asyncio
+    async def test_mode_digit_does_not_switch_while_confirm_modal_open(self):
+        """Pressing '2' while a ConfirmActionScreen is active must NOT switch
+        the mode (ModalScreen intercepts app-level bindings)."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            plan = app._data.serve("vllm/dual")
+            app.push_screen(ConfirmActionScreen(plan))
+            await _settle(pilot)
+            assert isinstance(app.screen, ConfirmActionScreen)
+            mode_before = app._active_mode
+            await pilot.press("2")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmActionScreen), \
+                "confirm modal must still be on screen after pressing '2'"
+            assert app._active_mode == mode_before, \
+                "mode must not have changed while confirm modal was open"
+
+    @pytest.mark.asyncio
+    async def test_enter_commits_confirm_modal(self):
+        """Pressing Enter on a clear-gate ConfirmActionScreen must commit (same
+        as clicking the Confirm button)."""
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            plan = app._data.serve("vllm/dual")
+            app.push_screen(ConfirmActionScreen(plan))
+            await _settle(pilot)
+            screen = app.screen
+            assert isinstance(screen, ConfirmActionScreen)
+            assert screen._reconcile is not None and screen._reconcile.safe
+            # Enter must commit (Confirm button is enabled on a safe gate).
+            await pilot.press("enter")
+            await _settle(pilot)
+            assert len(wr.started) == 1
+            assert wr.started[0]["cmd"] == ["bash", "scripts/switch.sh", "vllm/dual"]
+
+    @pytest.mark.asyncio
+    async def test_esc_cancels_confirm_modal_no_write(self):
+        wr = FakeWriteRunner()
+        app, _, _ = make_app(write_runner=wr)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            plan = app._data.serve("vllm/dual")
+            app.push_screen(ConfirmActionScreen(plan))
+            await _settle(pilot)
+            assert isinstance(app.screen, ConfirmActionScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, ConfirmActionScreen)
+            assert wr.started == []  # nothing written
+
+    @pytest.mark.asyncio
+    async def test_q_does_not_quit_while_confirm_modal_open(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            plan = app._data.serve("vllm/dual")
+            app.push_screen(ConfirmActionScreen(plan))
+            await _settle(pilot)
+            assert isinstance(app.screen, ConfirmActionScreen)
+            await pilot.press("q")
+            await pilot.pause()
+            assert app.is_running
+
+    @pytest.mark.asyncio
+    async def test_esc_closes_evidence_report_modal(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed_repo(root)
+            app, _, _ = make_app(repo_root=root)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.press("4")
+                await _settle(pilot)
+                app.query_one("#validate-tabs", TabbedContent).active = "tab-evidence"
+                await pilot.pause()
+                app.query_one("#evidence-table", DataTable).move_cursor(row=0)
+                await pilot.press("enter")
+                await _settle(pilot)
+                assert isinstance(app.screen, EvidenceReportScreen)
+                await pilot.press("escape")
+                await pilot.pause()
+                assert not isinstance(app.screen, EvidenceReportScreen)
+
+    @pytest.mark.asyncio
+    async def test_esc_closes_optimize_modal(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            app.query_one("#catalog-table", DataTable).move_cursor(row=0)
+            await pilot.press("O")
+            await _settle(pilot)
+            assert isinstance(app.screen, OptimizeScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, OptimizeScreen)
+
+
+class TestSubtabCycling:
+    """(d) Sub-tab cycle key switches tabs in modes that have sub-tabs."""
+
+    @pytest.mark.asyncio
+    async def test_right_bracket_cycles_discover_subtab(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            assert app._active_mode == 0  # Discover
+            tc = app.query_one("#discover-tabs", TabbedContent)
+            assert tc.active == "tab-catalog"  # default first tab
+            await pilot.press("right_square_bracket")
+            await pilot.pause()
+            assert tc.active == "tab-byo"
+
+    @pytest.mark.asyncio
+    async def test_right_bracket_wraps_around_on_last_tab(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            tc = app.query_one("#discover-tabs", TabbedContent)
+            # Go to last tab first, then cycle forward → should wrap to first.
+            tc.active = "tab-byo"
+            await pilot.pause()
+            await pilot.press("right_square_bracket")
+            await pilot.pause()
+            assert tc.active == "tab-catalog"
+
+    @pytest.mark.asyncio
+    async def test_left_bracket_cycles_backwards(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            tc = app.query_one("#discover-tabs", TabbedContent)
+            tc.active = "tab-byo"
+            await pilot.pause()
+            await pilot.press("left_square_bracket")
+            await pilot.pause()
+            assert tc.active == "tab-catalog"
+
+    @pytest.mark.asyncio
+    async def test_subtab_key_cycles_estate_tabs(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            tc = app.query_one("#estate-tabs", TabbedContent)
+            first = tc.active
+            await pilot.press("right_square_bracket")
+            await pilot.pause()
+            assert tc.active != first
+
+    @pytest.mark.asyncio
+    async def test_subtab_key_cycles_validate_tabs(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            tc = app.query_one("#validate-tabs", TabbedContent)
+            first = tc.active
+            await pilot.press("right_square_bracket")
+            await pilot.pause()
+            assert tc.active != first
+
+    @pytest.mark.asyncio
+    async def test_subtab_key_inactive_in_serve_mode(self):
+        """Serve mode has no sub-tabs — cycle key must be disabled (check_action
+        returns False) so it doesn't appear in the footer or do anything."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("2")
+            await pilot.pause()
+            assert app._active_mode == 1  # Serve
+            assert app.check_action("next_subtab", ()) is False
+            assert app.check_action("prev_subtab", ()) is False
+
+
+class TestModeSwitchFocus:
+    """(e) Mode switch moves focus to the mode's primary interactive widget."""
+
+    @pytest.mark.asyncio
+    async def test_switch_to_discover_focuses_catalog_table(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _settle(pilot)
+            # Start at Discover (mode 0) already — go away and come back.
+            await pilot.press("2")
+            await pilot.pause()
+            await pilot.press("1")
+            await pilot.pause()
+            assert isinstance(app.focused, DataTable)
+            assert app.focused.id == "catalog-table"
+
+    @pytest.mark.asyncio
+    async def test_switch_to_estate_focuses_scene_table(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("3")
+            await _settle(pilot)
+            # Estate/Orchestration tab is default → scene-table should be focused.
+            assert isinstance(app.focused, DataTable)
+            assert app.focused.id == "scene-table"
+
+    @pytest.mark.asyncio
+    async def test_switch_to_validate_focuses_run_ladder(self):
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            # Validate/Run tab is default → run-ladder-table should be focused.
+            assert isinstance(app.focused, DataTable)
+            assert app.focused.id == "run-ladder-table"
+
+    @pytest.mark.asyncio
+    async def test_tab_change_on_validate_refocuses_relevant_table(self):
+        """Using the sub-tab cycle key on Validate must move focus to the
+        relevant DataTable for the newly active tab."""
+        app, _, _ = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            await _settle(pilot)
+            # Default tab is Run → run-ladder-table.
+            assert isinstance(app.focused, DataTable)
+            assert app.focused.id == "run-ladder-table"
+            # Cycle forward once → Doctor tab (no table, focus stays somewhere).
+            await pilot.press("right_square_bracket")
+            await pilot.pause()
+            await pilot.pause()  # extra cycle for call_after_refresh
+            tc = app.query_one("#validate-tabs", TabbedContent)
+            assert tc.active == "tab-doctor"
+            # Cycle forward again → Benchmarks tab → bmk-table.
+            await pilot.press("right_square_bracket")
+            await pilot.pause()
+            await pilot.pause()  # extra cycle for call_after_refresh
+            assert tc.active == "tab-benchmarks"
+            assert isinstance(app.focused, DataTable)
+            assert app.focused.id == "bmk-table"

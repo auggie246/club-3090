@@ -1,7 +1,7 @@
 # ===========================================================================
 # Profile (at-a-glance):
 #   Model:     Qwen3.6-27B FP8 (official e4m3, embedded mtp head)
-#   Topology:  Dual 3090 (TP=2, PCIe — custom all-reduce disabled)
+#   Topology:  Dual 3090 (TP=2, NVLink auto-detected via NVLINK_MODE)
 #   Drafter:   MTP n=3 (built-in) — survives LMCache, acceptance ~83%
 #   KV:        int8_per_token_head (1 byte/token) + LMCache tiered prefix cache
 #                (GPU → L1 CPU RAM → optional L2 disk)
@@ -79,6 +79,7 @@ services:
     mem_limit: ${CLUB3090_MEM_LIMIT:-70g}
     memswap_limit: ${CLUB3090_MEM_LIMIT:-70g}
     shm_size: "32gb"   # MUST be >= LMCACHE_L1_GB (default 30). Raise if you raise the cache.
+    ipc: host
     volumes:
       - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
       # froggeric chat template is shared from the vllm engine dir (model-scoped) —
@@ -88,12 +89,15 @@ services:
       # works with zero setup. Override the host path with LMCACHE_KV_DIR, or bypass entirely with
       # LMCACHE_L2_ADAPTER (point at a faster/larger SSD). Mount is harmless when L2 is off.
       - ${LMCACHE_KV_DIR:-../../../../../../lmcache-kv}:/lmcache-kv
+      # NVLink auto-detection — runs inside container at boot (same path as dual-max).
+      - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
       - NCCL_CUMEM_ENABLE=0
       - NCCL_P2P_DISABLE=1
       - VLLM_NO_USAGE_STATS=1
@@ -105,19 +109,31 @@ services:
       - bash
       - -c
       - |
+        # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "0" ]; then
+          # detect_nvlink sets expandable_segments on PCIe — incompatible with LMCacheMPConnector.
+          unset PYTORCH_CUDA_ALLOC_CONF
+        fi
         # LMCache MP server. L1 = CPU RAM (--l1-size-gb). L2 = optional disk, OFF by default:
         #   LMCACHE_L2=1                -> enable L2 at the in-repo default /lmcache-kv (fs adapter)
         #   LMCACHE_L2_ADAPTER='{...}'  -> full override (custom path/backend); wins over LMCACHE_L2
         # chunk-size MUST be a multiple of vLLM's unified block (1584 for int8-PTH KV).
-        LM_ARGS=(--chunk-size "${LMCACHE_CHUNK_SIZE:-1584}" --l1-size-gb "${LMCACHE_L1_GB:-30}" --eviction-policy LRU)
-        if [ -n "${LMCACHE_L2_ADAPTER:-}" ]; then
-          LM_ARGS+=(--l2-adapter "${LMCACHE_L2_ADAPTER}")
-        elif [ "${LMCACHE_L2:-0}" = "1" ]; then
+        # $$ escapes $ so Docker Compose passes bash syntax through (v5.1+ interpolates
+        # entrypoint strings; $${VAR[@]} without escape → "invalid interpolation format").
+        LM_ARGS=(--chunk-size "$${LMCACHE_CHUNK_SIZE:-1584}" --l1-size-gb "$${LMCACHE_L1_GB:-30}" --eviction-policy LRU)
+        if [ -n "$${LMCACHE_L2_ADAPTER:-}" ]; then
+          LM_ARGS+=(--l2-adapter "$${LMCACHE_L2_ADAPTER}")
+        elif [ "$${LMCACHE_L2:-0}" = "1" ]; then
           LM_ARGS+=(--l2-adapter '{"type":"fs","base_path":"/lmcache-kv"}')
         fi
-        lmcache server "${LM_ARGS[@]}" &
+        lmcache server "$${LM_ARGS[@]}" &
         sleep 6
-        exec vllm serve --disable-custom-all-reduce "$@"
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
+        else
+          exec vllm serve --disable-custom-all-reduce "$$@"
+        fi
       - --
     command:
       - --model

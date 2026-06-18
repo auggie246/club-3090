@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import os
 import re
 import shlex
@@ -725,7 +726,97 @@ def command_wizard(args: argparse.Namespace) -> int:
         return 2
 
 
+def diagnose_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    path = estate_path(args.file)
+    payload: dict[str, Any] = {
+        "estate_file": str(path),
+        "live": bool(args.live),
+        "checks": {},
+        "valid": False,
+        "summary": "RED",
+    }
+    checks = payload["checks"]
+
+    try:
+        data, instances = parse_estate_yaml(path)
+        checks["schema"] = {
+            "ok": True,
+            "schema_version": data.get("schema_version"),
+            "instance_count": len(instances),
+        }
+    except EstateCliError as exc:
+        checks["schema"] = {"ok": False, "error": str(exc)}
+        return payload, 2
+
+    missing = [inst.compose_name for inst in instances if inst.compose_name not in COMPOSE_REGISTRY]
+    checks["registry"] = {
+        "ok": not missing,
+        "missing": missing,
+        "composes": [inst.compose_name for inst in instances],
+    }
+    if missing:
+        return payload, 1
+
+    profiles, _, _, hardware, _, nvlink_active, nvlink_pairs, result = validate_doc(path)
+    per_instance = []
+    for inst in instances:
+        inst_result = result.per_instance[inst.name]
+        per_instance.append(
+            {
+                "name": inst.name,
+                "valid": bool(inst_result.valid),
+                "constraints_passed": len(inst_result.diagnostics.get("constraints_passed", [])),
+                "constraints_failed": len(inst_result.diagnostics.get("constraints_failed", [])),
+                "elapsed_ms": inst_result.diagnostics.get("elapsed_ms"),
+                "reasons": list(inst_result.reasons),
+            }
+        )
+    checks["per_instance_fits"] = per_instance
+
+    checks["cross_checks"] = {
+        "ok": not result.cross_instance_failures,
+        "failures": list(result.cross_instance_failures),
+        "constraints_passed": list(result.diagnostics.get("constraints_passed", [])),
+        "notes": list(result.notes),
+    }
+
+    calibration = []
+    for inst in instances:
+        selected = [hardware[idx] for idx in inst.gpu_indices if 0 <= idx < len(hardware)]
+        status, row = calibration_status(profiles, inst.compose_name, selected)
+        calibration.append(
+            {
+                "name": inst.name,
+                "status": status,
+                "has_row": bool(row),
+                "source": row.get("source") if row else None,
+            }
+        )
+    checks["calibration"] = calibration
+
+    live = []
+    if args.live:
+        for inst in instances:
+            live.append(
+                {
+                    "name": inst.name,
+                    "port": inst.port,
+                    "endpoint_ready": endpoint_ready(inst.port),
+                    "container_running": container_running(inst.name),
+                }
+            )
+    checks["live"] = {"checked": bool(args.live), "instances": live}
+
+    payload["valid"] = bool(result.valid)
+    payload["summary"] = "GREEN" if result.valid else "RED"
+    return payload, 0 if result.valid else 1
+
+
 def command_diagnose(args: argparse.Namespace) -> int:
+    if getattr(args, "json", False):
+        payload, rc = diagnose_payload(args)
+        print(json.dumps(payload, indent=2))
+        return rc
     path = estate_path(args.file)
     print(f"Estate triage: {path}")
     print("=" * (15 + len(str(path))))
@@ -790,7 +881,57 @@ def command_diagnose(args: argparse.Namespace) -> int:
     return 0 if result.valid else 1
 
 
+def report_state_payload(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    profiles = load_profiles()
+    payload: dict[str, Any] = {
+        "profile_schema_version": 1,
+        "profile_counts": {
+            "hardware": len(profiles.hardware),
+            "models": len(profiles.models),
+            "workloads": len(profiles.workloads),
+            "engines": len(profiles.engines),
+            "drafters": len(profiles.drafters),
+        },
+        "compose_registry_entries": len(COMPOSE_REGISTRY),
+        "canonical_scenarios": len(CANONICAL_SCENARIOS),
+        "calibration": {model: len(cal.rows) for model, cal in sorted(profiles.calibration.items())},
+        "active_estate": None,
+    }
+
+    path = estate_path(args.file)
+    if not path.exists():
+        payload["active_estate"] = {"present": False, "path": str(path)}
+        return payload, 0
+    try:
+        _, _, instances, hardware, _, _, _, result = validate_doc(path)
+    except EstateCliError as exc:
+        payload["active_estate"] = {"present": True, "valid": False, "path": str(path), "error": str(exc)}
+        return payload, 0
+    claimed = sorted({gpu for inst in instances for gpu in inst.gpu_indices})
+    payload["active_estate"] = {
+        "present": True,
+        "valid": bool(result.valid),
+        "path": str(path),
+        "instance_count": len(instances),
+        "gpu_coverage": {"claimed_count": len(claimed), "total": len(hardware), "claimed": claimed},
+        "instances": [
+            {
+                "name": inst.name,
+                "compose": inst.compose_name,
+                "gpus": list(inst.gpu_indices),
+                "port": inst.port,
+            }
+            for inst in instances
+        ],
+    }
+    return payload, 0
+
+
 def command_report_state(args: argparse.Namespace) -> int:
+    if getattr(args, "json", False):
+        payload, rc = report_state_payload(args)
+        print(json.dumps(payload, indent=2))
+        return rc
     profiles = load_profiles()
     print("## Profile state")
     print("")
@@ -859,10 +1000,12 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose = sub.add_parser("diagnose")
     diagnose.add_argument("file", nargs="?", default=str(DEFAULT_ESTATE_PATH))
     diagnose.add_argument("--live", action="store_true")
+    diagnose.add_argument("--json", action="store_true")
     diagnose.set_defaults(func=command_diagnose)
 
     report = sub.add_parser("report-state")
     report.add_argument("--file", default=str(DEFAULT_ESTATE_PATH))
+    report.add_argument("--json", action="store_true")
     report.set_defaults(func=command_report_state)
 
     return parser

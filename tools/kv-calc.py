@@ -1277,6 +1277,175 @@ def solve_max_ctx(spec, kv_format, max_num_seqs, tp, mem_util, vram_gb,
 
 
 # =============================================================================
+# --fit — structured verdict for a registry slug or bare model on a given card
+# =============================================================================
+#
+# Strictly-additive wrapper. REUSES the SAME pricing the pull.sh gate relies
+# on (predict() / solve_max_ctx() / _RAW_VERDICT_MAP via raw_verdict()), the
+# SAME registry→predict()-kwargs conversion the calibration path uses
+# (_compose_cfg_from_registry), and the SAME default-slug resolver the
+# launchers use (compose_registry.curated_default_target). No new math.
+
+# Known per-card VRAM (GB) for the `--card` flag. A bare numeric string is
+# also accepted (e.g. `--card 48`) so this never blocks an uncatalogued card.
+CARD_VRAM_GB = {
+    "rtx3090": 24.0,
+    "3090": 24.0,
+    "rtx4090": 24.0,
+    "4090": 24.0,
+    "rtx3090ti": 24.0,
+    "a6000": 48.0,
+    "rtxa6000": 48.0,
+    "a100-40": 40.0,
+    "a100-80": 80.0,
+    "a100": 80.0,
+    "h100": 80.0,
+    "l40s": 48.0,
+    "l40": 48.0,
+    "rtx5090": 32.0,
+    "5090": 32.0,
+    "rtx3080": 10.0,
+    "rtx3060": 12.0,
+    # Canonical hyphenated hardware-profile ids — the exact form switch.sh
+    # --explain (explain_detect_card) and the rest of the stack emit. Values
+    # mirror scripts/lib/profiles/hardware/*.yml.
+    "rtx-3090": 24.0,
+    "rtx-3090-ti": 24.0,
+    "rtx-4090": 24.0,
+    "rtx-5090": 32.0,
+    "rtx-a5000": 24.0,
+    "a5000": 24.0,
+    "a100-40gb": 40.0,
+    "h100-80gb": 80.0,
+    "rtx-3060-12gb": 12.0,
+    "rtx-6000-pro-blackwell": 96.0,
+}
+
+# Documented estimator error band (the file states "±1.5 GB error band" in
+# run_calibration() + the solver epilogue). Surfaced verbatim so consumers
+# can compare vram_est to budget with the same tolerance the gate uses.
+FIT_BAND_GB = 1.5
+
+
+def _resolve_card_vram_gb(card: Optional[str]) -> Optional[float]:
+    """Map a `--card` value to per-card VRAM in GB. Accepts a known card key
+    (case/sep-insensitive) or a bare positive number. Returns None when the
+    value is neither — the caller emits an `unknown` verdict, never crashes."""
+    if card is None:
+        return None
+    raw = str(card).strip()
+    try:
+        v = float(raw)
+        return v if v > 0 else None
+    except ValueError:
+        pass
+    key = raw.lower().replace(" ", "").replace("_", "").replace("/", "-")
+    # Try the normalized key, then a hyphen-stripped variant, so a hyphenated
+    # profile-id ('rtx-3090') also matches the de-hyphenated keys ('rtx3090').
+    return CARD_VRAM_GB.get(key) or CARD_VRAM_GB.get(key.replace("-", ""))
+
+
+def _resolve_fit_slug(target: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Resolve a `--fit` argument to a priceable vLLM registry slug.
+
+    Accepts either a registry slug (e.g. `vllm/dual`) or a bare model id
+    (e.g. `qwen3.6-27b` → its curated default, preferring dual then single).
+
+    Returns (slug, model_id, error). On success error is None; on failure
+    slug/model_id are None and error explains why (so the caller emits an
+    `unknown` verdict rather than raising)."""
+    from scripts.lib.profiles.compose_registry import (
+        COMPOSE_REGISTRY,
+        curated_default_target,
+        model_of_slug,
+        model_set,
+    )
+
+    if target in COMPOSE_REGISTRY:
+        slug = target
+        model_id = model_of_slug(slug)
+    elif target in model_set():
+        # Bare model → its curated default slug. Prefer a priceable (vLLM)
+        # topology: dual first, then single.
+        slug = None
+        for topo in ("dual", "single"):
+            cand = curated_default_target(target, topo)
+            if cand and COMPOSE_REGISTRY.get(cand, {}).get("kvcalc_key") not in (None, "SKIP"):
+                slug = cand
+                break
+        if slug is None:
+            # Fall back to ANY priceable vLLM slug for this model.
+            for s, e in COMPOSE_REGISTRY.items():
+                if e.get("model") == target and s.startswith("vllm/") and e.get("kvcalc_key") not in (None, "SKIP"):
+                    slug = s
+                    break
+        if slug is None:
+            return None, target, f"no vLLM (kv-calc priceable) compose for model {target!r}"
+        model_id = target
+    else:
+        return None, None, f"unknown slug/model {target!r} (not a registry slug or catalogued model)"
+
+    entry = COMPOSE_REGISTRY[slug]
+    if entry.get("kvcalc_key") in (None, "SKIP"):
+        return None, model_id, f"slug {slug!r} is not vLLM (kv-calc prices vLLM only; engine sets kvcalc_key=SKIP)"
+    if model_id not in MODEL_SPECS:
+        return None, model_id, f"model {model_id!r} has no calibrated kv-calc spec (not in MODEL_SPECS)"
+    return slug, model_id, None
+
+
+def fit_verdict(target: str, card: Optional[str], vram_default: float) -> dict:
+    """Structured fit verdict for `--fit <slug|model> --card <gpu>`.
+
+    Wraps the EXISTING predict()/solve_max_ctx() pricing — does NOT
+    reimplement the math. Returns a dict shaped:
+      {"verdict": "fits-clean"|"fits-constrained"|"wont-fit",
+       "vram_est_gb": float, "band_gb": float, "max_ctx": int}
+    or {"verdict": "unknown", "error": "..."} when an input can't be resolved.
+    """
+    vram = _resolve_card_vram_gb(card)
+    if card is not None and vram is None:
+        return {"verdict": "unknown", "error": f"unrecognized --card {card!r} (pass a known card name or a GB number)"}
+    if vram is None:
+        vram = float(vram_default)
+
+    try:
+        slug, model_id, err = _resolve_fit_slug(target)
+    except Exception as exc:  # registry import / lookup robustness
+        return {"verdict": "unknown", "error": f"could not resolve {target!r}: {exc}"}
+    if err is not None:
+        return {"verdict": "unknown", "error": err}
+
+    try:
+        spec = MODEL_SPECS[model_id]
+        cfg = _compose_cfg_from_registry(PROFILES, model_id, "__fit__", slug)
+        predict_kwargs = dict(
+            spec=spec,
+            kv_format=cfg["kv_format"],
+            max_ctx=cfg["max_ctx"],
+            max_num_seqs=cfg["max_num_seqs"],
+            tp=cfg["tp"],
+            mem_util=cfg["mem_util"],
+            vram_gb=vram,
+            mtp=cfg.get("mtp", False),
+            weights_variant=cfg.get("weights_variant", "default"),
+            drafter_gb=cfg.get("drafter_gb", 0.0),
+            dflash_draft_gb=cfg.get("dflash_draft_gb", 0.0),
+        )
+        pred = predict(**predict_kwargs)
+        solver_kwargs = {k: v for k, v in predict_kwargs.items() if k != "max_ctx"}
+        max_ctx_fit = solve_max_ctx(**solver_kwargs)
+    except Exception as exc:  # any pricing-path failure → honest unknown
+        return {"verdict": "unknown", "error": f"pricing {slug!r} failed: {exc}"}
+
+    return {
+        "verdict": _RAW_VERDICT_MAP[pred.verdict],
+        "vram_est_gb": round(pred.total_gb, 4),
+        "band_gb": FIT_BAND_GB,
+        "max_ctx": int(max_ctx_fit),
+    }
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -1325,6 +1494,12 @@ def main():
     p.add_argument("--weights-variant", choices=["default", "int4", "awq", "bf16", "int8"], default=None,
                    help="Gemma 4 only: which weight quant variant. Default: from --compose, or int4.")
     p.add_argument("--calibration", action="store_true", help="Print predicted vs measured for all calibrated models.")
+    p.add_argument("--fit", metavar="SLUG|MODEL",
+                   help="Structured fit verdict for a registry compose slug (e.g. vllm/dual) or a bare "
+                        "catalogued model (resolved to its curated vLLM default). Use with --card and --json.")
+    p.add_argument("--card", metavar="GPU",
+                   help="Per-card GPU for --fit: a known card name (e.g. rtx3090, a6000) or a GB number. "
+                        "Default: --vram.")
     p.add_argument("--solve-max-ctx", action="store_true", help="Binary-search for the largest max_ctx that fits.")
     p.add_argument("--json", action="store_true", help="Output prediction as JSON.")
     p.add_argument("--kv-breakdown", action="store_true",
@@ -1360,6 +1535,21 @@ def main():
     if args.calibration:
         run_calibration()
         return 0
+
+    if args.fit is not None:
+        result = fit_verdict(args.fit, args.card, args.vram)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"Fit verdict — {args.fit}"
+                  + (f" on {args.card}" if args.card is not None else f" on {args.vram} GB/card"))
+            if result["verdict"] == "unknown":
+                print(f"  Verdict:      unknown ({result['error']})")
+            else:
+                print(f"  Verdict:      {result['verdict']}")
+                print(f"  VRAM est:     {result['vram_est_gb']:.2f} GB / card (±{result['band_gb']:.1f} GB band)")
+                print(f"  Max ctx fit:  {result['max_ctx']:,} tokens")
+        return 0 if result["verdict"] != "unknown" else 2
 
     # Resolve model: explicit --model > inferred from --compose > qwen3.6-27b
     model_key = _resolve_compose_model(args.compose, args.model) if args.compose else (args.model or "qwen3.6-27b")

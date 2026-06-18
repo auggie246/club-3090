@@ -2,7 +2,7 @@
 # Profile (at-a-glance):
 #   Model:     DiffusionGemma 26B-A4B — discrete-diffusion LM / dLLM (RedHatAI
 #              FP8-dynamic, compressed-tensors float-quantized)
-#   Topology:  Dual 3090 PCIe (TP=2, no NVLink)
+#   Topology:  Dual 3090 (TP=2, NVLink auto-detected via NVLINK_MODE — PCIe by default on this rig)
 #   Drafter:   none — diffusion LM (block-parallel denoising; AR spec-dec N/A)
 #   KV:        bf16 (pool ~408K tok @ util 0.82, 262K-len)
 #   Vision:    no (text diffusion)
@@ -71,6 +71,8 @@ services:
       - ../../../patches/gemma-image-fixes/marlin.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/scaled_mm/marlin.py:ro
       - ../../../patches/gemma-image-fixes/marlin_utils_fp8.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/utils/marlin_utils_fp8.py:ro
       - ../../../patches/gemma-image-fixes/diffusion_gemma.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/diffusion_gemma.py:ro
+      # NVLink auto-detection — runs inside container at boot (same path as dual-max).
+      - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
@@ -80,9 +82,12 @@ services:
       - TORCHDYNAMO_DISABLE=1
       - TORCH_COMPILE_DISABLE=1
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
       - NCCL_CUMEM_ENABLE=0
       - NCCL_P2P_DISABLE=1
-      - VLLM_DISABLE_CUSTOM_ALL_REDUCE=1
+      # custom all-reduce is now toggled by the entrypoint (OFF on PCIe via
+      # --disable-custom-all-reduce, ON when detect_nvlink finds NVLink/P2P) —
+      # replaces the former static VLLM_DISABLE_CUSTOM_ALL_REDUCE=1.
       - VLLM_NO_USAGE_STATS=1
       - OMP_NUM_THREADS=1
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
@@ -98,7 +103,23 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    # The :gemma image ENTRYPOINT is ["vllm","serve"]; command supplies the model + flags.
+    # Custom entrypoint overrides the :gemma image's ["vllm","serve"] so detect_nvlink
+    # can toggle custom all-reduce; command (the model + flags) is passed through as "$@".
+    entrypoint:
+      - bash
+      - -c
+      - |
+        # NVLink auto-detect: detect_nvlink.sh sets the NCCL env + _NVLINK_ENABLED;
+        # vLLM custom all-reduce is ON for NVLink/P2P, OFF (--disable-custom-all-reduce)
+        # for PCIe. $$ escapes $ so Compose v5.1+ passes the bash through verbatim — an
+        # un-escaped _NVLINK_ENABLED ref would be interpolated at parse time → forced to 0.
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
+        else
+          exec vllm serve --disable-custom-all-reduce "$$@"
+        fi
+      - --
     command:
       - /root/.cache/huggingface/diffusiongemma-26b-a4b-it-fp8-dynamic
       - --served-model-name

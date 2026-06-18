@@ -24,6 +24,10 @@
 #       routes through the Talker (audio) stage, which has a prefill shape bug and kills the engine.
 #     • fp8 KV (default) → full ctx for TEXT, but breaks Code2Wav (audio). Speech out → KV_CACHE_DTYPE=auto.
 #     • Uses BOTH cards (stage-parallel). Don't co-run another GPU-heavy service.
+#     • NVLink auto-config (the detect_nvlink/NVLINK_MODE custom-all-reduce toggle the other vLLM
+#       duals carry) is deliberately N/A here: stage-parallel (thinker→GPU0, talker+code2wav→GPU1)
+#       has no TP all-reduce to toggle, and the cross-stage connector uses host shared memory — so
+#       NCCL_P2P stays disabled by design (re-enabling P2P would regress, not help). Not missing.
 #   Best for:  Qwen3-Omni text + multimodal *understanding* on 2x 3090 (RAG/long-doc, vision/audio in).
 # ---------------------------------------------------------------------------
 # See ../../../README.md (engine folder) for the full setup walk-through (weights download,

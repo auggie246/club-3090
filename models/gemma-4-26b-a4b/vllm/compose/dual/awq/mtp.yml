@@ -1,7 +1,7 @@
 # ===========================================================================
 # Profile (at-a-glance):
 #   Model:     Gemma 4 26B-A4B MoE (cyankiwi AWQ-4bit, compressed-tensors)
-#   Topology:  Dual 3090 (TP=2)
+#   Topology:  Dual 3090 (TP=2, NVLink auto-detected via NVLINK_MODE)
 #   Drafter:   MTP n=4 — google/gemma-4-26B-A4B-it-assistant (external)
 #   KV:        bfloat16 (sidesteps Ampere fp8 dispatch issues)
 #   Vision:    off (limit-mm-per-prompt image=0 audio=0)
@@ -51,12 +51,15 @@ services:
       - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
       - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
       - ../../../cache/triton:/root/.triton/cache
+      # NVLink auto-detection — runs inside container at boot (same path as dual-max).
+      - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
       - NCCL_CUMEM_ENABLE=0
       - NCCL_P2P_DISABLE=1
       - VLLM_NO_USAGE_STATS=1
@@ -73,6 +76,21 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    entrypoint:
+      - bash
+      - -c
+      - |
+        # NVLink auto-detect: detect_nvlink.sh sets the NCCL env + _NVLINK_ENABLED;
+        # vLLM custom all-reduce is ON for NVLink/P2P, OFF (--disable-custom-all-reduce)
+        # for PCIe. $$ escapes $ so Compose v5.1+ passes the bash through verbatim — an
+        # un-escaped _NVLINK_ENABLED ref would be interpolated at parse time → forced to 0.
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
+        else
+          exec vllm serve --disable-custom-all-reduce "$$@"
+        fi
+      - --
     command:
       - --override-generation-config
       - '{"temperature":${TEMP:-${TEMPERATURE:-1.0}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-64},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'

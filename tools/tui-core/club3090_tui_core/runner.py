@@ -26,6 +26,11 @@ class CoreRunState:
     error: str = ""
     artifact_dir: str = ""
     report_path: str = ""
+    # Set exactly once when this run finishes (completion OR spawn failure).
+    # Consumers that need a per-run completion signal (e.g. the cockpit's
+    # pending-GPU-claim lease) await this; it is per-state, so it is never
+    # misattributed even if runs overlap. c3t ignores it.
+    done: "asyncio.Event" = field(default_factory=asyncio.Event)
 
     @property
     def elapsed_s(self) -> float:
@@ -84,6 +89,7 @@ class SubprocessRunner:
             state.finished = time.time()
             state.exit_code = -1
             state.verdict = "failed"
+            state.done.set()
             if self._on_complete:
                 self._on_complete(state)
             return state
@@ -137,6 +143,8 @@ class SubprocessRunner:
         self.history.append(state)
         self.current_run = None
         self._process = None
+
+        state.done.set()
 
         if self._on_complete:
             self._on_complete(state)

@@ -281,6 +281,18 @@ class CatalogPane(Container):
             star = "  ([dim]*[/dim] = BENCHMARKS.md scrape)" if self._has_md_scrape() else ""
             status_label.update(f"{len(self._entries)} variants loaded from registry{star}")
 
+    def refresh_enriched(self) -> None:
+        """Re-render after background enrichment mutated the shared entries in
+        place (fit / measurement), preserving the cursor row + active filter."""
+        table = self.query_one("#catalog-table", DataTable)
+        saved = table.cursor_row
+        self._render_rows()
+        if table.row_count:
+            try:
+                table.move_cursor(row=max(0, min(saved, table.row_count - 1)))
+            except Exception:
+                pass
+
     def _has_md_scrape(self) -> bool:
         return any(e.measurement.source == "benchmarks.md" for e in self._entries)
 
@@ -2207,14 +2219,28 @@ class CockpitApp(App):
 
     @work(exclusive=True, group="catalog")
     async def load_catalog(self) -> None:
-        """Load the enriched catalog from the service layer (real read)."""
-        entries, error = await self._data.load_catalog()
+        """Load the catalog (real read): paint the registry rows immediately,
+        then enrich fit + TPS in the background so the table appears in ~1s
+        instead of blocking on the full enrichment."""
+        rows, error = await self._data.load_catalog_rows()
+        if not error and not rows:
+            error = "No variants returned — registry may be empty"
         # Cache variants for detect/match + container slug-matching.
-        self._variants = [e.row for e in entries]
+        self._variants = [e.row for e in rows]
         try:
-            self.query_one("#catalog-pane", CatalogPane).populate(entries, error)
+            pane = self.query_one("#catalog-pane", CatalogPane)
         except Exception:
-            pass
+            return
+        pane.populate(rows, error)          # instant first paint (stub fit/TPS)
+        if error or not rows:
+            return
+        # Progressive enrichment — re-render after each phase (cursor preserved).
+        # rows are the SAME CatalogEntry objects the pane holds, so in-place
+        # mutation of e.fit / e.measurement is visible to refresh_enriched().
+        await self._data.enrich_fits(rows)
+        pane.refresh_enriched()
+        await self._data.enrich_measurements(rows)
+        pane.refresh_enriched()
 
     # ── Estate polling ───────────────────────────────────────────────────────────────
 

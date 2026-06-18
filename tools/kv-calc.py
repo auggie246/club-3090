@@ -1445,6 +1445,37 @@ def fit_verdict(target: str, card: Optional[str], vram_default: float) -> dict:
     }
 
 
+def fit_all_verdicts(card: Optional[str], vram_default: float) -> dict:
+    """Batch fit verdicts for EVERY registry slug on one card, in a SINGLE
+    process — one registry/profile load instead of N subprocesses.
+
+    Mirrors `--fit` per slug (same verdict shape); non-vLLM slugs
+    (kvcalc_key SKIP) get ``{"verdict": "skip"}``. Shaped:
+      {"card": <str|None>, "card_vram_gb": <float>,
+       "variants": {<slug>: <fit_verdict dict>, ...}}
+    The cockpit catalog consumes this instead of fanning out N `--fit` calls.
+    """
+    from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
+
+    vram = _resolve_card_vram_gb(card)
+    if card is not None and vram is None:
+        return {
+            "card": card,
+            "error": f"unrecognized --card {card!r} (pass a known card name or a GB number)",
+            "variants": {},
+        }
+    if vram is None:
+        vram = float(vram_default)
+
+    variants: dict = {}
+    for slug, entry in COMPOSE_REGISTRY.items():
+        if entry.get("kvcalc_key") in (None, "SKIP"):
+            variants[slug] = {"verdict": "skip"}
+            continue
+        variants[slug] = fit_verdict(slug, card, vram_default)
+    return {"card": card, "card_vram_gb": round(float(vram), 4), "variants": variants}
+
+
 # =============================================================================
 # CLI
 # =============================================================================
@@ -1497,6 +1528,10 @@ def main():
     p.add_argument("--fit", metavar="SLUG|MODEL",
                    help="Structured fit verdict for a registry compose slug (e.g. vllm/dual) or a bare "
                         "catalogued model (resolved to its curated vLLM default). Use with --card and --json.")
+    p.add_argument("--fit-all", action="store_true",
+                   help="Batch --fit for EVERY registry slug on --card, as one JSON object "
+                        "{card, card_vram_gb, variants:{slug: verdict}}. One process, no per-slug fan-out "
+                        "(the cockpit catalog's fit column). Always emits JSON.")
     p.add_argument("--card", metavar="GPU",
                    help="Per-card GPU for --fit: a known card name (e.g. rtx3090, a6000) or a GB number. "
                         "Default: --vram.")
@@ -1550,6 +1585,11 @@ def main():
                 print(f"  VRAM est:     {result['vram_est_gb']:.2f} GB / card (±{result['band_gb']:.1f} GB band)")
                 print(f"  Max ctx fit:  {result['max_ctx']:,} tokens")
         return 0 if result["verdict"] != "unknown" else 2
+
+    if args.fit_all:
+        result = fit_all_verdicts(args.card, args.vram)
+        print(json.dumps(result, indent=2))
+        return 0 if "error" not in result else 2
 
     # Resolve model: explicit --model > inferred from --compose > qwen3.6-27b
     model_key = _resolve_compose_model(args.compose, args.model) if args.compose else (args.model or "qwen3.6-27b")

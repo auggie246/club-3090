@@ -167,6 +167,20 @@ FIT_JSON = json.dumps(
     {"verdict": "fits-clean", "vram_est_gb": 19.881, "band_gb": 1.5, "max_ctx": 262144}
 )
 
+# kv-calc --fit-all --json shape: {card, card_vram_gb, variants:{slug: verdict}}.
+# The catalog fit column is enriched from ONE --fit-all call (not N --fit calls);
+# non-vLLM (kvcalc_key SKIP) slugs come back as {"verdict": "skip"}.
+FIT_ALL_JSON = json.dumps(
+    {
+        "card": "rtx-3090",
+        "card_vram_gb": 24.0,
+        "variants": {
+            "vllm/dual": {"verdict": "fits-clean", "vram_est_gb": 19.881, "band_gb": 1.5, "max_ctx": 262144},
+            "ik-llama/iq4ks-mtp": {"verdict": "skip"},
+        },
+    }
+)
+
 # REAL switch.sh --explain --json benchmarks shape (verified live):
 #   [{"row": "<markdown row>", "columns": [<cell>, …]}]
 # Canonical bench layout: Compose|Rig|KV|Max ctx|Narr/Code TPS|PP|VRAM|Date|Notes
@@ -262,6 +276,9 @@ def full_runner(**overrides) -> FakeRunner:
     """A FakeRunner wired for the common read contracts; override per-test."""
     responses = {
         "registry-emit.sh --json": ok(REGISTRY_JSON),
+        # --fit-all MUST precede --fit: the batch command contains the substring
+        # "kv-calc.py --fit" too, and FakeRunner returns the first match.
+        "kv-calc.py --fit-all": ok(FIT_ALL_JSON),
         "kv-calc.py --fit": ok(FIT_JSON),
         "--explain vllm/dual --json": ok(EXPLAIN_JSON),
         "--explain ik-llama/iq4ks-mtp --json": ok(EXPLAIN_NO_BENCH_JSON),
@@ -459,7 +476,8 @@ class TestLoadCatalog:
 
     @pytest.mark.asyncio
     async def test_catalog_skip_fit_for_ik_llama(self):
-        """ik/llama kvcalc_key=SKIP → fit verdict 'skip', no kv-calc call."""
+        """ik/llama kvcalc_key=SKIP → fit verdict 'skip' (the --fit-all batch
+        emits skip for non-vLLM slugs; no per-slug fan-out)."""
         cd = CockpitData(ROOT, runner=full_runner())
         entries, _ = await cd.load_catalog(enrich_fit=True, enrich_measurement=False)
         ik = next(e for e in entries if e.slug == "ik-llama/iq4ks-mtp")

@@ -166,6 +166,18 @@ FIT_JSON = json.dumps(
     {"verdict": "fits-clean", "vram_est_gb": 19.881, "band_gb": 1.5, "max_ctx": 262144}
 )
 
+# kv-calc --fit-all batch (one call enriches the whole catalog's fit column).
+FIT_ALL_JSON = json.dumps(
+    {
+        "card": "rtx-3090",
+        "card_vram_gb": 24.0,
+        "variants": {
+            "vllm/dual": {"verdict": "fits-clean", "vram_est_gb": 19.881, "band_gb": 1.5, "max_ctx": 262144},
+            "ik-llama/iq4ks-mtp": {"verdict": "skip"},
+        },
+    }
+)
+
 # REAL switch.sh --explain --json benchmarks shape: [{"row","columns"}].
 # TPS lives in columns[4] ("Narr / Code TPS"); 8-pack is scraped from the row.
 EXPLAIN_BENCH_ROW = {
@@ -341,6 +353,9 @@ REBENCH_REPORT_MD = (
 def fake_responses(**overrides) -> dict[str, RunResult]:
     responses = {
         "registry-emit.sh --json": ok(REGISTRY_JSON),
+        # --fit-all MUST precede --fit (the batch cmd contains "kv-calc.py --fit"
+        # as a substring; FakeRunner returns the first match).
+        "kv-calc.py --fit-all": ok(FIT_ALL_JSON),
         "kv-calc.py --fit": ok(FIT_JSON),
         "--explain vllm/dual --json": ok(EXPLAIN_JSON),
         "--explain ik-llama/iq4ks-mtp --json": ok(EXPLAIN_NO_BENCH_JSON),

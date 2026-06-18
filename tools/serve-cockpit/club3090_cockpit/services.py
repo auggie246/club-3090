@@ -219,16 +219,31 @@ class CockpitData:
     async def load_catalog(
         self, *, enrich_fit: bool = True, enrich_measurement: bool = True
     ) -> tuple[list[CatalogEntry], Optional[str]]:
-        """Enriched variant rows.
+        """Fully-enriched variant rows: load_catalog_rows() + optional fit
+        (batched kv-calc --fit-all) + measurement (parallel) enrichment.
 
-        1. registry-emit.sh --json → VariantRow list (variants block).
-        2. per-slug fit verdict for the locally-detected card (via kv-calc).
-        3. per-slug measurement (TPS / 8pk) from the structured explain corpus,
-           fallback to a coarse BENCHMARKS.md parse.
-
-        Fit + measurement enrichment is best-effort: a failed join leaves the
-        stub glyph rather than failing the whole catalog load.
+        Enrichment is best-effort: a failed join leaves the stub glyph rather
+        than failing the whole load. The cockpit paints load_catalog_rows()
+        first and enriches in the background; this combined entry point is kept
+        for callers/tests that want a fully-enriched result in one await.
         """
+        entries, err = await self.load_catalog_rows()
+        if err and not entries:
+            return [], err
+
+        if enrich_fit:
+            await self.enrich_fits(entries)
+        if enrich_measurement:
+            await self.enrich_measurements(entries)
+
+        if not entries:
+            return [], "No variants returned — registry may be empty"
+        return entries, None
+
+    async def load_catalog_rows(self) -> tuple[list[CatalogEntry], Optional[str]]:
+        """Registry rows ONLY — the fast first paint (no fit/measurement
+        enrichment). One read of compose_registry.py via registry-emit.sh
+        --json, with the raw-tab fallback if the --json wrapper regresses."""
         data, err = await self._run_json(
             ["bash", "scripts/lib/registry-emit.sh", "--json"], timeout=30.0
         )
@@ -241,16 +256,7 @@ class CockpitData:
         else:
             rows = [_variant_row_from_dict(d) for d in (data or {}).get("variants", [])]
 
-        entries = [CatalogEntry(row=r) for r in rows]
-
-        if enrich_fit:
-            await self._enrich_fits(entries)
-        if enrich_measurement:
-            await self._enrich_measurements(entries)
-
-        if not entries:
-            return [], "No variants returned — registry may be empty"
-        return entries, None
+        return [CatalogEntry(row=r) for r in rows], None
 
     async def _load_catalog_rows_fallback(self) -> tuple[list[VariantRow], Optional[str]]:
         cmd = [
@@ -265,26 +271,36 @@ class CockpitData:
             return [], res.stderr.strip()[:200] or "no rows"
         return parse_variant_rows(res.stdout), None
 
-    # Catalog enrichment fans out one subprocess per slug (kv-calc --fit, then
-    # switch --explain). Serially awaited over ~50 variants that is ~45 s (the
-    # explain leg alone is ~0.7 s × N). A cap-bounded asyncio.gather cuts it to a
-    # few seconds without flooding the box with N concurrent bash+python procs.
+    # enrich_measurements still fans out one switch --explain per slug; a
+    # cap-bounded asyncio.gather keeps that to a few seconds without flooding
+    # the box. enrich_fits no longer fans out — it uses the single kv-calc
+    # --fit-all batch (one process for the whole catalog).
     _ENRICH_CONCURRENCY = 12
 
-    async def _enrich_fits(self, entries: list[CatalogEntry]) -> None:
-        sem = asyncio.Semaphore(self._ENRICH_CONCURRENCY)
+    async def fit_all(self, card: Optional[str] = None) -> dict:
+        """kv-calc.py --fit-all --card <card> --json — fit verdict for EVERY
+        registry slug in ONE process. Returns {slug: verdict_dict}, or {} on
+        error (catalog still renders, fit column shows the stub glyph)."""
+        cmd = ["python3", "tools/kv-calc.py", "--fit-all", "--json"]
+        c = card or self.card
+        if c:
+            cmd += ["--card", c]
+        data, _err = await self._run_json(cmd, timeout=30.0)
+        return (data or {}).get("variants", {}) or {}
 
-        async def _one(e: CatalogEntry) -> None:
-            # ik/llama composes use kvcalc_key "SKIP" → no vLLM kv-calc fit.
-            if (e.row.kvcalc_key or "").upper() == "SKIP":
+    async def enrich_fits(self, entries: list[CatalogEntry]) -> None:
+        """Fit column for the whole catalog via ONE kv-calc --fit-all call
+        (the batch replaces the former per-slug fan-out)."""
+        variants = await self.fit_all(self.card)
+        for e in entries:
+            vd = variants.get(e.slug)
+            if vd is not None:
+                e.fit = FitVerdict.from_dict(vd, card=self.card)
+            elif (e.row.kvcalc_key or "").upper() == "SKIP":
+                # ik/llama composes (kvcalc_key SKIP) — no vLLM kv-calc fit.
                 e.fit = FitVerdict(verdict="skip", card=self.card)
-                return
-            async with sem:
-                e.fit = await self.fit(e.slug, self.card)
 
-        await asyncio.gather(*(_one(e) for e in entries))
-
-    async def _enrich_measurements(self, entries: list[CatalogEntry]) -> None:
+    async def enrich_measurements(self, entries: list[CatalogEntry]) -> None:
         # Read BENCHMARKS.md once up front — the per-slug md fallback below is
         # then a pure in-memory parse (no I/O per slug).
         bench_md = self._read_benchmarks_md()

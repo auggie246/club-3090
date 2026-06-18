@@ -140,10 +140,41 @@ for label, fit_arg, card_arg in (
         check(False, f"(d) {label}: output is valid JSON (got {exc}; out={out_u!r})")
     check(rc_u != 0, f"(d) {label}: exits non-zero (got {rc_u})")
 
+# ---------------------------------------------------------------------------
+# (e) --fit-all: ONE process emits a verdict for EVERY registry slug, shaped
+#     {card, card_vram_gb, variants:{slug: <fit_verdict>}}. vLLM slugs get a
+#     real verdict identical to the per-slug --fit; non-vLLM (kvcalc SKIP) get
+#     {"verdict":"skip"}. This is the cockpit catalog's batched fit path —
+#     one subprocess instead of N.
+# ---------------------------------------------------------------------------
+rc_a, out_a, err_a = run_fit("--fit-all", "--card", "rtx3090", "--json")
+check(rc_a == 0, f"(e) --fit-all exits 0 (got {rc_a}; stderr={err_a.strip()!r})")
+try:
+    da = json.loads(out_a)
+    parsed_a = True
+except Exception as exc:  # noqa: BLE001
+    da, parsed_a = {}, False
+    check(False, f"(e) --fit-all output is valid JSON (got {exc}; out={out_a!r})")
+if parsed_a:
+    check(set(da.keys()) >= {"card", "card_vram_gb", "variants"},
+          f"(e) top-level keys include card/card_vram_gb/variants (got {sorted(da.keys())})")
+    variants = da.get("variants", {})
+    check(isinstance(variants, dict) and len(variants) > 10,
+          f"(e) variants is a non-trivial dict (got {len(variants) if isinstance(variants, dict) else variants!r})")
+    check("vllm/dual" in variants and variants["vllm/dual"].get("verdict") in VERDICTS_OK,
+          f"(e) vllm/dual has a real verdict in the batch (got {variants.get('vllm/dual')!r})")
+    check(variants.get("vllm/dual") == json.loads(out),
+          "(e) batch vllm/dual == per-slug --fit (one pricing path)")
+    check(variants.get("beellama/dflash", {}).get("verdict") == "skip",
+          f"(e) non-vLLM beellama/dflash → skip (got {variants.get('beellama/dflash')!r})")
+    check(all(isinstance(v, dict) and isinstance(v.get("verdict"), str)
+              for v in variants.values()),
+          "(e) every variant value carries a verdict string")
+
 if failures:
     print(f"\n{len(failures)} assertion(s) failed.", file=sys.stderr)
     sys.exit(1)
-print("\nAll --fit JSON shape assertions passed (a-d).")
+print("\nAll --fit / --fit-all JSON shape assertions passed (a-e).")
 PY
 
 echo "test-kv-calc-fit.sh OK"

@@ -78,6 +78,15 @@ class TestAppMounts:
                 assert app is not None
 
     @pytest.mark.asyncio
+    async def test_persistent_rail_status_present(self):
+        """The persistent left-rail status card (c3t-style) mounts alongside the mode switcher."""
+        app = _make_app()
+        with patch.object(app, "_load_catalog"):
+            async with app.run_test(size=(120, 40)) as pilot:
+                assert app.query_one("#mode-switcher") is not None
+                assert app.query_one("#rail-status") is not None
+
+    @pytest.mark.asyncio
     async def test_discover_panel_visible_on_start(self):
         app = _make_app()
         with patch.object(app, "_load_catalog"):

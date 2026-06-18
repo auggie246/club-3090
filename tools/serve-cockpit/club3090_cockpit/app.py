@@ -799,13 +799,38 @@ PRIMARY_ACTION_TOASTS = [
 ]
 
 
+class RailStatus(Static):
+    """Persistent left-rail status card — always visible under the mode list,
+    mirroring c3t's TargetPane. Phase-1 content is illustrative mock data
+    (wired to detect.py + health.sh in Phase 3)."""
+
+    STATUS_MARKUP = (
+        "[bold]Estate[/bold]  [dim](mock)[/dim]\n"
+        "\n"
+        "[green]███████[/green][dim]░░░[/dim] GPU0  18/24G\n"
+        "[yellow]████[/yellow][dim]██████[/dim] GPU1  12/24G\n"
+        "\n"
+        "scene   [cyan]27b[/cyan] [green]●[/green]\n"
+        "model   qwen3.6-27b\n"
+        "power   312 / 370 W\n"
+        "\n"
+        "[green]●[/green] serving · MTP n=2\n"
+        "KV pool 61% · 0 errors\n"
+        "\n"
+        "[dim]live in Phase 3[/dim]"
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(self.STATUS_MARKUP, **kwargs)
+
+
 class ModeSwitcher(Static):
     """Left-rail mode selector.  Purely cosmetic in Phase 1 — navigation is
     driven by CockpitApp._active_mode and the 1–4 digit bindings."""
 
     DEFAULT_CSS = """
     ModeSwitcher {
-        width: 20;
+        width: 1fr;
         height: auto;
         border: solid $primary;
         padding: 0 1;
@@ -891,9 +916,21 @@ class CockpitApp(App):
         height: 1fr;
     }
     #left-rail {
-        width: 18;
+        width: 32;
         height: 1fr;
         padding: 0 0;
+    }
+    #rail-status {
+        width: 1fr;
+        height: 1fr;
+        border: solid $primary;
+        padding: 0 1;
+        margin-top: 1;
+        color: $text;
+    }
+    #rail-status .rail-status-title {
+        text-style: bold;
+        color: $accent;
     }
     #content-area {
         width: 1fr;
@@ -925,6 +962,7 @@ class CockpitApp(App):
         with Horizontal(id="main-layout"):
             with Vertical(id="left-rail"):
                 yield ModeSwitcher(id="mode-switcher")
+                yield RailStatus(id="rail-status")
             with Container(id="content-area"):
                 # Mode 0 — Discover
                 with Container(id="panel-discover", classes="mode-panel active"):

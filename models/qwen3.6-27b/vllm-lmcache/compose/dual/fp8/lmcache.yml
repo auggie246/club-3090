@@ -109,15 +109,17 @@ services:
         #   LMCACHE_L2=1                -> enable L2 at the in-repo default /lmcache-kv (fs adapter)
         #   LMCACHE_L2_ADAPTER='{...}'  -> full override (custom path/backend); wins over LMCACHE_L2
         # chunk-size MUST be a multiple of vLLM's unified block (1584 for int8-PTH KV).
-        LM_ARGS=(--chunk-size "${LMCACHE_CHUNK_SIZE:-1584}" --l1-size-gb "${LMCACHE_L1_GB:-30}" --eviction-policy LRU)
-        if [ -n "${LMCACHE_L2_ADAPTER:-}" ]; then
-          LM_ARGS+=(--l2-adapter "${LMCACHE_L2_ADAPTER}")
-        elif [ "${LMCACHE_L2:-0}" = "1" ]; then
+        # $$ escapes $ so Docker Compose passes bash syntax through (v5.1+ interpolates
+        # entrypoint strings; $${VAR[@]} without escape → "invalid interpolation format").
+        LM_ARGS=(--chunk-size "$${LMCACHE_CHUNK_SIZE:-1584}" --l1-size-gb "$${LMCACHE_L1_GB:-30}" --eviction-policy LRU)
+        if [ -n "$${LMCACHE_L2_ADAPTER:-}" ]; then
+          LM_ARGS+=(--l2-adapter "$${LMCACHE_L2_ADAPTER}")
+        elif [ "$${LMCACHE_L2:-0}" = "1" ]; then
           LM_ARGS+=(--l2-adapter '{"type":"fs","base_path":"/lmcache-kv"}')
         fi
-        lmcache server "${LM_ARGS[@]}" &
+        lmcache server "$${LM_ARGS[@]}" &
         sleep 6
-        exec vllm serve --disable-custom-all-reduce "$@"
+        exec vllm serve --disable-custom-all-reduce "$$@"
       - --
     command:
       - --model

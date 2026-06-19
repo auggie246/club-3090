@@ -102,8 +102,8 @@ KV cache is a separate concern from weights — vLLM ships several KV-quant sche
 | KV format | Implementation | Native HW? | Works on Ampere? | Notes |
 |---|---|:--:|:--:|---|
 | FP16 / BF16 | Standard cast | ✓ (FP16/BF16 TC) | ✓ | Baseline. Largest KV pool footprint. |
-| FP8 (E4M3 / E5M2) | Software cast on Ampere; HW TC on Ada+ | partial | ✓ (SW) | Half the bytes/token vs FP16. The default in `dual/docker-compose.yml`. |
-| INT8 PTH (per-token-head) | Custom kernel with per-(token, head) scales | ✓ (INT8 TC) | ✓ | High single-stream TPS; **doesn't scale at concurrency** (see [FAQ](FAQ.md#int8-pth-gives-me-150-tps-single-stream-but-doesnt-scale-with-concurrency--is-that-a-bug)). |
+| FP8 (E4M3 / E5M2) | Software cast on Ampere; HW TC on Ada+ | partial | ✓ (SW) | Half the bytes/token vs FP16. The default in `dual/autoround-int4/fp8-mtp.yml`. |
+| INT8 PTH (per-token-head) | Custom kernel with per-(token, head) scales | ✓ (INT8 TC) | ✓ | High single-stream TPS; **doesn't scale at concurrency** (see [FAQ](FAQ.md#int8-pth-gives-me-150-tps-single-stream-but-doesnt-scale-with-concurrency--is-that-a-bug)). **Native in stock vLLM ≥ v0.22.0 for uniform-head-dim models** (Qwen etc.) — no overlay; Gemma-4 needs the #40391 overlay (see "KV-quant × checkpoint compatibility" below). |
 | TurboQuant 3-bit (TQ3) | Custom Triton kernels | ✗ (Triton soft) | ✓ | ~5× the KV pool of FP16. Hybrid-attention models (Qwen3-Next) need a multi-query verify kernel for spec-decode (only Genesis P67 today). |
 | TurboQuant 4-bit (TQ4) | Custom Triton kernels | ✗ | ✓ | ~4× the KV pool of FP16. Slightly higher quality than TQ3. |
 | TurboQuant k8v4 | 8-bit K + 4-bit V mixed | ✗ | ✓ | Asymmetric — K matters more for attention precision. BF16-equivalent quality per the TQ paper. |
@@ -114,6 +114,24 @@ KV cache is a separate concern from weights — vLLM ships several KV-quant sche
 - **Block-scaled FP8 KV** — per-block scales like MXFP8 but applied to KV cache rather than weights. Recovers accuracy at long-context where flat FP8 can lose precision in deep layers. Lands on Hopper / Blackwell first.
 - **NVFP4 KV** — Blackwell-native, ~4× smaller than FP16 KV at NVFP4 weight accuracy levels. Kernels still maturing in vLLM nightlies.
 - **TensorRT-LLM W4A8 / W4A4** — Hopper/Blackwell weight+activation quant recipes that pair INT4/NVFP4 weights with FP8/FP4 activations. Out of scope for the vLLM-first composes here but worth knowing if you cross-shop.
+
+### KV-quant × checkpoint compatibility — the two Ampere traps
+
+Beyond "does the kernel exist", two non-obvious rules decide which KV dtype you can actually *use*:
+
+1. **fp8 KV is rejected for *compressed-tensors* checkpoints.** `--kv-cache-dtype fp8_e5m2` on an AWQ / FP8-weight / INT8-weight checkpoint loaded via the **compressed-tensors** path dies with `ValueError: fp8_e5m2 kv-cache is not supported with fp8 checkpoints` — and it fires whether `--quantization compressed-tensors` is explicit *or* auto-detected (the guard keys off the *detected* method, not the flag). It is **not** caused by a real fp8 weight component — a pure-int4 AWQ (e.g. `cyankiwi/...-AWQ-BF16-INT4`, which has zero fp8 in its config) trips it too. The **`auto_round` / GPTQ loaders are *not* affected** — that's why `vllm/dual` (AutoRound) runs fp8 KV fine. **So for a compressed-tensors checkpoint, the 1-byte-per-token KV path is INT8-PTH, not fp8.**
+
+2. **INT8-PTH is native in stock vLLM (≥ v0.22.0) — but only for *uniform-head-dim* models.** `--kv-cache-dtype int8_per_token_head` works out-of-the-box on Qwen and other standard-attention models (defined in `config/cache.py` + `v1/kv_cache_interface.py`; **no overlay**). The catch is **heterogeneous head dims**: Gemma-4 interleaves head_dim 256 (sliding) / 512 (global), so the per-token-head page sizes (520 B vs 1032 B) don't satisfy vLLM's `unify_kv_cache_spec_page_size()` and the engine refuses to boot. The vendored **#40391** overlay pads global layers to a 1040-B factor to fix *only that*. So #40391 is **Gemma-4-specific — do not copy it to other models**, and don't assume INT8-PTH needs a patch in general.
+
+**Putting it together — picking a KV dtype on Ampere (sm_86):**
+
+| Your checkpoint / goal | KV dtype | Overlay? |
+|---|---|---|
+| `auto_round` / GPTQ weights | `fp8_e5m2` | none |
+| compressed-tensors (AWQ / FP8 / INT8 weights), **long context** | `int8_per_token_head` | none — **except Gemma-4: +#40391** |
+| anything, **context ≤ ~half the model-max** | `bf16` (default) | none |
+
+The "INT8-PTH needs no overlay" point was upstreamed in v0.22.0 and is easy to miss — **engine capability flags that predate it can be wrong; verify against the running image**, not the profile. (The reason most people never hit any of this: they run **bf16 KV at the auto-fit context**, well under the model max — the int8-PTH/overlay question only arises when you stack *max context* AND *a compressed-tensors checkpoint*.)
 
 ---
 
@@ -298,7 +316,7 @@ What to ship as the default for each GPU class, given the matrix above:
 | **Pascal (10x0)** | FP16 only — no INT8 TC | FP16 | none (vLLM unsupported, CC<7.5) | llama.cpp only |
 | **Volta (V100)** | FP16 — no BF16 TC, weak INT8 | FP16 | none | llama.cpp — see [@efschu's V100 bench](../BENCHMARKS.md#qwen36-27b) |
 | **Turing (T4, 20-series)** | INT8 native; GPTQ INT4 via Marlin works | FP16 / INT8 | n-gram only | not a primary target |
-| **Ampere consumer (3090/3080/3060)** ⭐ | **AutoRound INT4** | **TQ3 (Genesis) / INT8 PTH / fp8** | **MTP n=3** + Genesis P67 | `dual/turbo.yml`, `dual/tq3-mtp-genesis.yml`, `single/long-text.yml` — primary target of this stack |
+| **Ampere consumer (3090/3080/3060)** ⭐ | **AutoRound INT4** | **TQ3 (Genesis) / INT8 PTH / fp8** | **MTP n=3** + Genesis P67 | `dual/autoround-int4/turbo.yml`, `dual/autoround-int4/tq3-mtp-genesis.yml`, `single/autoround-int4/long-text.yml` — primary target of this stack |
 | **Ampere DC (A100)** | AutoRound INT4 or FP16 | TQ3 / fp8 | MTP n=3 | Same composes as 3090, more VRAM headroom |
 | **Ada (4090 / L40)** | AutoRound INT4 (preserve INT4 path) **OR** FP8 weights for full TC use | **fp8 (HW)** / TQ3 / INT8 PTH | MTP n=3 / DFlash | Same composes work; FP8 KV is now a real perf win |
 | **Hopper (H100/H200)** | FP8 weights (FBGEMM/INC) | **fp8 (HW transformer engine)** | MTP / DFlash | Not a primary target — these cards are usually already running their own optimised stacks |

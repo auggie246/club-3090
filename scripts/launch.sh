@@ -32,6 +32,18 @@
 #   bash scripts/launch.sh --variant llamacpp/default
 #   bash scripts/launch.sh --variant vllm/dual
 #
+# Defaults & pins (design §3/§13):
+#   bash scripts/launch.sh                       # bare → your pinned default (or
+#                                                #   the recommended default for the
+#                                                #   first installed shortlist model),
+#                                                #   else the interactive wizard
+#   bash scripts/launch.sh --variant qwen3.6-27b/default  # YOUR default for that model
+#                                                #   (.env pin ‖ curated pick for the rig)
+#   bash scripts/launch.sh --variant vllm/default # the maintainer's recommended vLLM
+#                                                #   config on the detected topology
+#   After a successful boot, launch.sh offers to pin the config as your default.
+#   Pin/clear directly:  scripts/switch.sh --set-default <slug> | --clear-default <model>
+#
 # Env vars:
 #   NVLINK_MODE=auto|force_on|force_off — NVLink auto-detection for dual-card composes
 #   auto (default): detects NVLink via nvidia-smi topo -m
@@ -58,6 +70,27 @@ if [[ -z "${MODEL_DIR:-}" && -f "${ROOT_DIR}/.env" ]]; then
   # shellcheck source=/dev/null
   source "${ROOT_DIR}/.env"
   set +a
+fi
+# PR-B: the above only sources .env when MODEL_DIR is unset, so a user with
+# `export MODEL_DIR=…` in their shell would never see their `.env` model-default
+# pins (CLUB3090_DEFAULT_*). Load just those keys here, regardless — with
+# shell-env-wins precedence (matching switch.sh's loader / #425). Values are
+# taken literally (no shell expansion), CRLF-tolerant.
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+  while IFS= read -r _env_line || [[ -n "$_env_line" ]]; do
+    _env_line="${_env_line#"${_env_line%%[![:space:]]*}"}"   # strip leading whitespace
+    _env_line="${_env_line%$'\r'}"                           # strip trailing CR
+    [[ "$_env_line" == "export "* ]] && _env_line="${_env_line#export }"
+    [[ "$_env_line" == CLUB3090_DEFAULT_* ]] || continue
+    _env_key="${_env_line%%=*}"
+    [[ "$_env_key" == "$_env_line" || -z "$_env_key" ]] && continue
+    [[ -n "${!_env_key+x}" ]] && continue                    # already set in env → shell wins
+    _env_val="${_env_line#*=}"
+    _env_val="${_env_val#\"}"; _env_val="${_env_val%\"}"
+    _env_val="${_env_val#\'}"; _env_val="${_env_val%\'}"
+    export "${_env_key}=${_env_val}"
+  done < "${ROOT_DIR}/.env"
+  unset _env_line _env_key _env_val
 fi
 MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/models-cache}"
 # shellcheck source=preflight.sh
@@ -124,7 +157,13 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
-    *) echo "Unknown flag: $1"; exit 1 ;;
+    --*) echo "Unknown flag: $1"; exit 1 ;;
+    *)
+      if [[ -n "$VARIANT" ]]; then
+        echo "ERROR: multiple variants supplied: '${VARIANT}' and '$1'" >&2
+        exit 1
+      fi
+      VARIANT="$1"; shift ;;
   esac
 done
 
@@ -206,92 +245,20 @@ choose() {
   done
 }
 
-declare -A LAUNCH_VARIANT_COMPOSE=(
-  [vllm/default]="models/qwen3.6-27b/vllm/compose/single/docker-compose.yml"
-  [vllm/long-vision]="models/qwen3.6-27b/vllm/compose/single/long-vision.yml"
-  [vllm/long-text]="models/qwen3.6-27b/vllm/compose/single/long-text.yml"
-  [vllm/long-text-no-mtp]="models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml"
-  [vllm/bounded-thinking]="models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml"
-  [vllm/tools-text]="models/qwen3.6-27b/vllm/compose/single/tools-text.yml"
-  [vllm/minimal]="models/qwen3.6-27b/vllm/compose/single/minimal.yml"
-  [vllm/dual]="models/qwen3.6-27b/vllm/compose/dual/docker-compose.yml"
-  [vllm/dual4]="models/qwen3.6-27b/vllm/compose/multi4/docker-compose.yml"
-  [vllm/dual4-dflash]="models/qwen3.6-27b/vllm/compose/multi4/dflash.yml"
-  [vllm/dual-turbo]="models/qwen3.6-27b/vllm/compose/dual/turbo.yml"
-  [vllm/dual-dflash]="models/qwen3.6-27b/vllm/compose/dual/dflash.yml"
-  [vllm/dual-dflash-noviz]="models/qwen3.6-27b/vllm/compose/dual/dflash-noviz.yml"
-  [vllm/dual-nvlink]="models/qwen3.6-27b/vllm/compose/dual/nvlink.yml"
-  [vllm/dual-nvlink-turbo]="models/qwen3.6-27b/vllm/compose/dual/nvlink-turbo.yml"
-  [vllm/dual-nvlink-dflash]="models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash.yml"
-  [vllm/dual-nvlink-dflash-noviz]="models/qwen3.6-27b/vllm/compose/dual/nvlink-dflash-noviz.yml"
-  [vllm/gemma-mtp]="models/gemma-4-31b/vllm/compose/dual/docker-compose.yml"
-  [vllm/gemma-mtp-tp1]="models/gemma-4-31b/vllm/compose/single/docker-compose.yml"
-  [vllm/gemma-dflash]="models/gemma-4-31b/vllm/compose/dual/dflash.yml"
-  [llamacpp/default]="models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml"
-  [llamacpp/mtp]="models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml"
-  [llamacpp/bounded-thinking]="models/qwen3.6-27b/llama-cpp/compose/single/bounded-thinking.yml"
-  [llamacpp/mtp-vision]="models/qwen3.6-27b/llama-cpp/compose/single/mtp-vision.yml"
-  [ik-llama/iq4ks-mtp]="models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp.yml"
-  [ik-llama/iq4ks-mtp-vision]="models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp-vision.yml"
-)
-declare -A LAUNCH_VARIANT_MODEL=(
-  [vllm/default]="qwen3.6-27b" [vllm/long-vision]="qwen3.6-27b" [vllm/long-text]="qwen3.6-27b"
-  [vllm/long-text-no-mtp]="qwen3.6-27b" [vllm/bounded-thinking]="qwen3.6-27b" [vllm/tools-text]="qwen3.6-27b"
-  [vllm/minimal]="qwen3.6-27b" [vllm/dual]="qwen3.6-27b" [vllm/dual4]="qwen3.6-27b"
-  [vllm/dual4-dflash]="qwen3.6-27b" [vllm/dual-turbo]="qwen3.6-27b" [vllm/dual-dflash]="qwen3.6-27b"
-  [vllm/dual-dflash-noviz]="qwen3.6-27b" [vllm/dual-nvlink]="qwen3.6-27b" [vllm/dual-nvlink-turbo]="qwen3.6-27b"
-  [vllm/dual-nvlink-dflash]="qwen3.6-27b" [vllm/dual-nvlink-dflash-noviz]="qwen3.6-27b"
-  [vllm/gemma-mtp]="gemma-4-31b" [vllm/gemma-mtp-tp1]="gemma-4-31b" [vllm/gemma-dflash]="gemma-4-31b"
-  [llamacpp/default]="qwen3.6-27b" [llamacpp/mtp]="qwen3.6-27b" [llamacpp/bounded-thinking]="qwen3.6-27b" [llamacpp/mtp-vision]="qwen3.6-27b"
-  [ik-llama/iq4ks-mtp]="qwen3.6-27b" [ik-llama/iq4ks-mtp-vision]="qwen3.6-27b"
-)
-declare -A LAUNCH_VARIANT_ENGINE=(
-  [vllm/default]="vllm" [vllm/long-vision]="vllm" [vllm/long-text]="vllm" [vllm/long-text-no-mtp]="vllm"
-  [vllm/bounded-thinking]="vllm" [vllm/tools-text]="vllm" [vllm/minimal]="vllm" [vllm/dual]="vllm"
-  [vllm/dual4]="vllm" [vllm/dual4-dflash]="vllm" [vllm/dual-turbo]="vllm" [vllm/dual-dflash]="vllm"
-  [vllm/dual-dflash-noviz]="vllm" [vllm/dual-nvlink]="vllm" [vllm/dual-nvlink-turbo]="vllm"
-  [vllm/dual-nvlink-dflash]="vllm" [vllm/dual-nvlink-dflash-noviz]="vllm"
-  [vllm/gemma-mtp]="vllm" [vllm/gemma-mtp-tp1]="vllm" [vllm/gemma-dflash]="vllm"
-  [llamacpp/default]="llamacpp" [llamacpp/mtp]="llamacpp" [llamacpp/bounded-thinking]="llamacpp" [llamacpp/mtp-vision]="llamacpp"
-  [ik-llama/iq4ks-mtp]="llamacpp" [ik-llama/iq4ks-mtp-vision]="llamacpp"
-)
-declare -A LAUNCH_VARIANT_KVCALC=(
-  [vllm/default]="qwen3.6-27b:long-vision"
-  [vllm/long-text]="qwen3.6-27b:long-text"
-  [vllm/long-text-no-mtp]="qwen3.6-27b:long-text-no-mtp"
-  [vllm/long-vision]="qwen3.6-27b:long-vision"
-  [vllm/bounded-thinking]="qwen3.6-27b:bounded-thinking"
-  [vllm/tools-text]="qwen3.6-27b:tools-text"
-  [vllm/minimal]="qwen3.6-27b:minimal"
-  [vllm/dual]="qwen3.6-27b:dual"
-  [vllm/dual-turbo]="qwen3.6-27b:dual-turbo"
-  [vllm/dual-dflash]="qwen3.6-27b:dual-dflash"
-  [vllm/dual-dflash-noviz]="qwen3.6-27b:dual-dflash-noviz"
-  [vllm/dual4]="qwen3.6-27b:dual4"
-  [vllm/dual4-dflash]="qwen3.6-27b:dual4-dflash"
-  [vllm/dual-nvlink]="qwen3.6-27b:dual"
-  [vllm/dual-nvlink-turbo]="qwen3.6-27b:dual-turbo"
-  [vllm/dual-nvlink-dflash]="qwen3.6-27b:dual-dflash"
-  [vllm/dual-nvlink-dflash-noviz]="qwen3.6-27b:dual-dflash-noviz"
-  [vllm/gemma-mtp]="gemma-4-31b:gemma-dual"
-  [vllm/gemma-mtp-tp1]="gemma-4-31b:gemma-single"
-  [vllm/gemma-dflash]="gemma-4-31b:gemma-dual-dflash"
-  [llamacpp/default]="SKIP"
-  [llamacpp/mtp]="SKIP"
-  [llamacpp/bounded-thinking]="SKIP"
-  [llamacpp/mtp-vision]="SKIP"
-  [ik-llama/iq4ks-mtp]="SKIP"
-  [ik-llama/iq4ks-mtp-vision]="SKIP"
-)
-LAUNCH_VARIANT_ORDER=(
-  vllm/long-vision vllm/long-text vllm/long-text-no-mtp vllm/bounded-thinking
-  vllm/default vllm/tools-text vllm/minimal
-  vllm/dual vllm/dual-turbo vllm/dual-dflash vllm/dual-dflash-noviz
-  vllm/dual4 vllm/dual4-dflash
-  vllm/gemma-mtp vllm/gemma-mtp-tp1 vllm/gemma-dflash
-  llamacpp/default llamacpp/mtp llamacpp/bounded-thinking llamacpp/mtp-vision
-  ik-llama/iq4ks-mtp ik-llama/iq4ks-mtp-vision
-)
+declare -A LAUNCH_VARIANT_COMPOSE=()
+declare -A LAUNCH_VARIANT_MODEL=()
+declare -A LAUNCH_VARIANT_ENGINE=()
+declare -A LAUNCH_VARIANT_PROFILE_ENGINE=()
+declare -A LAUNCH_VARIANT_KVCALC=()
+declare -A LAUNCH_DEFAULT_PORT=()
+declare -A LAUNCH_DEFAULT_CONTAINER=()
+declare -A LAUNCH_VARIANT_STATUS=()
+declare -A LAUNCH_VARIANT_STATUS_NOTE=()
+LAUNCH_VARIANT_ORDER=()
+PRIMARY_MODEL="${PRIMARY_MODEL:-qwen3.6-27b}"
+# shellcheck source=lib/registry-emit.sh
+source "${ROOT_DIR}/scripts/lib/registry-emit.sh"
+derive_launch_variant_tables "${ROOT_DIR}"
 
 variant_hw_status() {
   local variant="$1"
@@ -894,9 +861,187 @@ suggest_default_variant() {
       # vllm/tools-text explicitly.
       echo "llamacpp/default"
     fi
+  elif [[ "$MODEL_NAME" == "qwen3.6-40b-deckard" ]]; then
+    # Deckard: only one compose (dual llama.cpp MTP). Dual-only (31 GB > 24 GB).
+    echo "llamacpp/deckard40B-dual-mtp"
   else
-    if (( cards >= 2 )); then echo "vllm/gemma-mtp"; else echo "vllm/gemma-mtp-tp1"; fi
+    if (( cards >= 2 )); then
+      echo "vllm/gemma-bf16-mtp"
+    else
+      # Single card: beellama/gemma-dflash is the recommended Gemma-4 path — the
+      # only viable fast single-card config on Ampere. vLLM single-card is dead
+      # here (no fp8 KV path on sm_86; the old vllm/gemma-mtp-tp1 was deprecated).
+      echo "beellama/gemma-dflash"
+    fi
   fi
+}
+
+
+launch_topology_from_selected() {
+  local cards="${#CARD_INDICES[@]}"
+  case "$cards" in
+    0|1) printf 'single' ;;
+    2) printf 'dual' ;;
+    4) printf 'multi4' ;;
+    *) printf 'multi%s' "$cards" ;;
+  esac
+}
+
+resolve_launch_default_variant() {
+  # Resolves a `<…>/default` token (design §13.1) — mirrors switch.sh:
+  #   <engine>/<topology>/default → engine-recommendation, explicit topology
+  #   <X>/default                 → dispatch: engine name → engine rec; model-id
+  #                                 → that model's default (.env pin ‖ curated)
+  #   anything else               → passthrough (already a concrete slug)
+  local variant="$1" engine topology target
+  if [[ "$variant" =~ ^([^/]+)/(single|dual|multi[0-9]+)/default$ ]]; then
+    engine="${BASH_REMATCH[1]}"
+    topology="${BASH_REMATCH[2]}"
+    MODEL_NAME="${MODEL_NAME:-$PRIMARY_MODEL}"
+    MODEL_NAME="$(normalize_model_name "$MODEL_NAME")"
+    if ! target="$(registry_default_target "$ROOT_DIR" "$MODEL_NAME" "$engine" "$topology")"; then
+      echo "[launch] ERROR: cannot resolve default variant '${variant}' for model ${MODEL_NAME}." >&2
+      exit 1
+    fi
+    printf '%s' "$target"
+    return 0
+  elif [[ "$variant" =~ ^([^/]+)/default$ ]]; then
+    if [[ "${#CARD_INDICES[@]}" -eq 0 ]]; then
+      select_topology_gpus || {
+        echo "[launch] ERROR: cannot autodetect topology for '${variant}' because no GPUs were detected." >&2
+        exit 1
+      }
+    fi
+    topology="$(launch_topology_from_selected)"
+    MODEL_NAME="${MODEL_NAME:-$PRIMARY_MODEL}"
+    MODEL_NAME="$(normalize_model_name "$MODEL_NAME")"
+    if ! target="$(x_default_dispatch "$ROOT_DIR" "$variant" "$topology" "$MODEL_NAME")"; then
+      echo "[launch] ERROR: cannot resolve default variant '${variant}'." >&2
+      exit 1
+    fi
+    printf '%s' "$target"
+    return 0
+  fi
+  printf '%s' "$variant"
+}
+
+# --- PR-B: bare-launch default + user pin (design §13.3, §13.6) -------------
+
+# Echo RECOMMENDED_DEFAULT_MODELS (one per line, in shortlist order).
+recommended_default_models() {
+  python3 -c "import sys; sys.path.insert(0,'$ROOT_DIR'); from scripts.lib.profiles.compose_registry import RECOMMENDED_DEFAULT_MODELS; print('\n'.join(RECOMMENDED_DEFAULT_MODELS))"
+}
+
+# Echo the .env pin key for a model.
+model_pin_key() {
+  python3 -c "import sys; sys.path.insert(0,'$ROOT_DIR'); from scripts.lib.profiles.compose_registry import model_default_pin_key; print(model_default_pin_key('$1'))"
+}
+
+# First INSTALLED model on the shortlist (uses detect_installed_models →
+# MODEL_ENGINES). Echoes the model-id or nothing.
+first_installed_shortlist_model() {
+  local model
+  while IFS= read -r model; do
+    [[ -n "$model" ]] || continue
+    [[ -n "${MODEL_ENGINES[$model]:-}" ]] && { printf '%s' "$model"; return 0; }
+  done < <(recommended_default_models)
+  return 1
+}
+
+# Bare-launch default (no --variant, no --model, no GPU/TP override): pick the
+# first installed shortlist model, then its `<model>/default` (.env pin ‖
+# curated walk) on the detected topology. Sets VARIANT + MODEL_NAME on success.
+# Returns 1 (caller falls through to the interactive wizard) when no shortlist
+# model is installed OR no functional default resolves.
+try_bare_launch_default() {
+  detect_installed_models
+  local model
+  if ! model="$(first_installed_shortlist_model)"; then
+    return 1
+  fi
+  if [[ "${#CARD_INDICES[@]}" -eq 0 ]]; then
+    select_topology_gpus || return 1
+  fi
+  local topology target
+  topology="$(launch_topology_from_selected)"
+  local pin_key pin_value
+  pin_key="$(model_pin_key "$model")"
+  pin_value="${!pin_key:-}"
+  if ! target="$(model_default_target "$ROOT_DIR" "$model" "$topology")"; then
+    return 1
+  fi
+  MODEL_NAME="$model"
+  VARIANT="$target"
+  if [[ -n "$pin_value" && "$target" == "$pin_value" ]]; then
+    echo "[launch] using your pinned default for $(model_label "$model"): ${VARIANT}" >&2
+  else
+    echo "[launch] using the recommended default for $(model_label "$model") (${topology}): ${VARIANT}" >&2
+    echo "[launch] (pin your own with: bash scripts/switch.sh --set-default <slug>)" >&2
+  fi
+  return 0
+}
+
+# Fast-path (design §13.6): bare launch.sh with a pin set for the first
+# installed shortlist model → "Launch your default <slug>? [Y/n]". `n` drops
+# into the full wizard (returns 1). On accept, sets VARIANT + MODEL_NAME and
+# returns 0. Skipped on a non-interactive stdin (returns 1 → wizard handles it).
+try_pinned_fast_path() {
+  detect_installed_models
+  local model
+  if ! model="$(first_installed_shortlist_model)"; then
+    return 1
+  fi
+  local pin_key pin_value
+  pin_key="$(model_pin_key "$model")"
+  pin_value="${!pin_key:-}"
+  [[ -n "$pin_value" ]] || return 1
+  if [[ "${#CARD_INDICES[@]}" -eq 0 ]]; then
+    select_topology_gpus || return 1
+  fi
+  local topology target
+  topology="$(launch_topology_from_selected)"
+  if ! target="$(model_default_target "$ROOT_DIR" "$model" "$topology")"; then
+    return 1
+  fi
+  if [[ ! -t 0 ]]; then
+    # Non-interactive: honour the resolved default without prompting.
+    MODEL_NAME="$model"; VARIANT="$target"
+    echo "[launch] using your default for $(model_label "$model"): ${VARIANT}" >&2
+    return 0
+  fi
+  local reply
+  read -rp "Launch your default ${target} for $(model_label "$model")? [Y/n]: " reply
+  case "${reply:-Y}" in
+    n|N|no|NO)
+      return 1
+      ;;
+    *)
+      MODEL_NAME="$model"; VARIANT="$target"
+      return 0
+      ;;
+  esac
+}
+
+# Post-successful-boot prompt (design §5): offer to pin the just-launched slug
+# as the user's default for its model. Skipped when it is already the pin or on
+# a non-interactive stdin.
+maybe_offer_set_default() {
+  local slug="$1"
+  [[ -n "$slug" ]] || return 0
+  [[ -t 0 ]] || return 0
+  local model pin_key pin_value
+  model="$(python3 -c "import sys; sys.path.insert(0,'$ROOT_DIR'); from scripts.lib.profiles.compose_registry import model_of_slug; print(model_of_slug('$slug') or '')")"
+  [[ -n "$model" ]] || return 0
+  pin_key="$(model_pin_key "$model")"
+  pin_value="${!pin_key:-}"
+  [[ "$pin_value" == "$slug" ]] && return 0   # already pinned
+  local reply
+  read -rp "[launch] Make ${slug} your default for ${model}? [y/N]: " reply
+  case "${reply:-N}" in
+    y|Y|yes|YES)
+      bash "$SWITCH" --set-default "$slug" || true
+      ;;
+  esac
 }
 
 no_fit_guidance() {
@@ -1012,7 +1157,7 @@ validate_selected_variant() {
 
 export_variant_engine_pin() {
   local variant="$1" output line key value
-  [[ "$variant" == vllm/* ]] || return 0
+  [[ "$variant" == vllm/* || "$variant" == beellama/* ]] || return 0
   if ! output="$(python3 "$LAUNCH_PROFILE" resolve-variant-pin --variant "$variant" --format shell 2>&1)"; then
     echo "$output" >&2
     exit 2
@@ -1021,6 +1166,8 @@ export_variant_engine_pin() {
     [[ -n "$key" ]] || continue
     case "$key" in
       VLLM_NIGHTLY_SHA) export VLLM_NIGHTLY_SHA="$value" ;;
+      VLLM_IMAGE) export VLLM_IMAGE="$value" ;;
+      BEELLAMA_IMAGE) export BEELLAMA_IMAGE="$value" ;;
       *) echo "[launch] ERROR: unexpected engine pin export: $key" >&2; exit 2 ;;
     esac
   done <<< "$output"
@@ -1048,6 +1195,30 @@ if [[ "$TOPOLOGY_ONLY" -eq 1 ]]; then
 fi
 
 # --- wizard ---
+if [[ -n "$VARIANT" ]]; then
+  VARIANT="$(resolve_launch_default_variant "$VARIANT")"
+fi
+
+# PR-B: bare `launch.sh` (no variant + no narrowing flags) → resolve a default
+# without the full wizard. Fast-path a pin if one is set (§13.6), else the
+# recommended-shortlist default (§13.3). Either may decline / not fire, in which
+# case we fall through to the interactive wizard below. Any narrowing flag
+# (--model/--engine/--workload/--gpus/--cards/--tp/--pp/--weights-variant/
+# --stable/--drafter) keeps the explicit wizard path so it isn't surprising.
+LAUNCH_BARE_INVOCATION=0
+if [[ -z "$VARIANT" && -z "$MODEL_NAME" && -z "$ENGINE" && -z "$WORKLOAD_ID" \
+      && -z "$GPU_ARG" && -z "$CARDS" && -z "$TP_OVERRIDE" && -z "$PP_OVERRIDE" \
+      && -z "$WEIGHTS_VARIANT" && "$STABLE_ONLY" -eq 0 && "$DRAFTER_ID" == "__unset__" ]]; then
+  LAUNCH_BARE_INVOCATION=1
+fi
+if [[ -z "$VARIANT" && "$LAUNCH_BARE_INVOCATION" -eq 1 ]]; then
+  if try_pinned_fast_path; then
+    :
+  else
+    try_bare_launch_default || true
+  fi
+fi
+
 if [[ -z "$VARIANT" ]]; then
   echo "" >&2
   echo "club-3090 launcher — pick model, GPU set, and serving variant." >&2
@@ -1104,6 +1275,21 @@ fi
 # --- launch + verify ---
 echo ""
 echo "[launch] selected variant: ${VARIANT}"
+# Surface the lifecycle health flag (PR-A) before handing off. The actual gate
+# (caveats notice / (NA) → require --force) lives in switch.sh up_variant, which
+# this script delegates to; this is just a heads-up so the user isn't surprised.
+_launch_status="${LAUNCH_VARIANT_STATUS[$VARIANT]:-production}"
+_launch_status_note="${LAUNCH_VARIANT_STATUS_NOTE[$VARIANT]:-}"
+case "$_launch_status" in
+  production) ;;
+  caveats)
+    echo "[launch] NOTE: this is a ⚠️ production-with-caveats config.${_launch_status_note:+  ${_launch_status_note}}"
+    ;;
+  *)
+    echo "[launch] WARNING: this is a (NA: ${_launch_status}) config — not a reliable path.${_launch_status_note:+  ${_launch_status_note}}"
+    echo "[launch]          switch.sh will require --force (FORCE=1) to bring it up."
+    ;;
+esac
 echo ""
 if [[ -n "$SELECTED_GPU_CSV" ]]; then
   export CUDA_VISIBLE_DEVICES="$SELECTED_GPU_CSV"
@@ -1118,66 +1304,6 @@ fi
 export_variant_engine_pin "$VARIANT"
 "$SWITCH" "$VARIANT"
 
-# Resolve the actual endpoint port + container name the same way switch.sh
-# does: explicit $PORT / $CONTAINER > per-variant default. Mirrors
-# VARIANT_DEFAULT_PORT in switch.sh — keep in sync if you add a new variant.
-declare -A LAUNCH_DEFAULT_PORT=(
-  [vllm/default]=8020
-  [vllm/long-vision]=8020
-  [vllm/long-text]=8020
-  [vllm/long-text-no-mtp]=8021
-  [vllm/bounded-thinking]=8020
-  [vllm/tools-text]=8020
-  [vllm/minimal]=8020
-  [vllm/dual]=8010
-  [vllm/dual4]=8015
-  [vllm/dual4-dflash]=8016
-  [vllm/dual-turbo]=8011
-  [vllm/dual-dflash]=8012
-  [vllm/dual-dflash-noviz]=8013
-  [vllm/dual-nvlink]=8014
-  [vllm/dual-nvlink-turbo]=8017
-  [vllm/dual-nvlink-dflash]=8018
-  [vllm/dual-nvlink-dflash-noviz]=8019
-  [vllm/gemma-mtp]=8030
-  [vllm/gemma-mtp-tp1]=8031
-  [vllm/gemma-dflash]=8032
-  [llamacpp/default]=8020
-  [llamacpp/mtp]=8020
-  [llamacpp/bounded-thinking]=8020
-  [llamacpp/mtp-vision]=8020
-  [ik-llama/iq4ks-mtp]=8020
-  [ik-llama/iq4ks-mtp-vision]=8020
-)
-declare -A LAUNCH_DEFAULT_CONTAINER=(
-  [vllm/default]=vllm-qwen36-27b
-  [vllm/long-vision]=vllm-qwen36-27b-long-vision
-  [vllm/long-text]=vllm-qwen36-27b-long-text
-  [vllm/long-text-no-mtp]=vllm-qwen36-27b-long-text-no-mtp
-  [vllm/bounded-thinking]=vllm-qwen36-27b-bounded-thinking
-  [vllm/tools-text]=vllm-qwen36-27b
-  [vllm/minimal]=vllm-qwen36-27b-minimal
-  [vllm/dual]=vllm-qwen36-27b-dual
-  [vllm/dual4]=vllm-qwen36-27b-dual4
-  [vllm/dual4-dflash]=vllm-qwen36-27b-dual4-dflash
-  [vllm/dual-turbo]=vllm-qwen36-27b-dual-turbo
-  [vllm/dual-dflash]=vllm-qwen36-27b-dual-dflash
-  [vllm/dual-dflash-noviz]=vllm-qwen36-27b-dual-dflash-noviz
-  [vllm/dual-nvlink]=vllm-qwen36-27b-dual-nvlink
-  [vllm/dual-nvlink-turbo]=vllm-qwen36-27b-dual-nvlink-turbo
-  [vllm/dual-nvlink-dflash]=vllm-qwen36-27b-dual-nvlink-dflash
-  [vllm/dual-nvlink-dflash-noviz]=vllm-qwen36-27b-dual-nvlink-dflash-noviz
-  [vllm/gemma-mtp]=vllm-gemma-4-31b-mtp
-  [vllm/gemma-mtp-tp1]=vllm-gemma-4-31b-mtp-tp1
-  [vllm/gemma-dflash]=vllm-gemma-4-31b-dflash
-  [llamacpp/default]=llama-cpp-qwen36-27b
-  [llamacpp/mtp]=llama-cpp-qwen36-27b
-  [llamacpp/bounded-thinking]=llama-cpp-qwen36-27b-bounded-thinking
-  [llamacpp/mtp-vision]=llama-cpp-qwen36-27b-vision
-  [ik-llama/iq4ks-mtp]=ik-llama-qwen36-27b
-  [ik-llama/iq4ks-mtp-vision]=ik-llama-qwen36-27b-vision
-  [ik-llama/iq4ks-two-stage]=ik-llama-qwen36-27b-two-stage
-)
 ENDPOINT_PORT="${PORT:-${LAUNCH_DEFAULT_PORT[$VARIANT]:-8020}}"
 ENDPOINT_URL="http://localhost:${ENDPOINT_PORT}"
 ENDPOINT_CONTAINER="${CONTAINER:-${LAUNCH_DEFAULT_CONTAINER[$VARIANT]:-vllm-qwen36-27b}}"
@@ -1199,6 +1325,12 @@ fi
 
 echo ""
 echo "[launch] done. Endpoint: ${ENDPOINT_URL}"
+
+# PR-B (design §5): offer to pin this config as the user's default for its
+# model, so a future bare `launch.sh` goes straight here. Interactive-only;
+# skipped when it's already the pin.
+maybe_offer_set_default "$VARIANT"
+
 echo "[launch] sample request:"
 echo "  curl -sf ${ENDPOINT_URL}/v1/chat/completions \\"
 echo "    -H 'Content-Type: application/json' \\"
@@ -1206,3 +1338,4 @@ echo "    -d '{\"model\":\"qwen3.6-27b-autoround\",\"messages\":[{\"role\":\"use
 echo ""
 echo "[launch] switch later with:  bash scripts/switch.sh <variant>"
 echo "[launch] list variants:      bash scripts/switch.sh --list"
+echo "[launch] pin your default:   bash scripts/switch.sh --set-default <variant>"

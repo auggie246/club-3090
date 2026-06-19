@@ -9,6 +9,10 @@ install:
 min_sm: 6.0
 supported_model_families:
   - qwen3-next-hybrid
+  - qwen3-next-moe
+  - qwen35-dense          # Deckard-40B (standard GQA, arch=qwen35; MTP via embedded nextn head)
+  - gemma4-unified
+  - dense                 # plain transformer GGUFs (e.g. VibeThinker-3B, Qwen2 dense — no MTP)
 features: {}
 supported_kv_formats:
   - q4_0

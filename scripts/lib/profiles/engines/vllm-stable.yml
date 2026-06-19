@@ -1,34 +1,55 @@
 schema_version: 1
 id: vllm-stable
-display_name: vLLM stable release
+display_name: vLLM stable v0.22.0 (overlay-free)
 type: vllm
 stability: stable
 install:
-  method: pip
-  spec: vllm==0.20.2
+  method: docker_image
+  spec: vllm/vllm-openai:v0.22.0
 min_sm: 7.5
 supported_model_families:
   - dense
+  - gemma4-swa-dense
+  - gemma4-swa-moe
+  - qwen3-next-hybrid
+  - qwen3-next-moe
 features:
   int8_per_token_head: false
   turboquant_3bit_nc: false
   marlin_pad_sub_tile_n: false
-  qwen3_coder_tool_parser: stable_only
+  qwen3_coder_tool_parser: false
 supported_kv_formats:
   - bf16
   - fp16
-  - fp8_e5m2
   - fp8_e4m3
+  - fp8_e5m2
+  - int8_per_token_head   # NATIVE on stock v0.22.0 for uniform-head-dim models (qwen3-next):
+                          # no overlay needed (live-validated 2026-06-07, qwen fp8 dual-max @262K,
+                          # KV pool 295K tok). Distinct from the gemma path, where hetero head dims
+                          # require the #40391 overlay — hence features.int8_per_token_head stays
+                          # false here (no provenance-backed feature) and the overlay-carrying
+                          # vllm-gemma-stable owns Gemma's int8-PTH.
 supported_drafters:
-  - eagle3
+  - mtp
+  - mtp_assistant
 supported_weight_formats:
   - bf16
   - fp16
   - autoround
   - awq
   - gptq
+  - compressed-tensors
+  - fp8                   # qwen3.6-27b-fp8 (official e4m3 release) — Marlin W8A16 on Ampere sm_86
+                          # (memory win, no FP8 compute speedup). Drives the qwen "max accuracy" tier.
 required_overlays: []
+# OVERLAY-FREE BY DESIGN. This is the load-bearing distinction (#254, 2026-06-05):
+# `derived_emittable` (CONTRACT-5) refuses any engine with vendored_overlays != []
+# as a derived-emission base, and vllm-stable IS used as the overlay-free base for
+# uncurated derives (profile-like). Overlay-CARRYING paths (Gemma int8 #40391, Gemma
+# duals #42006) live on the separate `vllm-gemma-stable` engine, which declares the
+# overlay provenance for diagnose-profile. Compose owns patch APPLICATION; engine owns
+# provenance — and a single engine cannot be both overlay-free (for derived bases) and
+# overlay-carrying (for Gemma's provenance), hence the two-engine split.
 vendored_overlays: []
 required_genesis: false
-notes: "Pinned to latest PyPI GA observed at implementation time: vLLM 0.20.2."
-
+notes: "Overlay-free stable vLLM — docker `vllm/vllm-openai:v0.22.0`. The VERSION lives only in install.spec: bump here on the next stable, the engine NAME never changes ('keep the tag, change the number'; #254 2026-06-05). This is the v0.22.0 SUCCESSOR to `vllm-nightly-clean` (whose nightly-bf610c2f image was purged from Docker Hub): the broad, overlay-free engine for Qwen3-Next (hybrid 27b + MoE 35B-A3B), generic `dense` transformers, and uncurated derived-emission bases. Slugs: `vllm/qwen-35b-a3b-dual`, `vllm/dual`, `vllm/minimal` (live-validated on stock v0.22.0 2026-06-05: TP=2 + MTP + tool-call clean, marlin-pad confirmed unnecessary). Gemma 4 paths stay on `vllm-gemma-stable` (it carries the #40391 per-head-KV + #42006 tool-parser overlays — an overlay-carrying engine cannot be a derived base, so it must remain separate). The pip `dense` lower-bound is `vllm-pip-baseline`. As the remaining `vllm-nightly-clean` slugs are validated on v0.22.0 they migrate here and that engine is deprecated. VLLM_IMAGE override still works."

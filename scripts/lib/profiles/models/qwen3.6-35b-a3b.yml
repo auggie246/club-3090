@@ -29,36 +29,115 @@ mtp_num_hidden_layers: 1
 attn_output_gate: true
 vision_capable: true
 weights:
-  autoround_int4:
+  autoround-int4:
     path: qwen3.6-35b-a3b-autoround-int4
+    local_subdir: qwen3.6-35b-a3b-autoround-int4
     size_gb: 20.0
     format: autoround
     status: production
-    # v0.8.0 Pull-Gate Tier-1 lookup slug (verified in
-    # vllm/compose/dual/preview.yml `target:` line).
+    # Repo provenance (#316, 2026-06-05): originally downloaded + benched 2026-04-20 as
+    # Intel/Qwen3.6-35B-A3B-int4-AutoRound (commit 3d5a2ed, 170.5 TPS TP=2). Intel renamed
+    # it -> -int4-mixed-AutoRound and re-quantized on 2026-05-01 (old name 404s now; current
+    # main HEAD 65f69c7 ships different bytes). The value previously here
+    # (Qwen/Qwen3-MoE-A3B-Instruct-AutoRound-Int4-mixed) never existed on HF — that was the bug.
+    # Re-validation of HEAD 65f69c7 tracked in BENCHMARKS.md "Qwen 3.6 35B-A3B" row.
+    hf_repo: Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound
     hf_repos:
-      - Qwen/Qwen3-MoE-A3B-Instruct-AutoRound-Int4-mixed
+      - Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
   gptq_int4:
     path: qwen3.6-35b-a3b-gptq-int4
+    local_subdir: qwen3.6-35b-a3b-gptq-int4
     size_gb: 22.0
     format: gptq
     status: experimental
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
   gguf:
     path: qwen3.6-35b-a3b-gguf
+    local_subdir: qwen3.6-35b-a3b-gguf
     size_gb: 90.0
     format: gguf
     status: production
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
   dflash:
     path: qwen3.6-35b-a3b-dflash
+    local_subdir: qwen3.6-35b-a3b-dflash
     size_gb: variable
     format: autoround
     status: experimental
+    engine: vllm
+    kind: draft
+    verify_glob: "*.safetensors"
   dflash_gguf:
     path: qwen3.6-35b-a3b-dflash-gguf
+    local_subdir: qwen3.6-35b-a3b-dflash-gguf
     size_gb: variable
     format: gguf
     status: experimental
-default_weight_variant: autoround_int4
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
+  mudler-apex-compact:
+    path: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    local_subdir: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    size_gb: variable
+    format: gguf
+    status: community-experimental
+    hf_repo: mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF
+    files:
+      - Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
+  byteshape-iq4xs:
+    path: qwen3.6-35b-a3b-gguf/byteshape-iq4xs
+    local_subdir: qwen3.6-35b-a3b-gguf/byteshape-iq4xs
+    size_gb: 18.6
+    format: gguf
+    status: community-experimental
+    hf_repo: byteshape/Qwen3.6-35B-A3B-MTP-GGUF
+    files:
+      - Qwen3.6-35B-A3B-IQ4_XS-4.19bpw.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
+  mudler-apex-quality:
+    path: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    local_subdir: qwen3.6-35b-a3b-gguf/mudler-apex-mtp
+    size_gb: variable
+    format: gguf
+    status: community-experimental
+    hf_repo: mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF
+    files:
+      - Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf
+    engine: ik-llama
+    kind: gguf
+    verify_glob: "*.gguf"
+  morikomorizz-q6kp:
+    # Uncensored "HauhauCS-Aggressive" fine-tune of Qwen3.6-35B-A3B, Q6_K_P GGUF
+    # WITH embedded nextn MTP head (loads on mainline llama.cpp b9570). Dual-card.
+    path: qwen3.6-35b-a3b-uncensored-mtp-gguf/morikomorizz-q6kp
+    local_subdir: qwen3.6-35b-a3b-uncensored-mtp-gguf/morikomorizz-q6kp
+    size_gb: 30.0
+    format: gguf
+    status: community-experimental
+    hf_repo: morikomorizz/Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP
+    # Pin the exact commit our BENCHMARKS row + #411 were measured against (#319).
+    # Repo last-modified 2026-06-10 (predates our 2026-06-14 download); etag at this
+    # sha == our local file's sha256 (verified). Guards a silent upstream re-quant.
+    revision: 49a080db7406cd98f94f0f2a18539bbcc1520444
+    files:
+      - Qwen3.6-35B-A3B-Uncensored-HauhauCS-MTP-Q6_K_P.gguf
+    engine: llama-cpp
+    kind: gguf
+    verify_glob: "*.gguf"
+default_weight_variant: autoround-int4
 compatible_drafters:
   - qwen-mtp-builtin
 # num_kv_heads=2 caps TP at 2 (each rank needs at least 1 KV head)

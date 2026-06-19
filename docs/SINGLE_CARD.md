@@ -34,20 +34,22 @@ For workloads that **don't** accumulate context across turns (single-shot RAG, s
 > ⛔ **The four vLLM rows below are struck through — they're pinned to a purged vLLM nightly ([#167](https://github.com/noonghunna/club-3090/issues/167)) and won't boot until the next Genesis-compatible pin lands.** Until then, use the **llama.cpp / ik_llama** rows — they work today and are cliff-immune. (`minimal.yml` is Genesis-free and *can* still run on a current image via `VLLM_IMAGE=vllm/vllm-openai:latest`.)
 
 > 💡 **Simplest vs fastest (single-card):** `llamacpp/default` (mainline Q4_K_M, clean upstream image) is the no-friction pick; **`ik-llama/iq4ks-mtp` is ~18–20% faster + leanest VRAM** (separate fork + IQK quant) for max single-card speed. Both are cliff-immune — see [#184](https://github.com/noonghunna/club-3090/discussions/184).
+>
+> 🎯 **Don't want to choose?** `bash scripts/switch.sh qwen3.6-27b/default` (or a bare `bash scripts/launch.sh`) resolves the **blessed single-card default automatically** — on one 3090 that's **`ik-llama/iq4ks-mtp` (fastest + leanest)**, with **`llamacpp/default` as the cliff-immune alternative** (this is the `single` order in `ENGINE_PREFERENCE`: `ik-llama > llama.cpp > vllm`; `beellama` ranks first but isn't onboarded yet — see [docs/UPSTREAM.md](UPSTREAM.md)). Pin your own with `--set-default <slug>`; see the [FAQ](FAQ.md#how-do-i-set-my-own-default-config).
 
 | What you're doing | Compose | Max ctx | Narr / Code TPS | VRAM (24 GB / card) |
 |---|---|---|---|---|
-| ⛔ ~~**Long ctx + vision** (chat, agents, image input)~~ _(vLLM — blocked #167)_ | ~~[`long-vision.yml`](../models/qwen3.6-27b/vllm/compose/single/long-vision.yml)~~ | ~~145K~~ | ~~50 / 66~~ | ~~23.0 GB~~ |
-| ⛔ ~~**Long ctx, text-only — Balanced MTP** (RAG, codebase, IDE agents)~~ _(vLLM — blocked #167)_ | ~~[`long-text.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text.yml)~~ | ~~180K~~ | ~~50 / 67~~ | ~~22.3 GB~~ |
-| ⛔ ~~**Long ctx, text-only — Max-context** (long single-shot RAG / codebase analysis)~~ _(vLLM — blocked #167)_ | ~~[`long-text-no-mtp.yml`](../models/qwen3.6-27b/vllm/compose/single/long-text-no-mtp.yml)~~ | ~~200K~~ | ~~no MTP~~ | ~~21.0 GB~~ |
-| ⛔ ~~**Bounded thinking** (coding agents, structured-CoT — see [STRUCTURED_COT.md](STRUCTURED_COT.md))~~ _(vLLM — blocked #167)_ | ~~[`bounded-thinking.yml`](../models/qwen3.6-27b/vllm/compose/single/bounded-thinking.yml)~~ | ~~180K~~ | ~~50 / 66~~ | ~~21.7 GB~~ |
-| **Bulletproof, no cliffs** (production service, unpredictable inputs) | [`llamacpp/default`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) (alias of `llamacpp/mtp`) | **200K** (via `-ub 512`) | 52 / 61 | ~23 GB |
-| **llama.cpp + MTP, fast + long ctx** ⭐ (IDE agents, opencode, Hermes, long-multi-turn agentic; `CTX_SIZE=131072 UBATCH_SIZE=1024` for faster prefill) | [`llamacpp/mtp`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) | **200K** | **51 / 60** | ~22.5 GB |
-| **llama.cpp + MTP + vision** (multimodal chat, screenshot-debugging, vision-aware review) | [`llamacpp/mtp-vision`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp-vision.yml) | **49K** | **57 / 66** | ~20.5 GB |
-| **ik_llama + IQ4_KS + MTP** ⭐ (fastest single-card + leanest VRAM; advanced-quant track) | [`iq4ks-mtp`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp.yml) | **200K** | **~60 / ~69** | **~22 GB** (leanest) |
-| **ik_llama + IQ4_KS + MTP + vision** | [`iq4ks-mtp-vision`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp-vision.yml) | **160K** | TBD | ~21 GB |
-| **ik_llama + two-stage spec-dec** ⭐ (ngram+MTP, code-optimized) | [`iq4ks-two-stage`](../models/qwen3.6-27b/ik-llama/compose/single/iq4ks-two-stage.yml) | **200K** | **~59 / ~98** (code +35% vs MTP-only) | ~22 GB |
-| **Small-context vLLM safe path** ([@stiggy2k16](https://github.com/noonghunna/club-3090/issues/43) data point) — IDE agents capped at <60K accumulated, when you need vLLM speed but llama.cpp is too slow. ⚠️ Genesis-free, but its default pin is purged (#167) — run it with `VLLM_IMAGE=vllm/vllm-openai:latest` until the pin's bumped | [`minimal.yml`](../models/qwen3.6-27b/vllm/compose/single/minimal.yml) at `--gpu-memory-utilization 0.95 --max-model-len 65536` | **64K** | ~32 / ~33 (no MTP) | ~22.4 GB |
+| ⛔ ~~**Long ctx + vision** (chat, agents, image input)~~ _(vLLM — blocked #167)_ | ~~[`long-vision.yml`](../models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-vision.yml)~~ | ~~145K~~ | ~~50 / 66~~ | ~~23.0 GB~~ |
+| ⛔ ~~**Long ctx, text-only — Balanced MTP** (RAG, codebase, IDE agents)~~ _(vLLM — blocked #167)_ | ~~[`long-text.yml`](../models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text.yml)~~ | ~~180K~~ | ~~50 / 67~~ | ~~22.3 GB~~ |
+| ⛔ ~~**Long ctx, text-only — Max-context** (long single-shot RAG / codebase analysis)~~ _(vLLM — blocked #167)_ | ~~[`long-text-no-mtp.yml`](../models/qwen3.6-27b/vllm/compose/single/autoround-int4/long-text-no-mtp.yml)~~ | ~~200K~~ | ~~no MTP~~ | ~~21.0 GB~~ |
+| ⛔ ~~**Bounded thinking** (coding agents, structured-CoT — see [STRUCTURED_COT.md](STRUCTURED_COT.md))~~ _(vLLM — blocked #167)_ | ~~[`bounded-thinking.yml`](../models/qwen3.6-27b/vllm/compose/single/autoround-int4/bounded-thinking.yml)~~ | ~~180K~~ | ~~50 / 66~~ | ~~21.7 GB~~ |
+| **Bulletproof, no cliffs** (production service, unpredictable inputs) | [`llamacpp/default`](../models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml) (alias of `llamacpp/mtp`) | **200K** (via `-ub 512`) | 52 / 61 | ~23 GB |
+| **llama.cpp + MTP, fast + long ctx** ⭐ (IDE agents, opencode, Hermes, long-multi-turn agentic; `CTX_SIZE=131072 UBATCH_SIZE=1024` for faster prefill) | [`llamacpp/mtp`](../models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml) | **200K** | **51 / 60** | ~22.5 GB |
+| **llama.cpp + MTP + vision** (multimodal chat, screenshot-debugging, vision-aware review) | [`llamacpp/mtp-vision`](../models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp-vision.yml) | **49K** | **57 / 66** | ~20.5 GB |
+| **ik_llama + IQ4_KS + MTP** ⭐ (fastest single-card + leanest VRAM; advanced-quant track) | [`iq4ks-mtp`](../models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp.yml) | **200K** | **~60 / ~69** | **~22 GB** (leanest) |
+| **ik_llama + IQ4_KS + MTP + vision** | [`iq4ks-mtp-vision`](../models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp-vision.yml) | **160K** | TBD | ~21 GB |
+| **ik_llama + two-stage spec-dec** ⭐ (ngram+MTP, code-optimized) | [`iq4ks-two-stage`](../models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/two-stage.yml) | **200K** | **~59 / ~98** (code +35% vs MTP-only) | ~22 GB |
+| **Small-context vLLM safe path** ([@stiggy2k16](https://github.com/noonghunna/club-3090/issues/43) data point) — IDE agents capped at <60K accumulated, when you need vLLM speed but llama.cpp is too slow. ⚠️ Genesis-free, but its default pin is purged (#167) — run it with `VLLM_IMAGE=vllm/vllm-openai:latest` until the pin's bumped | [`minimal.yml`](../models/qwen3.6-27b/vllm/compose/single/autoround-int4/minimal.yml) at `--gpu-memory-utilization 0.95 --max-model-len 65536` | **64K** | ~32 / ~33 (no MTP) | ~22.4 GB |
 
 Run via `bash scripts/launch.sh` (interactive) or `bash scripts/switch.sh <variant>`.
 
@@ -146,7 +148,7 @@ For the cross-card TP=2 picture, see [`DUAL_CARD.md`](DUAL_CARD.md).
 
 **Workload:** best quality-per-bit GGUF on a single 3090. Same cliff-immunity as llama.cpp (same ggml memory model), but with fork-exclusive IQK imatrix quants that beat mainline Q4_K_M on perplexity.
 
-ubergarm `Qwen3.6-27B-MTP-IQ4_KS.gguf` (IQK imatrix quant, built-in MTP head) + q4_0 KV + `-khad`/`-vhad` (Hadamard K+V cache transforms) + MTP `n=2` + `--merge-qkv` + `--parallel-tool-calls` (ik-exclusive). **200K context** (max-safe default; native max 262K) on one 3090. At matched 370 W it's **~18–20% faster than `llamacpp/mtp`** on TPS (~60 narr / ~69 code vs ~50 / ~58), quality-tied (8-pack 103 vs 102), and **~0.5–0.8 GB leaner** — the faster *and* leaner single-card path. (A 2026-05-22 "tie" was a wrong-engine measurement artifact — corrected 2026-05-23 via a power-cap-controlled A/B, [#184](https://github.com/noonghunna/club-3090/discussions/184).) Engine: `ghcr.io/ikawrakow/ik-llama-cpp:cu13-server`. See [`docs/engines/IK_LLAMA.md`](engines/IK_LLAMA.md) for the full deep dive.
+ubergarm `Qwen3.6-27B-MTP-IQ4_KS.gguf` (IQK imatrix quant, built-in MTP head) + q4_0 KV + `-khad`/`-vhad` (Hadamard K+V cache transforms) + MTP `n=2` + `--merge-qkv` + `--parallel-tool-calls` (ik-exclusive). **200K context** (max-safe default; native max 262K) on one 3090. At matched 370 W it's **~18–20% faster than `llamacpp/mtp`** on TPS (~60 narr / ~69 code vs ~50 / ~58), quality-tied (8-pack 103 vs 102), and **~0.5–0.8 GB leaner** — the faster *and* leaner single-card path. (A 2026-05-22 "tie" was a wrong-engine measurement artifact — corrected 2026-05-23 via a power-cap-controlled A/B, [#184](https://github.com/noonghunna/club-3090/discussions/184).) Engine: `ghcr.io/ikawrakow/ik-llama-cpp` (digest-pinned `cu13-server` build). See [`docs/engines/IK_LLAMA.md`](engines/IK_LLAMA.md) for the full deep dive.
 
 ### ik_llama + IQ4_KS + MTP + vision — `iq4ks-mtp-vision.yml`
 
@@ -164,13 +166,13 @@ Chains ngram self-spec (catches repeated code spans, near-zero compute) with the
 
 These exist for troubleshooting, niche workloads, or historical comparison. Not promoted as primary because the long-* variants now cover their use cases:
 
-- **`docker-compose.yml`** — 48K + TQ3 + vision, mem-util 0.92. The "below both cliffs by definition" baseline (engine HTTP-400-rejects requests >48K, so Cliff 2 is unreachable). Useful when you want bulletproof error behavior on a specific small-ctx workload, or as a fast-boot diagnostic. Most users should pick `long-vision` or `llamacpp/default` instead.
+- **`tq3-mtp.yml`** — 48K + TQ3 + vision, mem-util 0.92. The "below both cliffs by definition" baseline (engine HTTP-400-rejects requests >48K, so Cliff 2 is unreachable). Useful when you want bulletproof error behavior on a specific small-ctx workload, or as a fast-boot diagnostic. Most users should pick `long-vision` or `llamacpp/default` instead.
 - **`tools-text.yml`** — 75K + FP8 KV + PN8. Was the only Cliff-1-safe single-card path before PN12 anchor fix landed. FP8 KV is closer in quality to FP16 than TQ3 is, so kept around for accuracy-sensitive comparisons. Most IDE-agent workloads now run fine on `long-text.yml`.
 - **`minimal.yml`** — 32K + FP8 + no Genesis + no spec-decode. Stripped-down stack for isolating "is this a Genesis bug?" questions. Half the throughput of any other variant.
 
 ## Watch list — Luce DFlash + PFlash (not yet a recommendation)
 
-Re-tested **2026-05-20** against [`Luce-Org/lucebox-hub`](https://github.com/Luce-Org/lucebox-hub) HEAD `248e191` on Qwen3.6-27B Q4_K_M target + the released [`Lucebox/Qwen3.6-27B-DFlash-GGUF`](https://huggingface.co/Lucebox/Qwen3.6-27B-DFlash-GGUF) draft. **The 3.6 draft has shipped and PFlash now exists in the binary — but Luce still loses to [`llamacpp/mtp`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml) (v0.8.3) on every realistic workload except greedy-only code:**
+Re-tested **2026-05-20** against [`Luce-Org/lucebox-hub`](https://github.com/Luce-Org/lucebox-hub) HEAD `248e191` on Qwen3.6-27B Q4_K_M target + the released [`Lucebox/Qwen3.6-27B-DFlash-GGUF`](https://huggingface.co/Lucebox/Qwen3.6-27B-DFlash-GGUF) draft. **The 3.6 draft has shipped and PFlash now exists in the binary — but Luce still loses to [`llamacpp/mtp`](../models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml) (v0.8.3) on every realistic workload except greedy-only code:**
 
 Measured TPS on this rig (RTX 3090, single-stream, n_gen=1000):
 
@@ -240,7 +242,7 @@ Two env-override knobs available on every vLLM compose (defaults preserved if un
 ```bash
 MAX_MODEL_LEN=32768 \
 GPU_MEMORY_UTILIZATION=0.80 \
-  bash scripts/switch.sh vllm/long-text
+  bash scripts/switch.sh vllm/minimal
 ```
 
 - `MAX_MODEL_LEN` — shrink the KV-cache budget; trades long-context for fit. `90000` is a safe value for `long-text.yml` on rigs with ~1 GB of overhead (4090 with display, etc.). Validated on @laurimyllari's 4090 ([disc #62](../../../noonghunna/club-3090/discussions/62)).
@@ -272,7 +274,7 @@ bash scripts/setup.sh qwen3.6-27b
 bash scripts/launch.sh
 
 # 3. Or skip the wizard:
-bash scripts/launch.sh --variant vllm/tools-text   # IDE agent path
+bash scripts/launch.sh --variant beellama/dflash   # single-card default (DFlash, code-fast)
 bash scripts/launch.sh --variant llamacpp/default  # easy mode
 
 # 4. Sanity test

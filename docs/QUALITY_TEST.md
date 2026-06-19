@@ -73,6 +73,13 @@ pip install -e /path/to/benchlocal-cli
 
 ## Run
 
+> **Live progress is on by default.** The wrapper forwards `--progress` to
+> benchlocal-cli, so per-scenario `[N/M] <pack> <id> …` lines stream to stderr
+> as the run advances. Long modes (`--full` ~30–40 min, `--reasoning`
+> similar, `--pack aider-polyglot-30` ~25–30 min) otherwise go dark for the
+> whole duration with no signal whether anything is wrong mid-run. Pass
+> `--no-progress` (or `PROGRESS=0`) for CI / log-volume-sensitive contexts.
+
 ```bash
 # default --medium against the auto-detected running compose
 bash scripts/quality-test.sh
@@ -88,6 +95,9 @@ bash scripts/quality-test.sh --reasoning
 
 # explicit endpoint override
 URL=http://localhost:8011 bash scripts/quality-test.sh --quick
+
+# suppress live [N/M] progress for CI / log-volume contexts
+bash scripts/quality-test.sh --full --no-progress
 
 # --full includes the 3 Docker-sandboxed packs by default (BugFind/HermesAgent/CLI) — needs Docker
 bash scripts/quality-test.sh --full
@@ -126,16 +136,43 @@ ReasonMath-15 (v1.0.0)     |   11 / 15    |  73%  |    14.2s    |     22.6s   | 
 TOTAL                      |   65 / 75    |  87%  |             |             |
 
 Failure breakdown:
-  ToolCall-15           1 verifier_fail  (TC-07: wrong arg value for "filename")
-  InstructFollow-15     2 verifier_fail  (IF-03 word-count, IF-09 citation-format)
-  DataExtract-15        2 missing_field, 1 wrong_value
-  ReasonMath-15         4 wrong_answer   (RM-03, RM-07, RM-09, RM-12)
+- toolcall-15 TC-07: verifier_fail (wrong arg value for "filename": expected report.pdf, got output.pdf)
+- instructfollow-15 IF-03: verifier_fail (word count 247, target 250 ±5)
+- dataextract-15 DE-05: verifier_fail (7/14 atomic fields correct (50%). product_name: mismatch | product_price_paid: expected number)
+- reasonmath-15 RM-09: verifier_fail (expected 42, got 45)
 
 ==========================================================================
 Quality: line for compose schema field (paste into compose YAML header):
 ==========================================================================
 Quality:   ToolCall-15 14/15 (93%) · InstructFollow-15 13/15 (87%) · StructOutput-15 15/15 (100%) · DataExtract-15 12/15 (80%) · ReasonMath-15 11/15 (73%) (--medium, packs v1.0.x, 2026-05-09)
 ```
+
+## Diagnosing failures
+
+Failure reasons are surfaced in three places, cheapest first:
+
+| Need | Where |
+|---|---|
+| Why a scenario failed (reason + detail), run just finished | The **`Failure breakdown:`** block at the end of every run — `pack scenario: failure_mode (detail)`, full detail string. No extra command. |
+| Same, but the run scrolled away / an older run | `results/quality/quality-<ts>.json` (raw), or `benchlocal-cli inspect <json> --failed` |
+| The full prompt / response / verifier trace behind a failure | `benchlocal-cli inspect <json> --scenario <ID> --full` |
+| Filter by failure type · compare two runs · per-scenario tokens + latency | `benchlocal-cli inspect <json> --mode timeout` · `--diff prev.json` |
+
+`failure_mode` is one of: `verifier_fail` (answer wrong / below threshold) · `timeout` · `agent_runner_timeout` / `agent_runner_crashed` (sandboxed agentic packs) · `server_error` / `http_error` / `model_endpoint_unreachable` (serving problem, not a quality signal) · `result_json_malformed` · `wrong_answer` · `verifier_not_implemented` (stub, excluded from scoring).
+
+The breakdown is **terminal-only** — `quality-test.sh` does not tee it to a log file, but the same data persists in the saved JSON.
+
+## Per-scenario timeouts
+
+`quality-test.sh` forwards to `benchlocal-cli`, which sizes each scenario's timeout automatically — you rarely need to set one. Precedence (highest wins):
+
+1. **Manual** — `--timeout-per-case N` (or `TIMEOUT_PER_CASE=N`): used verbatim.
+2. **Auto-scaling (default)** — the budget scales by the endpoint's measured decode speed and, for thinking-on runs, by the thinking-token budget. A one-shot startup probe measures the rig's decode TPS (and fails fast if the endpoint is unreachable, rather than hanging). The scaling deliberately **over-budgets** — a timeout is a safety ceiling, not a target — which is what keeps thinking-on packs from spuriously timing out. Exact formula + flags (`--measured-tps` / `--reference-tps` / `--retry-on-timeout`): [benchlocal-cli README → Per-case timeouts](https://github.com/noonghunna/benchlocal-cli#per-case-timeouts).
+3. **Static default** — the pack's built-in `default_max_seconds`.
+
+**Don't hand-set `--timeout-per-case` to "fix" a slow run** unless you've confirmed the auto-probe measured wrong — the over-budget is intentional.
+
+> **Planned (not yet built):** an *opt-in* tier that sizes timeouts from a **soak-derived per-context-depth TPS curve** — a real "how fast at depth X" measurement for your exact rig/config, captured into the runtime measurement-record — instead of the single empty-context startup probe. It would be strictly opt-in and fall back to the auto-probe/default when no curve exists; measured data is never required. Tracked at [#114](https://github.com/noonghunna/club-3090/pull/114).
 
 ## Sampling & temperature
 
@@ -156,10 +193,16 @@ bash scripts/quality-test.sh --full
 
 # evaluate at the model's served / recommended temperature (inherits the compose default)
 bash scripts/quality-test.sh --full --sampling-from-server
-SAMPLING_FROM_SERVER=1 bash scripts/rebench-full.sh
+SAMPLING_FROM_SERVER=1 bash scripts/rebench-full.sh --with-8pack-thinking=both
 
-# or an explicit temperature, via benchlocal-cli directly
-benchlocal-cli run --full --endpoint http://localhost:8020 --model <name> --temperature 0.8
+# or an explicit temperature, via benchlocal-cli directly.
+# NB: invoking benchlocal-cli directly BYPASSES the wrapper's localhost guard. With a
+# localhost endpoint + a sandboxed *agentic* pack (HermesAgent-20 runs the agent INSIDE
+# the sandbox), you must set BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=1 yourself — otherwise the
+# in-sandbox agent can't reach the host model and hermes silently scores ~0/20.
+# quality-test.sh sets this automatically for localhost URLs (see Limitations).
+BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=1 \
+  benchlocal-cli run --full --endpoint http://localhost:8020 --model <name> --temperature 0.8
 ```
 
 ### Reasoning-on evals
@@ -173,8 +216,10 @@ bash scripts/quality-test.sh --reasoning --thinking-max-tokens 16384
 # force thinking on for every full-suite pack
 bash scripts/quality-test.sh --full --enable-thinking --thinking-max-tokens 16384
 
-# full rebench: bench.sh + both quality-test.sh legs inherit it
-ENABLE_THINKING=1 THINKING_MAX_TOKENS=16384 SAMPLING_FROM_SERVER=1 bash scripts/rebench-full.sh
+# full rebench incl. the 8-pack in both reasoning modes (off + on — the promotion gate).
+# The 8-pack thinking is driven by --with-8pack-thinking (=off forces --no-thinking,
+# =on forces --enable-thinking), NOT ENABLE_THINKING (which now only affects bench.sh). #338
+THINKING_MAX_TOKENS=16384 SAMPLING_FROM_SERVER=1 bash scripts/rebench-full.sh --with-8pack-thinking=both
 
 # TPS bench only
 ENABLE_THINKING=1 bash scripts/bench.sh
@@ -218,6 +263,27 @@ Suggested gates (informal, not enforced):
 
 For comparing a new pin / quant / config A/B against the previous version: a >10pp drop on any pack vs the previous baseline is a signal worth investigating before promoting `Status: ✅ Production`.
 
+### Regression baselines (the curated corpus)
+
+Rather than hunt down "the previous baseline" by hand each time, the curated corpus in
+[`results/baselines/`](../results/baselines/README.md) holds committed `n≥3` aggregates per
+`(registry-slug, thinking-mode)`. [`scripts/quality-baseline.sh`](../scripts/quality-baseline.sh)
+captures and diffs against them:
+
+```bash
+# capture / refresh a baseline (n=3 aggregate; needs a live endpoint)
+bash scripts/quality-baseline.sh --slug vllm/qwen-35b-a3b-dual --capture
+# diff a fresh run vs the committed baseline — the regression check
+bash scripts/quality-baseline.sh --slug vllm/qwen-35b-a3b-dual
+# thinking-on companion baseline
+bash scripts/quality-baseline.sh --slug vllm/qwen-35b-a3b-dual --mode enable-thinking
+```
+
+`no-thinking` is canonical (temp-0, reproducible — diff against this for a CI-style gate);
+`enable-thinking` is the reasoning-on companion. It's a thin wrapper over `quality-test.sh --full`
+(`--repeat` → `--save-json`/`--previous-result`); extra args pass through (e.g.
+`--exit-on-regression` for a hard CI gate). `--dry-run` prints the resolved command.
+
 ## What it doesn't replace
 
 - **`bench.sh`** measures throughput, not quality. They're complementary.
@@ -227,8 +293,9 @@ For comparing a new pin / quant / config A/B against the previous version: a >10
 ## Limitations
 
 1. **Sandboxed packs need Docker** — BugFind / HermesAgent / CLI-40 run in Docker-hosted verifier sandboxes. On a host without Docker, run `--medium` (or `--full --no-sandboxed`) for the 5 deterministic packs.
-2. **Verifier translation is lossy in places** — the upstream BenchLocal evaluators have partial-credit branches we collapsed to pass/fail. See benchlocal-cli's [`docs/EXTRACTOR_NOTES.md`](https://github.com/noonghunna/benchlocal-cli/blob/master/docs/EXTRACTOR_NOTES.md) for the specific surfaces.
-3. **Single-run sampling at temperature 0** — each scenario runs once, greedy, by default (see [Sampling & temperature](#sampling--temperature) for the non-canonical override modes). For non-determinism debugging, use `benchlocal-cli run --pack <id> --repeat N`.
+2. **Sandboxed *agentic* packs need a container-reachable model URL** — HermesAgent-20 runs the agent *inside* the sandbox, so it calls the model over the network. A `localhost` / `127.x` / `[::1]` endpoint is the *container's* own loopback, not the host. `quality-test.sh` auto-detects this and exports `BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=1` (rewrites the URL → `host.docker.internal` + adds `--add-host`). **If you bypass the wrapper and run `benchlocal-cli` directly against a localhost endpoint, set that env var yourself** — otherwise the in-sandbox agent never reaches the model and hermes silently scores ~0/20. Failure signature: uniform ~timeout-length per-scenario latencies + flat GPU (*not* `turn_count`, which is `0` for hermes regardless of engagement).
+3. **Verifier translation is lossy in places** — the upstream BenchLocal evaluators have partial-credit branches we collapsed to pass/fail. See benchlocal-cli's [`docs/EXTRACTOR_NOTES.md`](https://github.com/noonghunna/benchlocal-cli/blob/master/docs/EXTRACTOR_NOTES.md) for the specific surfaces.
+4. **Single-run sampling at temperature 0** — each scenario runs once, greedy, by default (see [Sampling & temperature](#sampling--temperature) for the non-canonical override modes). For non-determinism debugging, use `benchlocal-cli run --pack <id> --repeat N`.
 
 For the full pipeline architecture + JSONL pack format, read [benchlocal-cli's docs](https://github.com/noonghunna/benchlocal-cli/tree/master/docs).
 

@@ -26,7 +26,8 @@
 #
 # Env vars:
 #   URL                Endpoint. Default: http://localhost:8020
-#   MODEL              Served model name. Default: qwen3.6-27b-autoround
+#   MODEL              Served model name. Default: auto-detected from
+#                      /v1/models, else qwen3.6-27b-autoround
 #   CONTAINER          Container for log scraping. Default: vllm-qwen36-27b
 #   RUNS               Measured runs per prompt. Default: 5
 #   WARMUPS            Warm-up runs (shared across both). Default: 3
@@ -42,12 +43,21 @@
 #   PP_MAX_TOKENS      Completion cap for the PP fallback request. Default: 16
 #   ENABLE_THINKING    Set to 1 to send chat_template_kwargs.enable_thinking=true
 #                      in bench requests. Default: 0.
+#   FORCE_TOKENS       Force EXACTLY this many output tokens per run (sets
+#                      max_tokens + min_tokens + ignore_eos), overriding
+#                      MAX_TOKENS_NARR/CODE. Use to bench at a fixed / larger output
+#                      size. Essential for DIFFUSION LMs: they self-terminate early
+#                      (~1-2K words), so raising the cap alone won't lengthen the
+#                      generation — you must force the length to measure sustained
+#                      throughput. vLLM-oriented (ignore_eos/min_tokens). 0 = off
+#                      (model decides length). Default: 0.
 #
 # Usage:
 #   bash scripts/bench.sh
 #   ONLY=code bash scripts/bench.sh
 #   PP=1 bash scripts/bench.sh
 #   RUNS=10 bash scripts/bench.sh
+#   FORCE_TOKENS=4000 bash scripts/bench.sh   # fixed 4000-tok output (diffusion / sustained-TPS)
 
 set -euo pipefail
 
@@ -60,6 +70,9 @@ if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
   preflight_autodetect_endpoint || true
 fi
 URL="${URL:-http://localhost:8020}"
+# Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
+# literal below is only a last resort if detection no-ops (endpoint unreachable).
+declare -F preflight_autodetect_model >/dev/null && preflight_autodetect_model
 MODEL="${MODEL:-qwen3.6-27b-autoround}"
 CONTAINER="${CONTAINER:-vllm-qwen36-27b}"
 RUNS="${RUNS:-5}"
@@ -74,6 +87,7 @@ PP="${PP:-0}"
 PP_FALLBACK_TOKENS="${PP_FALLBACK_TOKENS:-10000}"
 PP_MAX_TOKENS="${PP_MAX_TOKENS:-16}"
 ENABLE_THINKING="${ENABLE_THINKING:-0}"
+FORCE_TOKENS="${FORCE_TOKENS:-0}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not in PATH." >&2; exit 1; }
@@ -175,30 +189,39 @@ fi
 
 python3 - "$URL" "$MODEL" "$WARMUPS" "$RUNS" "$QUIET" "$ONLY" \
             "$CONTAINER" "$PP_MODE" "$PP_FALLBACK_TOKENS" "$PP_MAX_TOKENS" \
-            "$ENABLE_THINKING" \
+            "$ENABLE_THINKING" "$FORCE_TOKENS" \
             "$PROMPT_NARR" "$MAX_TOKENS_NARR" \
             "$PROMPT_CODE" "$MAX_TOKENS_CODE" << 'PYEOF'
 import json, re, shutil, subprocess, sys, time, urllib.request, statistics as s
 
 (URL, MODEL, WARMUPS, RUNS, QUIET, ONLY,
  CONTAINER, PP_MODE, PP_FALLBACK_TOKENS, PP_MAX_TOKENS,
- ENABLE_THINKING, PROMPT_NARR, MAX_NARR, PROMPT_CODE, MAX_CODE) = sys.argv[1:]
+ ENABLE_THINKING, FORCE, PROMPT_NARR, MAX_NARR, PROMPT_CODE, MAX_CODE) = sys.argv[1:]
 WARMUPS = int(WARMUPS); RUNS = int(RUNS); QUIET = int(QUIET) == 1
 MAX_NARR = int(MAX_NARR); MAX_CODE = int(MAX_CODE)
 PP_FALLBACK_TOKENS = int(PP_FALLBACK_TOKENS); PP_MAX_TOKENS = int(PP_MAX_TOKENS)
 ENABLE_THINKING = ENABLE_THINKING == "1"
+FORCE = int(FORCE)   # >0: force EXACTLY this many output tokens (max+min+ignore_eos)
 
 def run_once(prompt, max_tokens):
-    body = json.dumps({
+    # FORCE>0: force EXACTLY FORCE output tokens (overrides the per-prompt cap) so the
+    # model can't self-terminate early — required to measure sustained throughput at a
+    # chosen output size on diffusion LMs (which stop ~1-2K words otherwise).
+    mt = FORCE if FORCE > 0 else max_tokens
+    req_body = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
+        "max_tokens": mt,
         "temperature": 0.6,
         "top_p": 0.95,
         "stream": True,
         "stream_options": {"include_usage": True},
         "chat_template_kwargs": {"enable_thinking": ENABLE_THINKING},
-    }).encode()
+    }
+    if FORCE > 0:
+        req_body["min_tokens"] = FORCE
+        req_body["ignore_eos"] = True
+    body = json.dumps(req_body).encode()
     req = urllib.request.Request(f"{URL}/v1/chat/completions", data=body,
                                  headers={"Content-Type": "application/json"})
     t_send = time.time()

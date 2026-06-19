@@ -171,6 +171,36 @@ curl -sf http://localhost:8020/v1/chat/completions \
 
 ---
 
+## 11. Expose the API to your local network (LAN)
+
+By default the endpoint is only reachable **on the machine running WSL2** — even after you set `BIND_HOST=0.0.0.0`. Two things to know:
+
+- **`launch.sh` printing `http://localhost:8020` is cosmetic** (a fixed display string), not the actual bind. Docker already publishes the port on `0.0.0.0`, so the server *is* listening on all interfaces **inside the WSL2 VM** — `BIND_HOST` doesn't change reachability here.
+- **The real blocker is WSL2's NAT.** WSL2 runs in a VM with its own IP (`172.x.x.x`); the Windows host's LAN IP does **not** forward to it, so other machines can't reach `172.x.x.x`. Fix it on the **Windows side**, one of two ways:
+
+**Option A — mirrored networking (cleanest; Windows 11 22H2+).** Edit `C:\Users\<you>\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+Then `wsl --shutdown` (PowerShell) and restart. WSL2 now shares the Windows host's network, so the `0.0.0.0` bind is directly reachable on the host's LAN IP. Allow the port if Windows Firewall prompts.
+
+**Option B — `netsh portproxy` (any Windows version; NAT mode).** In an **admin** PowerShell:
+
+```powershell
+wsl hostname -I                 # the WSL2 IP, e.g. 172.20.x.x
+netsh interface portproxy add v4tov4 listenport=8020 listenaddress=0.0.0.0 connectport=8020 connectaddress=<WSL2-IP>
+New-NetFirewallRule -DisplayName "club3090-8020" -Direction Inbound -LocalPort 8020 -Protocol TCP -Action Allow
+```
+
+LAN clients then hit `http://<WINDOWS-host-LAN-IP>:8020/`. ⚠️ In NAT mode the WSL2 IP **changes on reboot** — re-run the `portproxy add` line (or script it). Option A avoids this entirely.
+
+**Verify** from another machine: `curl http://<windows-lan-ip>:8020/v1/models` should list the model. (The `.env` `URL=` is the *client/bench* target — point it at the reachable address; it does **not** affect the server bind.)
+
+---
+
 ## Native llama.cpp in WSL (no Docker)
 
 Prefer to skip Docker — one fewer layer, or because you just don't want the daemon? (It's marginally leaner on VRAM, but the real overhead lever is headless + closed apps from [Step 8](#8-budget-for-the-13-gib-wsl2-gpu-overhead), not the engine.) llama.cpp / ik_llama run **natively** in the WSL distro. The GPU passthrough from **Step 2 is all you need**: a native process uses WSL's CUDA libraries (`/usr/lib/wsl/lib`) directly, so there's **no `nvidia-container-toolkit`** and you **skip Step 4** entirely. (vLLM has no native path here — it's Docker-only.)
@@ -184,7 +214,7 @@ You still do steps **1–3** (WSL + driver/passthrough + `.wslconfig` RAM) and *
    ```
    …or grab a prebuilt CUDA binary. To match the MTP / spec-decode support the Docker image ships, track a recent build — the composes pin `ghcr.io/ggml-org/llama.cpp:server-cuda-b9246` (or newer).
 
-2. **Run `llama-server` with the flags the compose uses.** The compose is the source of truth — lift them from [`models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml`](../models/qwen3.6-27b/llama-cpp/compose/single/mtp.yml). The equivalent native invocation:
+2. **Run `llama-server` with the flags the compose uses.** The compose is the source of truth — lift them from [`models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml`](../models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml). The equivalent native invocation:
    ```bash
    ./build/bin/llama-server --host 0.0.0.0 --port 8020 \
      -m "$MODEL_DIR/qwen3.6-27b-gguf/unsloth-mtp-q4km/Qwen3.6-27B-Q4_K_M.gguf" \

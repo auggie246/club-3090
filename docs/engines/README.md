@@ -93,7 +93,7 @@ Full plan in [models/qwen3.6-27b/sglang/README.md](../../models/qwen3.6-27b/sgla
 | **Full feature set, MTP spec-decode, OpenAI API parity** | vLLM + Lorbus AutoRound | This repo's path. 51-70 TPS depending on workload, all features, prefill-safe at 48K default. |
 | **Maximum context (262K) on one 3090** | llama.cpp + UD-Q3_K_XL or Q4_K_M + q4_0 KV | Smaller quants leave 8-10 GB headroom for KV at 262K. ~35-45 TPS sustained. |
 | **Leanest VRAM / best quality-per-bit GGUF on one 3090** | ik_llama + IQ4_KS + MTP | Fork-exclusive IQK imatrix quant, 262K ctx. Ties llama.cpp on TPS + quality at matched power; its edge is a ~0.5–0.8 GB leaner footprint (best when VRAM-tight). Two-stage ngram+MTP for code workloads. See [IK_LLAMA.md](IK_LLAMA.md). |
-| **Best concurrent throughput on dual 3090** | vLLM TP=2 + Turbo (TQ3) | 4 streams at full 262K, ~200 TPS aggregate. See [`dual-turbo.yml`](../models/qwen3.6-27b/vllm/compose/dual/turbo.yml) in this repo. |
+| **Best concurrent throughput on dual 3090** | vLLM TP=2 + Turbo (TQ3) | 4 streams at full 262K, ~200 TPS aggregate. See [`dual-turbo.yml`](../models/qwen3.6-27b/vllm/compose/dual/autoround-int4/turbo.yml) in this repo. |
 | **Non-NVIDIA hardware (AMD / Intel / Apple)** | llama.cpp | Only engine with cross-platform support. |
 | **Lightest setup, fastest cold start** | llama.cpp | Single binary, ~30s cold start. Good for embedded use, quick experiments. |
 | **High-throughput multi-tenant serving** | SGLang (re-test pending — DFlash + MTP native upstream as of May 2026; Marlin INT4 fix verification needed) | RadixAttention prefix sharing wins at scale. Re-test plan in [sglang/README.md](../../models/qwen3.6-27b/sglang/README.md). |

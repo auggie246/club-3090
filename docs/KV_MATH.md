@@ -507,7 +507,7 @@ peak ≈ weights/N + kv_pool_growing + kv_pool_sliding + activation_peak + cudag
 | AWQ-4bit (`cyankiwi/gemma-4-31B-it-AWQ-4bit`) | ~17 GB | 8.5 GB |
 | BF16 (unquantized) | ~58 GB | 29 GB (does not fit on 24 GB) |
 
-Two shipped quants on this stack: AutoRound INT4 (default) and AWQ-4bit (Tier 2 reproducer of #103). INT4 weights + INT8-per-token-head KV is the matched-config dual-3090 recipe (see `models/gemma-4-31b/vllm/compose/dual/int8.yml`).
+Two shipped quants on this stack: AutoRound INT4 (default) and AWQ-4bit (Tier 2 reproducer of #103). INT4 weights + INT8-per-token-head KV is the matched-config dual-3090 recipe (see `models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml`).
 
 ### 2. KV pool — growing portion (10 full-attention layers)
 
@@ -532,7 +532,7 @@ Per-token growing-KV bytes by format:
 
 Total growing-KV pool per card = `per_token_bytes_growing / TP × max_ctx × max_num_seqs`.
 
-**Note**: on Ampere consumer cards (sm_86), `fp8_e4m3` is NOT supported. Use `int8_per_token_head` (PR #40391, vendored on this stack via PR #42102). See `models/gemma-4-31b/vllm/compose/dual/int8.yml`.
+**Note**: on Ampere consumer cards (sm_86), `fp8_e4m3` is NOT supported. Use `int8_per_token_head` (PR #40391, vendored on this stack via PR #42102). See `models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml`.
 
 ### 3. KV pool — fixed sliding portion (50 SWA layers)
 
@@ -572,8 +572,8 @@ Two drafter families on this stack:
 
 | Drafter | Size | Composes |
 |---|---:|---|
-| `gemma-4-31b-it-assistant` (Google MTP) | 0.97 GB FP16 | `dual/docker-compose.yml`, `dual/int8.yml`, `dual/awq.yml` (with MTP n=4) |
-| `gemma-4-31b-it-dflash` (z-lab DFlash) | 2.9 GB FP16 | `dual/dflash.yml`, `dual/dflash-int8.yml` |
+| `gemma-4-31b-it-assistant` (Google MTP) | 0.97 GB FP16 | `dual/autoround-int4/bf16-mtp.yml`, `dual/autoround-int4/int8.yml`, `dual/awq/default.yml` (with MTP n=4) |
+| `gemma-4-31b-it-dflash` (z-lab DFlash) | 2.9 GB FP16 | `dual/autoround-int4/dflash.yml`, `dual/autoround-int4/dflash-int8.yml` |
 
 At TP > 1, drafter weights shard across cards (`drafter_gb / TP`).
 
@@ -766,11 +766,11 @@ Run `bash tools/kv-calc.py --calibration` to see predicted vs measured for all s
 | Model | Verdict accuracy | Notes |
 |---|---|---|
 | Qwen 3.6 27B | 11/11 = 100% (±1.5 GB band) | Refactored Phase 3 of v0.7.0 preserved this byte-for-byte |
-| Gemma 4 31B | 7/7 = 100% (±1.5 GB band) | Calibrated against `dual/int8.yml` 98K+262K rows, `dual/dflash.yml`, `dual/awq.yml`, `dual/docker-compose.yml` |
+| Gemma 4 31B | 7/7 = 100% (±1.5 GB band) | Calibrated against `dual/autoround-int4/int8.yml` 98K+262K rows, `dual/autoround-int4/dflash.yml`, `dual/awq/default.yml`, `dual/autoround-int4/bf16-mtp.yml` |
 | Qwen 3.6 35B-A3B | not on stack | Pending download + first calibration |
 | Gemma 4 26B-A4B | not on stack | Pending download + first calibration |
 
-Overall on calibrated models: **18/18 (100%)** as of 2026-05-14.
+Overall on calibrated models: **17/17 (100%)** as of 2026-05-30.
 
 ## When to trust the calculator vs vLLM's boot log
 
@@ -782,7 +782,7 @@ Always pass `--model {qwen3.6-27b,gemma-4-31b}` matching the compose you're targ
 | "Will it boot?" — for a *novel* config (custom ctx, kv format, or VRAM class) | `kv-calc.py --model <M> --compose <X>` for a directional answer; then boot and read `gpu_worker.py` |
 | "What's my max ctx?" — given my hardware | `kv-calc.py --model <M> --solve-max-ctx ...` for an estimate; vLLM's pre-check `estimated max model length is N` line at boot is authoritative |
 | "Is TQ3 or fp8 better for my hardware?" (Qwen 3.6) | `kv-calc.py --model qwen3.6-27b` with both options; cross-check [HARDWARE.md](HARDWARE.md#note-for-sub-24-gb-cards) |
-| "Is INT8 PTH or BF16 KV better for Gemma 4?" | `kv-calc.py --model gemma-4-31b --kv-format bf16` vs `int8_per_token_head` — BF16 caps at ~32K on dual-3090, INT8 PTH unlocks 262K. See `models/gemma-4-31b/vllm/compose/dual/int8.yml` header. |
+| "Is INT8 PTH or BF16 KV better for Gemma 4?" | `kv-calc.py --model gemma-4-31b --kv-format bf16` vs `int8_per_token_head` — BF16 caps at ~32K on dual-3090, INT8 PTH unlocks 262K. See `models/gemma-4-31b/vllm/compose/dual/autoround-int4/int8.yml` header. |
 
 ## Sources of error & accuracy
 

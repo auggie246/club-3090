@@ -16,6 +16,380 @@ history; SemVer takes over from `v0.3.0` onward.
 
 ---
 
+## v0.9.0 — 2026-06-15
+
+
+### ✨ Features
+
+- feat(weights): optional revision: pin in weights-fetch schema (#319) (#408) ([#408](https://github.com/noonghunna/club-3090/pull/408) by @deucebucket)
+- feat(bench-agentic): decouple context ramp from tool-call success (#255) (#396) ([#396](https://github.com/noonghunna/club-3090/pull/396) by @noonghunna)
+- feat(rebench): make the 8-pack opt-in via --with-8pack-thinking (default-skip) (#338) (#395) ([#395](https://github.com/noonghunna/club-3090/pull/395) by @noonghunna)
+- feat: add Qwen3.6-40B-Deckard to catalog (llamacpp/deckard40B-dual-mtp) ([5dafaa6](https://github.com/noonghunna/club-3090/commit/5dafaa61fea207302aac4b273df667d92162ad65))
+- feat(vllm): opt-in offline/air-gap support across vLLM composes (#318) ([edd77cf](https://github.com/noonghunna/club-3090/commit/edd77cfd465e7da038349894fbeb330ed7eeea61))
+
+
+### 🎯 New models + serving paths
+
+- Add llamacpp/hauhaucs-35ba3b-dual uncensored MTP compose (🧪) (#410) ([#410](https://github.com/noonghunna/club-3090/pull/410) by @noonghunna)
+- Add Carnice-V2-27B beellama single-card compose (beellama/carnice-v2-single-q5km-mtp) (#406) ([#406](https://github.com/noonghunna/club-3090/pull/406) by @noonghunna)
+- Add experimental DiffusionGemma dual fp8 vLLM compose + patches ([83e8353](https://github.com/noonghunna/club-3090/commit/83e8353ed48963ff8c89fda8b12d54be6b807dd4))
+- Add Qwen3.6-27B fast/max tiers across dual + multi4 (4 slugs) (#340) ([#340](https://github.com/noonghunna/club-3090/pull/340) by @noonghunna)
+- Add Qwen3-Omni-30B-A3B vLLM-Omni compose (non-registry, 2x3090) (#317) ([#317](https://github.com/noonghunna/club-3090/pull/317) by @noonghunna)
+
+
+### 🐛 Bug fixes
+
+- fix(gpu-mode): stop gemma-4-12b chat in video-studio + comfyui modes ([#376](https://github.com/noonghunna/club-3090/pull/376) by @noonghunna)
+- fix(35b-a3b): bump preview-single gpu-mem 0.92->0.95 for v0.22.0 boot ([195bd47](https://github.com/noonghunna/club-3090/commit/195bd470abb2ab8452061d88fc79d5f02504d155))
+- fix(35b-a3b): correct AutoRound INT4 hf_repo (#316) ([121330c](https://github.com/noonghunna/club-3090/commit/121330c95e83600b7b83fc5da974b58808b18cfd))
+
+
+### 📝 Documentation
+
+- docs(UPSTREAM): #39598 MTP-streaming tool-call drop is un-mitigated on v0.22.0 (P64 retired); #145 closed ([8e38f7a](https://github.com/noonghunna/club-3090/commit/8e38f7a5ecd5b7d25e0c67a533ae021bee2d4d41))
+- docs(BENCHMARKS): add author-rig Cerebellum-v3 data point (35B-A3B, #390/#393) ([85087ad](https://github.com/noonghunna/club-3090/commit/85087ad5b55dd8526c6e268f79489847eb655695))
+- docs(UPSTREAM): mark #40361 closed-superseded by #45295; track v0.23.0 pin ([18656e7](https://github.com/noonghunna/club-3090/commit/18656e7b8d215e28fc02f6e7ea4ce2b7f198dbaf))
+- docs(ARCHITECTURE): drop pinned version on 'surfaces (current)' marker ([fb114bf](https://github.com/noonghunna/club-3090/commit/fb114bfde9e451cb339415b1fd20dce650d34c8b))
+- docs(README): refresh 35B-A3B row + drop stale NEW v0.7.3 tags ([a36d2c0](https://github.com/noonghunna/club-3090/commit/a36d2c0911d9d10be2231925b2d2e035987fef33))
+- docs(README): un-stale 35B-A3B vLLM-dual row (preview→Production, 262K) ([0689fc4](https://github.com/noonghunna/club-3090/commit/0689fc4875969447b571d760b06c3f4063e29cc2))
+- docs(README): correct 35B-A3B llama.cpp ❌→✅ (mainline serves the MoE; #390) ([559a3fe](https://github.com/noonghunna/club-3090/commit/559a3febf72ef11779b470a5fe0223b927a17aca))
+- docs(ai-studio): add architecture diagrams to README/image/audio ([81b7157](https://github.com/noonghunna/club-3090/commit/81b71579ca8cd0f908ee07ccc92344ddf0930d9a))
+- docs(ai-studio): scope the umbrella to image/video/audio — text is the core stack ([fd81dc2](https://github.com/noonghunna/club-3090/commit/fd81dc26de23e4b6a24cf8f4c6979a4d43e66bda))
+- docs: relocate Studio docs into docs/ai-studio/ + add overview & audio (#386) ([#386](https://github.com/noonghunna/club-3090/pull/386) by @noonghunna)
+- docs(video-studio): boxed architecture diagram + Quickstart/First-run (match IMAGE_STUDIO) ([96794a0](https://github.com/noonghunna/club-3090/commit/96794a064c8a3264579ab1331ab195eac660e5b7))
+- docs(video-studio): add a user-facing 'How to prompt' section ([4abdadd](https://github.com/noonghunna/club-3090/commit/4abdaddf0e6f1f1416f75499c7a4b70993ec98f7))
+- docs: reconcile DUAL/MULTI_CARD for the qwen fast/max tiers (#340) ([c51dc23](https://github.com/noonghunna/club-3090/commit/c51dc23dde57fe60a129219cdbb1bd40ff5d252b))
+- docs(ADDING_MODELS): quant & arch gotchas checklist (Step 1) ([21d01bd](https://github.com/noonghunna/club-3090/commit/21d01bdaad06b0723518200268ed333d7182d82e))
+- docs: quant-fidelity (KLD/QAT) + the Ampere KV-dtype traps (int8-PTH native, fp8-guard) ([3382a47](https://github.com/noonghunna/club-3090/commit/3382a47f40d21fd68635e044fa4db7f1a4c90c49))
+- docs(upstream): repoint Gemma engine-pin row to vllm-gemma-stable + add vllm-stable row (#324 fidelity) ([09a4482](https://github.com/noonghunna/club-3090/commit/09a448238d53d1c30573ab612288421a864a742c))
+- docs(adding-models): extend coherence rules — patch roles, engine identity/channels, test matrix ([b314ea9](https://github.com/noonghunna/club-3090/commit/b314ea97a7a5dfc96f9897117188647869518954))
+- docs(internals): drop stale /opt/ai vLLM-clone path (marlin-pad overlay is vendored) ([4730406](https://github.com/noonghunna/club-3090/commit/47304065f45c10f7bb7ca344ee8e9d3a530f391a))
+- docs: drop stale /opt/ai vLLM-clone instructions (marlin-pad is vendored + auto-mounted) ([47f6291](https://github.com/noonghunna/club-3090/commit/47f6291ad2947de6e0dd40814ccdf7d30ff16a93))
+- docs(faq,dual-card): image/video gen guidance + 2x3090 multimodal lessons ([924883c](https://github.com/noonghunna/club-3090/commit/924883c560a629762fa5e85edea14002a9ebb1bc))
+- docs(qwen3-omni): add image/video gen options, UI recommendations, 2x3090 lessons ([8c1370b](https://github.com/noonghunna/club-3090/commit/8c1370b6879eea22e7a250e33350c8227fb91cc4))
+- docs(qwen3-omni): correct text decode to ~164 tok/s (12 was the audio path) ([4eed607](https://github.com/noonghunna/club-3090/commit/4eed6070042a8c469c596967c347c51360a98cdb))
+- docs: document the compose filename convention (serving-feature delta) ([edc44c4](https://github.com/noonghunna/club-3090/commit/edc44c4367fe9b423776a803a83fcdf31f69c4c4))
+- docs(ADDING_MODELS): document the registry slug-naming convention ([28794da](https://github.com/noonghunna/club-3090/commit/28794dabffddff566fed7ab24fd6e4ba32875b8b))
+- docs(UPSTREAM): record gemma4 p-RoPE fix shared on vllm#39914 ([d391f32](https://github.com/noonghunna/club-3090/commit/d391f3272f211811aae9f885edabaee06b8cfeba))
+- docs(ADDING_MODELS): accommodate Codex registry-onboarding review ([d080757](https://github.com/noonghunna/club-3090/commit/d080757c2dc29c75b3bc08cd27dcfb5402443edd))
+- docs(WSL_SETUP): add 'Expose the API to your local network (LAN)' section ([d11f29d](https://github.com/noonghunna/club-3090/commit/d11f29dcf6765336078740263cc9472388025b10))
+- docs(UPSTREAM): track Gemma-4-12B unified 256K large-prefill OOB (vllm#39914) ([960cbf4](https://github.com/noonghunna/club-3090/commit/960cbf4763c936330f6291c74d49062ee73d2800))
+
+
+### 🛠️ Scripts + tooling
+
+- verify-full: add streaming tool-call check + a reusable streaming probe (#404) ([#404](https://github.com/noonghunna/club-3090/pull/404) by @noonghunna)
+- setup.sh: make Genesis opt-in, stop the default stale-pin clone (#182) (#399) ([#399](https://github.com/noonghunna/club-3090/pull/399) by @noonghunna)
+- scripts: auto-detect served model from /v1/models in verify/bench (#372) (#388) ([#388](https://github.com/noonghunna/club-3090/pull/388) by @noonghunna)
+- setup.sh: add diffusiongemma-26b-a4b dispatch (fetch fp8 weights) ([8ffa46d](https://github.com/noonghunna/club-3090/commit/8ffa46d51dd50099c385b413968eed6af42d8e77))
+- bench.sh: FORCE_TOKENS — bench at a fixed/larger output size ([0948e6b](https://github.com/noonghunna/club-3090/commit/0948e6bbea6f692b29a503d651d89ac08eff404f))
+- switch.sh --owui: auto-register a launched model in Open WebUI ([111c72b](https://github.com/noonghunna/club-3090/commit/111c72b0eabd741d689dd474c3a4c8ecad83a93b))
+- preflight: resolve ${VAR:-default} model paths in compose-deps check ([345f24e](https://github.com/noonghunna/club-3090/commit/345f24ee1d7f83a915b1aac40013cca59684f70b))
+- preflight: detect endpoint by engine port, not a model-name allowlist (#310) ([f48a7ff](https://github.com/noonghunna/club-3090/commit/f48a7ff51411cf547a1fed5a1e48851f20e522c3))
+
+
+### 🧹 Maintenance
+
+- test(weights): opt-in HF-repo resolve guard (#320) (#409) ([#409](https://github.com/noonghunna/club-3090/pull/409) by @deucebucket)
+- chore: make setup script work with WEIGHTS=FP8 and qwen3.6-27b (#369) ([#369](https://github.com/noonghunna/club-3090/pull/369) by @hlo-world)
+- chore(327): archive the Qwen3.6-27B DFlash path + deprecate vllm-nightly-dflash ([cc3e906](https://github.com/noonghunna/club-3090/commit/cc3e906f8ca8338f8acbb38b43e98b9b0035daad))
+- chore(254): deprecate the now-unused Genesis nightly engines + patches [Phase 3+4] ([baac1ac](https://github.com/noonghunna/club-3090/commit/baac1acafdcd07ec36e5fc51c8c3514e3e424b09))
+- chore(254): archive 15 Genesis/nightly composes + migrate the cascade [WIP: 5 test fixtures] ([b5ef9e6](https://github.com/noonghunna/club-3090/commit/b5ef9e697fe42982a05ba94f4a8e90b76c0b3ef2))
+- chore(254): migrate qwen-a3b-preview-single off purged nightly-clean -> vllm-stable ([36ee7bb](https://github.com/noonghunna/club-3090/commit/36ee7bbd9470f651fca9ecd9b8abee2bb707bc98))
+- refactor(vllm): reconcile vLLM engines to v0.22.0 — two-engine split (#254) ([a9ffb53](https://github.com/noonghunna/club-3090/commit/a9ffb532efcea285982d036bfde07b301ca44ffc))
+
+
+### 🧹 Other
+
+- BENCHMARKS: add DiffusionGemma 26B-A4B section + cross-rig row (#405) ([0542de8](https://github.com/noonghunna/club-3090/commit/0542de8c573d672d6e687d289c715e61c93850fd))
+- Fix soak-test container auto-detect: match by engine port, not model allowlist (#405) (#414) ([#414](https://github.com/noonghunna/club-3090/pull/414) by @noonghunna)
+- Pin hauhaucs-35ba3b-dual weights to morikomorizz commit 49a080d (#319) (#413) ([#413](https://github.com/noonghunna/club-3090/pull/413) by @noonghunna)
+- qwopus-coder compose: sanitize /opt/ai/hf-download.sh leak in Quick-start -> generic hf download ([69f8632](https://github.com/noonghunna/club-3090/commit/69f8632083d58e651097c77002800638fa4b8eaa))
+- deckard-40b: anti-loop sampling defaults (rep-penalty 1.1 + repeat-last-n 256) + DRY opt-in (#402) ([#402](https://github.com/noonghunna/club-3090/pull/402) by @noonghunna)
+- ik-llama: migrate spec-dec flags to --spec-type + digest-pin the image (#401) ([#401](https://github.com/noonghunna/club-3090/pull/401) by @noonghunna)
+- Add curated quality-baseline corpus + auto-diff (#252 Phase 1) (#397) ([#397](https://github.com/noonghunna/club-3090/pull/397) by @noonghunna)
+- catalog: add beellama/qwopus-coder (Qwopus3.6-27B-Coder, KVarN-4) — first KVarN compose (#391) ([#391](https://github.com/noonghunna/club-3090/pull/391) by @noonghunna)
+- beellama: bump pin v0.3.0 → v0.3.2-preview (commit-pinned) + validate (#389) ([#389](https://github.com/noonghunna/club-3090/pull/389) by @noonghunna)
+- setup: fix fp8 weights nits after #369 (typo, help string, manual_note) ([eae0e36](https://github.com/noonghunna/club-3090/commit/eae0e36f81877170f06549fb4017dfa635af1e9a))
+- openwebui: pin OWUI task models to the qwen director (not the generation pipe) ([d7c6e6d](https://github.com/noonghunna/club-3090/commit/d7c6e6d7b1aefe8e1f42a642c88b9934285228f3))
+- studio(pipe): ignore OWUI internal task prompts — stop rendering them as images ([0dddfa7](https://github.com/noonghunna/club-3090/commit/0dddfa790eb9824fc4202eb245cc1d43f872e2f7))
+- studio(pipe): drop the visible <!--SPEC--> refine marker — read 'Prompt used:' instead ([892324f](https://github.com/noonghunna/club-3090/commit/892324f436f35dc850f40aa7c47bc24c7b558242))
+- studio: add push-pipe-to-owui.sh — update the installed OWUI function in one command ([d67a067](https://github.com/noonghunna/club-3090/commit/d67a06773c0596b31761aa732ec795e3cd51f7f1))
+- studio(pipe): intent-gate the director — don't render on greetings/small-talk (#387) ([#387](https://github.com/noonghunna/club-3090/pull/387) by @noonghunna)
+- studio: add 🎙️ Voice lane — Step-Audio-EditX premium clone (isolated service) (#385) ([#385](https://github.com/noonghunna/club-3090/pull/385) by @noonghunna)
+- studio: add ✨ HiDream-O1 image lane (top-quality / photoreal) (#384) ([#384](https://github.com/noonghunna/club-3090/pull/384) by @noonghunna)
+- studio: add 🔊 SFX lane (Stable Audio Open) — sound effects + ambient (#383) ([#383](https://github.com/noonghunna/club-3090/pull/383) by @noonghunna)
+- studio: add 🎵 Music lane (ACE-Step) — songs + instrumentals ([#382](https://github.com/noonghunna/club-3090/pull/382) by @noonghunna)
+- studio: integrated voices for video — Kokoro TTS + layer-aware audio mixdown ([#381](https://github.com/noonghunna/club-3090/pull/381) by @noonghunna)
+- studio: add Chroma uncensored image lane (the "Sulphur for stills") ([#380](https://github.com/noonghunna/club-3090/pull/380) by @noonghunna)
+- studio: fix OWUI native 🖼️ image button via ComfyUI reverse-proxy shim ([#379](https://github.com/noonghunna/club-3090/pull/379) by @noonghunna)
+- studio: fix image-lane _min_caption fallback (empty arrays hard-block) ([#378](https://github.com/noonghunna/club-3090/pull/378) by @noonghunna)
+- studio: add 🖼️ Image lane (Ideogram-4) with JSON-caption director ([#377](https://github.com/noonghunna/club-3090/pull/377) by @noonghunna)
+- studio: in-chat 60s+ via orchestrator (auto-chain segments -> one video) ([#375](https://github.com/noonghunna/club-3090/pull/375) by @noonghunna)
+- studio: extend-chain tool for 60s+ video (proven, seamless joins) ([#374](https://github.com/noonghunna/club-3090/pull/374) by @noonghunna)
+- studio: video lane (LTX-2.3 / Sulphur) — Director pipe, gallery, gpu-mode, docs ([86f7e5e](https://github.com/noonghunna/club-3090/commit/86f7e5e835441e1d9aad4f445f82d14dc84b5c69))
+- comfyui: claim pip cache for container uid so it persists across recreates ([#370](https://github.com/noonghunna/club-3090/pull/370) by @noonghunna)
+- soak-helper: count silent-empty by completion_tokens, not decode_tps ([#368](https://github.com/noonghunna/club-3090/pull/368) by @noonghunna)
+- quality-test: add --no-thinking (symmetric force-off for reasoning A/B) ([#367](https://github.com/noonghunna/club-3090/pull/367) by @noonghunna)
+- soak-test: add beellama- to container auto-detect glob (#362) ([#366](https://github.com/noonghunna/club-3090/pull/366) by @noonghunna)
+- UPSTREAM: dgemma #45163 — add promote-to-caveats trigger (hold at experimental for now) ([ffd525a](https://github.com/noonghunna/club-3090/commit/ffd525a7f673fd0ece4d662fd861a3f4d28a0417))
+- dgemma: adopt official vllm/vllm-openai:gemma image (drop 120-file sideload) ([0cfd099](https://github.com/noonghunna/club-3090/commit/0cfd099b37f254ef817c7a9462373b0b8f3bbe2b))
+- gpu-mode: add `dgemma` mode (DiffusionGemma 26B-A4B dLLM, dual-card) ([f8ad9a0](https://github.com/noonghunna/club-3090/commit/f8ad9a01c1d25e3daa96ff556f225f5b306b7e9f))
+- Wire DiffusionGemma into the catalog via stock-nightly sideload ([af1e909](https://github.com/noonghunna/club-3090/commit/af1e909b04ee9c4504d143ab2483c9344615c219))
+- gpu-mode: add `deckard` mode (uncensored 40B, dual-card) ([1cee8eb](https://github.com/noonghunna/club-3090/commit/1cee8eb43d600c6929be06dad301f00d5cbc0354))
+- test-measurement-record: make BENCH_MOCK capture hermetic (#478) ([71a05fd](https://github.com/noonghunna/club-3090/commit/71a05fd444e9e723eaf3d1ee87eaf93c4e09a737))
+- Promote Deckard-40B to ✅ Production; fix arch + slug naming ([93acbf9](https://github.com/noonghunna/club-3090/commit/93acbf979f897383630b68be2e6bf199d16949fa))
+- Deckard-40B: fix provenance — GGUF is PiehSoft's, wire hf_repo fetch ([d6725fa](https://github.com/noonghunna/club-3090/commit/d6725faf0259a344277175070557f9609a0ec002))
+- Deckard-40B: record soak PASS + final 105/150 (gates all green) ([20e1d6f](https://github.com/noonghunna/club-3090/commit/20e1d6f36272e1cfc844c7b205b2720030f22a59))
+- Fix deckard40B compose: pin b9570, disk-count 45, status word ([881a449](https://github.com/noonghunna/club-3090/commit/881a449d4172d32c58d1d1a9e51e1396c5776b83))
+- image-studio setup: real preflight (docker/GPU/disk/hf/chat-model) before heavy work ([caca7b8](https://github.com/noonghunna/club-3090/commit/caca7b8cba3a8903f2a6e3d9cb679d6c2a5eaa0b))
+- image-studio P1 follow-up: setup UX, LiteLLM route, architecture docs ([18902fa](https://github.com/noonghunna/club-3090/commit/18902fa49571e124d86f50d60a1d2416bff1a996))
+- image-studio P1 docs: add IMAGE_STUDIO.md + index/README/FAQ pointers ([c28470c](https://github.com/noonghunna/club-3090/commit/c28470c5f869b7e698ec908c61c2550c806f4ddc))
+- image-studio P1: pin ComfyUI commit + drop hardcoded OWUI secret ([092b7c7](https://github.com/noonghunna/club-3090/commit/092b7c7a46f822f3f159dbcdfefa5c5e4118226a))
+- Add image-studio bundle P1: Ideogram-4 + gemma-12b chat + gpu-mode mode ([9981b28](https://github.com/noonghunna/club-3090/commit/9981b286980ab0a2733ec4ab77c768aba71877a8))
+- Add vllm/qwen-27b-dual-balanced + record 3-way 8-pack A/B (tie) (#343) ([#343](https://github.com/noonghunna/club-3090/pull/343) by @noonghunna)
+- Set 31B w4a16 default MTP n=4->3 (n-swept optimum) + update A/B record ([31dc2c4](https://github.com/noonghunna/club-3090/commit/31dc2c47569dd8e152b69f95f7957907731cb21c))
+- Record 31B w4a16 8-pack A/B: 109/150 vs autoround 105 (comparable quality, weaker MTP) ([97b678e](https://github.com/noonghunna/club-3090/commit/97b678e4056f334c34222959dfd5e5255bc98aca))
+- Experimental Gemma-4 QAT W4A16 vLLM composes + kv-calc int4 fix (#339) ([#339](https://github.com/noonghunna/club-3090/pull/339) by @noonghunna)
+- gemma-26ba4b-single: promote INT8-PTH single → ⚠️ Production-w/-caveats (gate PASS) ([3a5ece7](https://github.com/noonghunna/club-3090/commit/3a5ece7bb55e35f950cfd15e66d4ef65767bd84b))
+- gemma-26ba4b: add --reasoning-parser gemma4 (single int8 + dual) ([0375d89](https://github.com/noonghunna/club-3090/commit/0375d8977201504a3c16d684261a2177ea66af16))
+- Repoint vllm/gemma-26ba4b-single to INT8-PTH long-ctx (#465) ([e2efb75](https://github.com/noonghunna/club-3090/commit/e2efb757a9eef7cae0486747e12487a0d6c4b83c))
+- gpu-mode: add power-cap on/off/status controls ([87190f9](https://github.com/noonghunna/club-3090/commit/87190f90fac27fdc28498bb4d103eee23bb9c0b4))
+- kv-calc: per-sequence KV-pool floor (capped at 1 GB), fix KV-light false-FAIL ([95e47fe](https://github.com/noonghunna/club-3090/commit/95e47fedc950ab5f7618756f069f95638191d565))
+- Enable MTP on gemma-4-26b-a4b single + ladder both to max ctx (#326) ([95e1448](https://github.com/noonghunna/club-3090/commit/95e1448217cb7bc2f5db8c6adb318d4a76b6455c))
+- Wire gemma-4-26b-a4b AWQ on stock vLLM v0.22.0; retire AutoRound (#326) ([48eaf82](https://github.com/noonghunna/club-3090/commit/48eaf8283c1e5ed3cd383fe0657383208f83bb04))
+- Fix Genesis cleanup test fixtures ([6b26bd7](https://github.com/noonghunna/club-3090/commit/6b26bd7ffdd3f044115510a318f442cfdd31bd34))
+- gemma-4-12b: record soak PASS in the 2 GGUF single-card headers ([5387614](https://github.com/noonghunna/club-3090/commit/5387614ad7f1f6bb27cc48652a652b94089dcfb9))
+- gemma-4-12b: promote the two vLLM MTP composes to ⚠️ Production w/ caveats ([90c67dc](https://github.com/noonghunna/club-3090/commit/90c67dcc9f2a288359f16636bab23ee79eb201ec))
+- gemma-4-12b: normalize gemma-12b slug naming + prune the no-MTP bases ([87b43f1](https://github.com/noonghunna/club-3090/commit/87b43f14d6573f607052d114b59583eed4ca52e3))
+- gemma-4-12b int8: add 8-pack quality (105/150) to BENCHMARKS + compose headers ([4c390e7](https://github.com/noonghunna/club-3090/commit/4c390e7e22f6cd048805fbdc70fda3845664874a))
+- gemma-4-12b: add single-card int8 MTP variant (n-swept) + register it ([077584a](https://github.com/noonghunna/club-3090/commit/077584ac0ab4580e6cf62b0ae45c82d947df9347))
+- gemma-4-12b: add single-card vLLM INT8 compose (full 256K on one 3090) ([b444189](https://github.com/noonghunna/club-3090/commit/b4441892d397eab391a9930d8ec35a00c16de01e))
+- gemma-4-12b: drop vendored p-RoPE overlay — upstream config fix supersedes it ([942c5c8](https://github.com/noonghunna/club-3090/commit/942c5c891fe3f310fb9af9c222922358ba923d4f))
+- gemma-4-12b: fold rebench-full verdict into vLLM compose headers + BENCHMARKS ([8c4bcab](https://github.com/noonghunna/club-3090/commit/8c4bcab6f3b51c4cf2bb5c69afb547bd0ba9d69d))
+- BENCHMARKS: Gemma-4-12B section (256K all-engine; vLLM 256K+MTP via p-RoPE overlay) ([96e9852](https://github.com/noonghunna/club-3090/commit/96e9852f80adcd410fb7f1a121420f91b546468d))
+- gemma-4-12b: register single-card slugs beellama/gemma-12b + llamacpp/gemma-12b ([8b459af](https://github.com/noonghunna/club-3090/commit/8b459afa5862bfd4f416f1d96e0d0ee69ab546ec))
+- gemma-4-12b vLLM: 256K via vendored gemma4 p-RoPE long-ctx overlay (#39914) ([872bb89](https://github.com/noonghunna/club-3090/commit/872bb898081d4053d7ac6e45974526aa88d327d1))
+- gemma-4-12b mainline llama.cpp: single-card 256K (override-kv, q8_0 KV) ([8c1f811](https://github.com/noonghunna/club-3090/commit/8c1f811dd2244900dcce17a7e6ccad8e874c2dd5))
+- gemma-4-12b composes: scrub internal /opt/ai/hf-download.sh from quick-start docs ([ab825e5](https://github.com/noonghunna/club-3090/commit/ab825e5ea46a1f8ee2c5dd3e8af32b00185d2985))
+- gemma-4-12b beellama single-card: 256K via --override-kv (native p-RoPE) ([a63ccb0](https://github.com/noonghunna/club-3090/commit/a63ccb0195b7dc35864531cbfa53ae24fe7090c3))
+- kv-calc: address Codex review notes (gemma4_unified calibration) ([7f5ef72](https://github.com/noonghunna/club-3090/commit/7f5ef72a40e092c982a6f298304128db461e9021))
+- kv-calc: calibrate gemma4_unified global-KV per-token to measured anchor ([0f6f861](https://github.com/noonghunna/club-3090/commit/0f6f86195eb47069c3acfe78a00bf9a705fc5a42))
+- Wire gemma-4-12b into curated catalog (vLLM gemma4-unified, bf16 + MTP) ([aff9890](https://github.com/noonghunna/club-3090/commit/aff989072089e8afe9b0c8f3466a93fecc3a19c8))
+
+
+
+[Pin: `git checkout v0.9.0`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.7...v0.9.0)
+## v0.8.7 — 2026-06-03
+
+
+### ⚠️ Cliffs, gotchas, regressions
+
+- Retract beellama v0.3.0 prose-DFlash "regression" — net-positive on tok/s ([f2b9dc2](https://github.com/noonghunna/club-3090/commit/f2b9dc2de45203747e7918dcda15d29f19c95da1))
+
+
+### ✨ Features
+
+- feat(35b-a3b): byteshape IQ4_XS ik-llama single-card preset — validated (#299) ([#299](https://github.com/noonghunna/club-3090/pull/299) by @noonghunna)
+- feat(beellama): release v0.3.0 Q8_K_XL dual composes (experimental) + centralize image pin (#296) ([#296](https://github.com/noonghunna/club-3090/pull/296) by @noonghunna)
+- feat(gemma): gemma duals → vLLM v0.22.0 (rebase #40391 lean + re-instate #42006) (#287) ([#287](https://github.com/noonghunna/club-3090/pull/287) by @noonghunna)
+- feat(beellama): add beellama.cpp DFlash as first-class compose engine (#268) ([#268](https://github.com/noonghunna/club-3090/pull/268) by @noonghunna)
+- feat(switch): hardware-filter --list by GPU count; add --all (#267) ([#267](https://github.com/noonghunna/club-3090/pull/267) by @noonghunna)
+- feat: model-default resolver + user-pinnable defaults (PR-B) (#266) ([#266](https://github.com/noonghunna/club-3090/pull/266) by @noonghunna)
+- feat(registry): slug health/availability flag (#265) ([#265](https://github.com/noonghunna/club-3090/pull/265) by @noonghunna)
+- feat(switch): group --list by model · topology (#264) ([#264](https://github.com/noonghunna/club-3090/pull/264) by @noonghunna)
+- feat(qwen3.6-35b-a3b): promote dual → 262K + vision Production (vllm/qwen-35b-a3b-dual) (#259) ([#259](https://github.com/noonghunna/club-3090/pull/259) by @noonghunna)
+
+
+### 🐛 Bug fixes
+
+- fix(nvlink): add NVLINK_MODE=pcie_p2p for PCIe P2P without NVLink (#290) (#291) ([#291](https://github.com/noonghunna/club-3090/pull/291) by @noonghunna)
+- fix(report): detect beellama- containers in report.sh auto-detection ([8cb5027](https://github.com/noonghunna/club-3090/commit/8cb50273d9a04636c64c491801549f05227dcbef))
+- fix(gemma): wire --reasoning-parser gemma4 on both duals (#289) ([#289](https://github.com/noonghunna/club-3090/pull/289) by @noonghunna)
+- fix(kv-calc): shard qwen3-next-moe weights by TP (#260) (#261) ([#261](https://github.com/noonghunna/club-3090/pull/261) by @noonghunna)
+
+
+### 📝 Documentation
+
+- docs: surface the mandatory compose Profile header to contributors ([8f3ae5c](https://github.com/noonghunna/club-3090/commit/8f3ae5c62faf83a84997eae55cabcaa6e7da97ad))
+- docs(BRING_YOUR_OWN): BYO models aren't registered — boot composes directly ([3b8e469](https://github.com/noonghunna/club-3090/commit/3b8e469f9f7dfd3b715656e3cda7bb211b36b9fe))
+- docs(BRING_YOUR_OWN): note INT8 KV is a vendored patch, not a stock dtype ([6ddfaca](https://github.com/noonghunna/club-3090/commit/6ddfaca166b256c4ac0f78a6b9e083fc3a1cfa6d))
+- docs(BRING_YOUR_OWN): split KV-quant guidance by engine ([a2d0af6](https://github.com/noonghunna/club-3090/commit/a2d0af6053a63e2c6fbc1a1c8a953d5f20734167))
+- docs: add BRING_YOUR_OWN — serve/tune/validate your own model ([93e6cd8](https://github.com/noonghunna/club-3090/commit/93e6cd807db9214862a8c36f451acec834976dec))
+- docs(CONTRIBUTING): broaden one-per-PR rule to feature/concern scope ([557e615](https://github.com/noonghunna/club-3090/commit/557e6157c440a3f1d7840ac128b9ed0923265266))
+- docs(CONTRIBUTING): require one model per compose PR ([497c341](https://github.com/noonghunna/club-3090/commit/497c341a958deec6f05813a3c6303a4880254817))
+- docs(FAQ): fix Copilot LLM Gateway entry — vllm/tools-text retired ([aa458bb](https://github.com/noonghunna/club-3090/commit/aa458bb34a66806f50365508726054c7f40249ea))
+- docs(FAQ): agent stops mid-task → set client temperature to 0.6 (#232) ([6bc91b5](https://github.com/noonghunna/club-3090/commit/6bc91b5cc50ee3a0c2c8a2e8b09029bb4d1b0c02))
+- docs: deprecate vLLM dual-dflash composes, redirect DFlash to beellama (#297) ([b7955ac](https://github.com/noonghunna/club-3090/commit/b7955acab3e3b7914b603b2f1ad0e5b70d3235c3))
+- docs(beellama): point gemma-dflash-dual v0.3.0 override at Anbeeld's official image ([533d2c3](https://github.com/noonghunna/club-3090/commit/533d2c320543782dedf36fd70c35b5dd55b0971c))
+- docs(bench): @hlo-world PCIe-P2P A/B validates NVLINK_MODE=pcie_p2p (#291/#290) ([55eb500](https://github.com/noonghunna/club-3090/commit/55eb500f63ea8633d197c2c49645556b9c2abb79))
+- docs(beellama): correct prose-regression attribution — v0.3.0-wide, not SWA ([44358d1](https://github.com/noonghunna/club-3090/commit/44358d135a0ec3255a06b45d5761f8ceca2c7a97))
+- docs(beellama): record v0.3.0 dual-3090 validation — multi-GPU DFlash fixed ([8da27fd](https://github.com/noonghunna/club-3090/commit/8da27fdbdf5c7ec2394e5d5ddf566ce7fa6b12f3))
+- docs(gemma): record bf16-mtp 8-pack (reasoning-on 111/150) + cross-config quality summary ([b2d7d8f](https://github.com/noonghunna/club-3090/commit/b2d7d8fb7f1d04584ef5ff5376723478d6851f9a))
+- docs(gemma): record int8-mtp v0.22.0 closeout — bench, soak PASS, 8-pack quality + reasoning A/B ([0abba3a](https://github.com/noonghunna/club-3090/commit/0abba3a8757e08b9d9246c73943647a8ba19c499))
+- docs(FAQ): clarify model-switch scope — supported models only ([8356a11](https://github.com/noonghunna/club-3090/commit/8356a11e82036938acc42484fe69e0024e8db3f0))
+- docs(FAQ): add 'how to switch to / try a different model' entry ([2aeec74](https://github.com/noonghunna/club-3090/commit/2aeec74301fcbf1735e344656f507e66a1d747d7))
+- docs(quality-test): document failure-reason reading; fix drifted Failure-breakdown sample ([77c1cd6](https://github.com/noonghunna/club-3090/commit/77c1cd6c012485c642238648527dc70113dab2e1))
+- docs(ik-apex-fit-mtp): warn RAM-constrained systems on --cache-ram + MTP OOM (#243) ([c61cfc4](https://github.com/noonghunna/club-3090/commit/c61cfc49b7f064cdcf27a7a7095f8f1cbe5cbfe7))
+- docs: document quality-test timeout sizing (QUALITY_TEST.md + agent guide) ([9c333f4](https://github.com/noonghunna/club-3090/commit/9c333f42bb9e60315e645256c63bee2455c7aaf5))
+- docs(UPSTREAM): add vLLM #39056 row + cross-reference to #39598 streaming fix (#354) ([0ed228c](https://github.com/noonghunna/club-3090/commit/0ed228c605beb2788112f9373b1f5cd93d87ba40))
+- docs(hardware): correct turbo3 "quality-neutral" claim — it's avg-distortion, not tail ([572f1c9](https://github.com/noonghunna/club-3090/commit/572f1c96ca507c386ad1b8c1529d0d6e21205ffe))
+- docs(faq): add "which KV-cache quant should I use?" entry ([6b85575](https://github.com/noonghunna/club-3090/commit/6b85575d711ee4e55bcde1af634d91356d99295e))
+- docs(cliffs): NIAH certifies retrieval, not KV-quant tail quality ([a307846](https://github.com/noonghunna/club-3090/commit/a307846eb74b6614a09e225216a470956727a164))
+- docs(bench): single-card 1x 3090 llama.cpp Gemma-4 rows (mainline FA_ALL_QUANTS + beellama DFlash) ([6b011f6](https://github.com/noonghunna/club-3090/commit/6b011f60909cab2d2e17fb51a4f08859a59d44cc))
+- docs: flip CLAUDE.md/AGENTS.md symlink + document localhost requirement for sandboxed agentic packs ([#240](https://github.com/noonghunna/club-3090/pull/240) by @noonghunna)
+- docs: make AGENTS.md a symlink to CLAUDE.md (one source, matches the /opt/ai convention) ([ef1d9b8](https://github.com/noonghunna/club-3090/commit/ef1d9b8a1c8c830b20cd6c17750fa593d87386ab))
+- docs: link the docs index + ARCHITECTURE from the repo agent entry points ([dc7c613](https://github.com/noonghunna/club-3090/commit/dc7c613262023596991160dab721baaf0852cb4b))
+- docs: formalize the add-a-model workflow for the post-refactor architecture + agent discoverability ([37871c6](https://github.com/noonghunna/club-3090/commit/37871c631729018165ce19dd1cdbf1c14e027ccb))
+
+
+### 🔧 Pin bumps + upstream
+
+- Bump vllm/minimal + vllm/dual to stable v0.22.0 (off nightly) (#277) ([#277](https://github.com/noonghunna/club-3090/pull/277) by @noonghunna)
+
+
+### 🛠️ Scripts + tooling
+
+- preflight: detect beellama + check spec-draft-model drafter GGUF ([180adb0](https://github.com/noonghunna/club-3090/commit/180adb083eae957e9c4434f2bf70cb54e3874472))
+- switch.sh --list: show max context per slug (+ registry<->compose drift) (#283) ([#283](https://github.com/noonghunna/club-3090/pull/283) by @noonghunna)
+- gpu-mode.sh: align with dual prune — drop dead 27b modes, gemma -> int8 default (#280) ([#280](https://github.com/noonghunna/club-3090/pull/280) by @noonghunna)
+- setup.sh: reject extra positional args instead of silently ignoring them (#273) ([#273](https://github.com/noonghunna/club-3090/pull/273) by @noonghunna)
+- quality-test.sh: forward --progress to benchlocal-cli, default ON (#248) ([#248](https://github.com/noonghunna/club-3090/pull/248) by @noonghunna)
+- soak-test.sh: add qwen3.6-35b-a3b to container auto-detect glob (#244) ([#244](https://github.com/noonghunna/club-3090/pull/244) by @noonghunna)
+- quality-test.sh: stop hardcoding --timeout-per-case 60 (benchlocal-cli #41) (#245) ([#245](https://github.com/noonghunna/club-3090/pull/245) by @noonghunna)
+
+
+### 🧹 Maintenance
+
+- refactor(gemma): rename dual slugs + ladder gemma-bf16-mtp to 131K (#286) ([#286](https://github.com/noonghunna/club-3090/pull/286) by @noonghunna)
+- chore(beellama): default to published ghcr image (sm86-b9459-07ac3ce) (#270) ([#270](https://github.com/noonghunna/club-3090/pull/270) by @noonghunna)
+- chore: retire vllm-club3090 image references (stack on stock vLLM) (#269) ([#269](https://github.com/noonghunna/club-3090/pull/269) by @noonghunna)
+- chore(vllm): remove redundant nvlink-* dual composes (NVLink auto-detected) (#257) ([#257](https://github.com/noonghunna/club-3090/pull/257) by @noonghunna)
+- chore(litellm): prune dead routes, add 35B-A3B dual, drop wildcard (#263) ([#263](https://github.com/noonghunna/club-3090/pull/263) by @noonghunna)
+- chore(35b-a3b): drop the built-in-MTP A/B compose (vllm/qwen-a3b-preview-mtp) (#262) ([#262](https://github.com/noonghunna/club-3090/pull/262) by @noonghunna)
+
+
+### 🧹 Other
+
+- rebench: add fail-fast verify-full preflight + fix runtime skip set (#306) ([#306](https://github.com/noonghunna/club-3090/pull/306) by @noonghunna)
+- rebench-full: swap aider step for think-ON 8-pack + live tee (#303) ([#303](https://github.com/noonghunna/club-3090/pull/303) by @noonghunna)
+- Repoint stale single-card launcher hints off deprecated vLLM composes ([bb9f9f2](https://github.com/noonghunna/club-3090/commit/bb9f9f23a002ea5e1ae439189872060bf62fb586))
+- beellama: refresh stale b9459 image refs to v0.3.0 ([#300](https://github.com/noonghunna/club-3090/pull/300) by @noonghunna)
+- Add Results Card doc — standard format for sharing config results ([cabdf12](https://github.com/noonghunna/club-3090/commit/cabdf1286bb744c256ef2c5f19be0738d464de8b))
+- Operational robustness (#281): orphan-safe switch.sh · reboot-surviving vLLM · multi-GPU power sweep (#285) ([#285](https://github.com/noonghunna/club-3090/pull/285) by @noonghunna)
+- beellama Gemma-4 ctx: single 128K (caveats) + dual 262K parked/upstream-gated (#284) ([#284](https://github.com/noonghunna/club-3090/pull/284) by @noonghunna)
+- Prune dual vLLM composes: qwen-27b -> one config; gemma-31b default -> gemma-int8 (#279) ([#279](https://github.com/noonghunna/club-3090/pull/279) by @noonghunna)
+- Gemma vLLM -> v0.22.0: bump dual gemma-mtp, deprecate gemma-mtp-tp1 (#278) ([#278](https://github.com/noonghunna/club-3090/pull/278) by @noonghunna)
+- Deprecate Genesis vLLM composes; vLLM single default → vllm/minimal (#276) ([#276](https://github.com/noonghunna/club-3090/pull/276) by @noonghunna)
+- Align gemma sampling default to model card (top_k -1 -> 64) (#275) ([#275](https://github.com/noonghunna/club-3090/pull/275) by @noonghunna)
+- Promote beellama/gemma-dflash to single-card Gemma-4-31B default (#272) ([#272](https://github.com/noonghunna/club-3090/pull/272) by @noonghunna)
+- Promote beellama/dflash to single-card Qwen3.6-27B default (#271) ([#271](https://github.com/noonghunna/club-3090/pull/271) by @noonghunna)
+- bench-agentic: anchor TTFT-growth to first warm turn (exclude cold-start) ([#114](https://github.com/noonghunna/club-3090/pull/114) by @noonghunna)
+- Revive agentic context-depth benchmark ([a9cf70e](https://github.com/noonghunna/club-3090/commit/a9cf70effd756a6eb16d2e07c3d4c42bcb823053))
+- Prune Gemma vLLM variants (9->3) and pin survivors to v0.21.0 ([#253](https://github.com/noonghunna/club-3090/pull/253) by @noonghunna)
+- Fail loud on hollow measured records in measurement_record (#251) ([#251](https://github.com/noonghunna/club-3090/pull/251) by @noonghunna)
+- Add measurement-record producer for bench runs (#249) ([#249](https://github.com/noonghunna/club-3090/pull/249) by @noonghunna)
+- BENCHMARKS: flag Gemma mainline-llama.cpp 36.8 TPS row as does-not-reproduce (13.6/15.4 re-bench) ([95da8e1](https://github.com/noonghunna/club-3090/commit/95da8e1f85a1e3db827b107032dbe453922abaee))
+- BENCHMARKS: post-PR #38 chain rebench for ik-llama/iq4ks-mtp (8-pack 101→107, aider 19→18 noise) ([8351956](https://github.com/noonghunna/club-3090/commit/8351956d9b9bcfdedde9fccfe995cc9098589769))
+- scripts/preflight.sh: surface 4090 / 5090 hint with FAQ deep-link (#247) ([#247](https://github.com/noonghunna/club-3090/pull/247) by @noonghunna)
+- docs/README: refresh supported-models table — single-card Gemma 4 31B + 35B-A3B now in production ([285c632](https://github.com/noonghunna/club-3090/commit/285c632442b72227c40231ea84c6731f001e2dc3))
+- docs/README: add above-the-fold cross-rig callout for 4090 / 5090 owners ([eea717f](https://github.com/noonghunna/club-3090/commit/eea717fd5b68308fe29f23ab3fe70c192a7d899a))
+- docs/FAQ: refresh 4090 / 5090 entries with cross-rig measurements ([2f0a54c](https://github.com/noonghunna/club-3090/commit/2f0a54c99503f1d02b49d06b4563d8807aa85a88))
+- Add ik-llama apex-fit-q8q5 variant for Qwen3.6-35B-A3B (#242) (#243) ([#243](https://github.com/noonghunna/club-3090/pull/243) by @noonghunna)
+
+
+
+[Pin: `git checkout v0.8.7`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.6...v0.8.7)
+## v0.8.6 — 2026-05-26
+
+
+### ✨ Features
+
+- feat(ik-llama): PRISM-PRO-DQ + APEX-MTP presets, conformed to the <quant>/ layout ([458c473](https://github.com/noonghunna/club-3090/commit/458c473908242aab349a19529d2606feb28b2e3e))
+
+
+### 🐛 Bug fixes
+
+- fix(profiles): cover the new ik-llama PRISM/APEX presets in the compat catalog ([aa2a965](https://github.com/noonghunna/club-3090/commit/aa2a965bb93ea7c9cf50f6ef16a9bb1a14ce13f0))
+- fix: post-PR-A compose-path fixes for gpu-mode.sh + 2 patch READMEs ([b23846e](https://github.com/noonghunna/club-3090/commit/b23846ea36c71ea2d86d3343eb2d367fa5d58b22))
+- fix(registry+bench): sync vision defaults to the 2026-05-25 re-tune (#438) ([b116750](https://github.com/noonghunna/club-3090/commit/b116750ef16850ee2472f857cde4dbea6bd09c0a))
+- fix(vision): re-tune single-card vision defaults to measured-safe (1M-px + 160K/150K) ([c9b7dd3](https://github.com/noonghunna/club-3090/commit/c9b7dd3999de78cf2847677e60503d1dafec5af9))
+- fix(vllm/dual): pin to stable v0.21.0, drop all source overlays (#407 pin-drift) ([cf1f14f](https://github.com/noonghunna/club-3090/commit/cf1f14fbc781ec7fbfca060c791144dd79ab6308))
+
+
+### 📝 Documentation
+
+- docs+scripts: finish <quant>/ path migration across full repo sweep ([eaa7a8c](https://github.com/noonghunna/club-3090/commit/eaa7a8c1ad4dc36d39d6935944136cc0734e4ef2))
+- docs(switch): correct ik-llama/iq4ks-mtp usage comment 262K -> 200K ([2135230](https://github.com/noonghunna/club-3090/commit/2135230f8f02fde978c897526c9b55618c22c7fd))
+
+
+### 🧹 Maintenance
+
+- refactor(launch): derive launcher tables from the registry + <engine>/default resolver ([a0520e2](https://github.com/noonghunna/club-3090/commit/a0520e2060966a3b63efadf95401f684417b4c62))
+- refactor(compose): insert <quant> layer + make the registry the single source of truth ([9821c94](https://github.com/noonghunna/club-3090/commit/9821c94efb4ac837dcaaa6f5805a14b0c8b0a05d))
+
+
+
+[Pin: `git checkout v0.8.6`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.5...v0.8.6)
+## v0.8.5 — 2026-05-24
+
+
+### ✨ Features
+
+- feat(llama.cpp): Structured-CoT bounded-thinking compose + grammar-dialect fix (#214) ([#214](https://github.com/noonghunna/club-3090/pull/214) by @noonghunna)
+- feat(kv-calc): opt-in --kv-breakdown architecture cache planning layer (#213) ([#213](https://github.com/noonghunna/club-3090/pull/213) by @noonghunna)
+- feat(ik-llama/two-stage): ctx default 131072→200000 + promote 🧪→⭐ code option (#212) ([#212](https://github.com/noonghunna/club-3090/pull/212) by @noonghunna)
+
+
+### 🐛 Bug fixes
+
+- fix(rebench-report): surface ceiling VRAM margin in verify-stress section (#184) ([1055c91](https://github.com/noonghunna/club-3090/commit/1055c9162fe49f96025c21f4508dca8c009e4775))
+- fix(switch): shell env wins over .env (MODEL_DIR etc.) + CRLF-tolerant (#425) ([9a27de8](https://github.com/noonghunna/club-3090/commit/9a27de83d7e6aff293d9f423bc926ff9366ed993))
+- fix(ik-llama/two-stage): default ngram n_max 64→4 (tuned code-decode optimum) (#210) ([#210](https://github.com/noonghunna/club-3090/pull/210) by @noonghunna)
+- fix(#168): scope report.sh kv-calc calibration to the running model ([477873a](https://github.com/noonghunna/club-3090/commit/477873af93e35c6978b42abf11b890935909ae5b))
+- fix(#169): distinct default container_name per llama.cpp/ik single variant ([9e5f200](https://github.com/noonghunna/club-3090/commit/9e5f200449ceb87a64838e60e8f074d468326ed3))
+
+
+### 📝 Documentation
+
+- docs(BENCHMARKS): 4090 ik-two-stage cross-rig row + 4090 ctx-derate note (#184) ([703fa3c](https://github.com/noonghunna/club-3090/commit/703fa3cc119b590198551da7c844f906c00505cb))
+- docs(README): direct docker-compose fallback when launch/switch error + default capture to --full ([27e818f](https://github.com/noonghunna/club-3090/commit/27e818f559f125d3ab438a62f4db84bf353dd45c))
+- docs(BENCHMARKS): add thinking-on vs no-think code-gen baseline (Qwen3.6-27B) ([d8adf55](https://github.com/noonghunna/club-3090/commit/d8adf55b4b582ff70dffbaf536f7cad8bf0e3d8a))
+- docs(README): Windows/WSL2 signpost at top of Quick start ([f954692](https://github.com/noonghunna/club-3090/commit/f954692676107aef38e7794ea3150079db9c8817))
+- docs(WSL): add Diagnostics section — suggest pciutils, set lspci/WSL2 expectation ([d36eb63](https://github.com/noonghunna/club-3090/commit/d36eb633c6d7e5ace99faa40dc9725ae0ccf6ad6))
+- docs(WSL,FAQ): clarify club-3090 needs WSL2 — native Windows = upstream engine only ([6fa639b](https://github.com/noonghunna/club-3090/commit/6fa639bb5ad85231de55446775139a9851e5c845))
+- docs(README,WSL): fold reasoning suite into Benchmarks; add native llama.cpp + overhead-reduction to WSL guide ([80527f9](https://github.com/noonghunna/club-3090/commit/80527f99708a1c0af972b8e8b3507c341faa98c8))
+- Document reasoning quality suite ([605f1df](https://github.com/noonghunna/club-3090/commit/605f1df52e4f7bb2a85cd676ebe56827c163ef9d))
+- docs: add WSL2/Windows from-scratch setup guide (#187) ([3c1a6e9](https://github.com/noonghunna/club-3090/commit/3c1a6e962a1206f920e28009c4055fa11f9dcc08))
+- docs(README): add Benchmarks + Diagnostics sections ([37574fe](https://github.com/noonghunna/club-3090/commit/37574fe4c00a39059631069876e4131842588601))
+- docs(diagnostics): redact internal paths in structured-cot-bench.md ([3b270b9](https://github.com/noonghunna/club-3090/commit/3b270b99a35636070cba0f15b25ae1cdec4715c1))
+- docs: promote iq4ks-two-stage 🧪→⭐ (code, 200K) + BENCHMARKS row ([7e6eaf8](https://github.com/noonghunna/club-3090/commit/7e6eaf8f005a84ef968ead7a0138267298834706))
+- docs(SINGLE_CARD): add measured two-stage TPS (~59/~98, code +35% vs MTP-only) ([b10096c](https://github.com/noonghunna/club-3090/commit/b10096cca016fe6e4782a7d7f83055801dcedf10))
+- docs(SINGLE_CARD): mark the #167-blocked vLLM configs in "Pick a config" ([cb19d68](https://github.com/noonghunna/club-3090/commit/cb19d6829c49af606970676b2840fadefdcc36ed))
+- docs(README): drop SGLang from the headline engine claims (blocked, not a route) ([678fd00](https://github.com/noonghunna/club-3090/commit/678fd006c5036ab930f3aaf3a32d0c996eb28170))
+- docs(README): single-card "recommended" → llamacpp/default (was #167-blocked vllm/default) ([44c08b6](https://github.com/noonghunna/club-3090/commit/44c08b614668771a3cc637c7222197b90ab4b821))
+- docs(DUAL_CARD): distinguish decode-concurrent vs long-prefill-overlap (#208) ([36767f1](https://github.com/noonghunna/club-3090/commit/36767f1dff66d1e7dac5e180a8b229144a935f32))
+- docs(README): fix stale 'llama.cpp single = full 262K' → 200K in supported-models cell ([2a8357f](https://github.com/noonghunna/club-3090/commit/2a8357f2815423f3ae6ab0919c9c59211f870413))
+- docs+registry: surface ik-llama on the single-card front door + fix stale max_ctx ([7f73361](https://github.com/noonghunna/club-3090/commit/7f733618e60899cb6878f16a5ba32b96daabd91c))
+- docs(BENCHMARKS): refresh llamacpp/mtp row to the 200K thinking-off rebench ([2eca18d](https://github.com/noonghunna/club-3090/commit/2eca18d23399759cf38d08a28c49cbb4ecffa0cd))
+- docs(#169 branch): fix stale 262K→200K cross-refs in single compose headers ([62a0f4b](https://github.com/noonghunna/club-3090/commit/62a0f4be63144dfe5d652861a650b7917cdc2f6f))
+- docs: correct single-card llama.cpp/ik_llama ctx 262K -> 200K (shipped default) ([c7fc9ca](https://github.com/noonghunna/club-3090/commit/c7fc9ca638ab6b80a110fffff5637bfc0842aa4c))
+
+
+### 🧹 Maintenance
+
+- chore: retire the club-3090 pre-built vLLM image (workflow + docs) ([7003e61](https://github.com/noonghunna/club-3090/commit/7003e6141b8399fb2fe14019241f6f5d171e84a9))
+
+
+### 🧹 Other
+
+- Add profile-backed model weight fetch registry ([5f37ae6](https://github.com/noonghunna/club-3090/commit/5f37ae6d4d299e0ece942c6475d1b8ae7b275a4d))
+- Generalize compose model preflight ([99d264b](https://github.com/noonghunna/club-3090/commit/99d264b2c460247091b8f10c4853e988f2a9ff90))
+- Expose benchlocal reasoning suite ([caf6fc2](https://github.com/noonghunna/club-3090/commit/caf6fc2b723c46c70a6dcd38d2778f1d5e1e469c))
+
+
+
+[Pin: `git checkout v0.8.5`] · [Full diff](https://github.com/noonghunna/club-3090/compare/v0.8.4...v0.8.5)
 ## v0.8.4 — 2026-05-23
 
 

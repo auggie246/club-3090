@@ -61,7 +61,7 @@ MAX_MODEL_LEN=90000 bash scripts/switch.sh vllm/long-text
 
 Same `MAX_MODEL_LEN` / `GPU_MEMORY_UTILIZATION` env overrides apply for any setup running vLLM alongside other GPU consumers on the same card. See [SINGLE_CARD.md "Running alongside a desktop"](SINGLE_CARD.md#running-alongside-a-desktop--sub-24-gb-usable-vram) for safe ranges.
 
-**`dual-turbo.yml` on 20 GB Ampere — swap TQ3 KV → fp8_e5m2.** The shipped `dual-turbo.yml` uses `--kv-cache-dtype turboquant_3bit_nc` (the technique from [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874), ICLR 2026 — random rotation + scalar quantizers + 1-bit QJL transform on the residual; the paper claims absolute quality neutrality at 3.5 bits/channel). It's the right pick on 24 GB / 3090: smaller KV pool → more concurrency, and the 24 GB budget absorbs the dequant activation cost during the DeltaNet GDN forward. On 20 GB cards the trade flips: TQ3's activation peak (~1 GB/card more pressure than fp8 during the materialized block — see [PerfMamba arxiv 2511.22849](https://arxiv.org/html/2511.22849) for the underlying Mamba-2 block-state-materialization mechanism the GDN forward inherits) exceeds the per-card budget after TP=2 split, and Cliff 2 fires at 90K. **Override to `--kv-cache-dtype fp8_e5m2`** and you get the full 262K context working with verify-stress 7/7 PASS including 91K needles. Validated 2026-05-04 by [@efschu](https://github.com/noonghunna/club-3090/issues/47) on 2× 3080 modded 20 GB at 0.82 mem-util: bench 82.4 narr / 107.9 code TPS, full 257K-token auto-discovery needle PASS at 90% depth. Trade-off: fp8 KV is roomier per cached token but each token's KV state is larger, so concurrency at full ctx drops vs TQ3. Single-stream long-ctx works cleanly.
+**`dual-turbo.yml` on 20 GB Ampere — swap TQ3 KV → fp8_e5m2.** The shipped `dual-turbo.yml` uses `--kv-cache-dtype turboquant_3bit_nc` (the technique from [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874), ICLR 2026 — random rotation + scalar quantizers + 1-bit QJL transform on the residual; the paper claims near-optimal *average* distortion at ~3.5 bits/channel). **That's a perplexity-level claim, not tail-level** — on our exact Qwen3.6-27B / 3090, [Anbeeld's KV-quant benchmarks](https://anbeeld.com/articles/kv-cache-quantization-benchmarks-for-long-context) put `turbo3_tcq` at **~82% 99.9th-percentile KLD tail precision** (visible loss on the worst 0.1% of positions — JSON keys, closing braces, tool calls). So **TQ3 is a context/concurrency trade, not quality-neutral**: good for prose + long-ctx, but prefer `fp8` / `q5_0` KV for code / JSON / agent workloads (see [FAQ — which KV-cache quant](FAQ.md) + [CLIFFS.md](CLIFFS.md)). It's still the right pick on 24 GB / 3090 for **context + concurrency**: smaller KV pool → more concurrency, and the 24 GB budget absorbs the dequant activation cost during the DeltaNet GDN forward. On 20 GB cards the trade flips: TQ3's activation peak (~1 GB/card more pressure than fp8 during the materialized block — see [PerfMamba arxiv 2511.22849](https://arxiv.org/html/2511.22849) for the underlying Mamba-2 block-state-materialization mechanism the GDN forward inherits) exceeds the per-card budget after TP=2 split, and Cliff 2 fires at 90K. **Override to `--kv-cache-dtype fp8_e5m2`** and you get the full 262K context working with verify-stress 7/7 PASS including 91K needles. Validated 2026-05-04 by [@efschu](https://github.com/noonghunna/club-3090/issues/47) on 2× 3080 modded 20 GB at 0.82 mem-util: bench 82.4 narr / 107.9 code TPS, full 257K-token auto-discovery needle PASS at 90% depth. Trade-off: fp8 KV is roomier per cached token but each token's KV state is larger, so concurrency at full ctx drops vs TQ3. Single-stream long-ctx works cleanly.
 
 ---
 
@@ -363,7 +363,7 @@ For visualization of how VRAM splits across single + dual configs, see [vram-bud
 
 - **Per model**: ~20 GB for weights + Docker layers + scratch.
 - **Per engine**: vLLM Docker image is ~9 GB. llama.cpp binary is ~50 MB.
-- **For dual-card vLLM**: add ~2 GB for the patched vLLM source clone (`/opt/ai/engines/vllm/primary/`).
+- **For dual-card vLLM**: nothing extra — the marlin-pad patch is two small files vendored in-repo, mounted into the stock image (no vLLM source clone).
 
 If you'll run multiple models, plan ~20 GB each.
 
@@ -499,7 +499,7 @@ Setting `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` resolves the crash. 
 
 Known occurrences:
 
-- JusefPol — NVLink-wired dual-3090 setups (PR #31). The `dual-nvlink*.yml` composes already hardcode `expandable_segments` off for that case.
+- JusefPol — NVLink-wired dual-3090 setups (PR #31). NVLink rigs can hit this; set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` in `.env` (the dual composes default it on; the old `dual-nvlink*.yml` variants are retired — NVLink is auto-detected at boot via `NVLINK_MODE`).
 - club-3090 issue (this PR, 2026-05-06) — single-card RTX 3090 Ti on WSL2, driver 596.36, vLLM nightly `01d4d1ad` (the v7.72.2-uplift pin).
 
 #### Override

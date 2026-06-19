@@ -58,7 +58,7 @@ As of 2026-05-02 PM (vLLM v0.20 + Genesis v7.69 dev tip + local vllm#35975 backp
 
 The **remaining shipped limitation** on the vLLM single-card variants: single prompts >60K still hit the 24 GB hardware-physical wall. Use llama.cpp single (262K, slower) or dual-card TP=2 (262K, splits state across cards) for one-shot big prompts. See [`docs/CLIFFS.md`](../../docs/CLIFFS.md).
 
-Other variants (`docker-compose.yml` 48K · `tools-text.yml` 75K FP8 · `minimal.yml` 32K) are kept in the repo as fallbacks / diagnostics, not promoted as primary.
+Other variants (`tq3-mtp.yml` 48K · `tools-text.yml` 75K FP8 · `minimal.yml` 32K) are kept in the repo as fallbacks / diagnostics, not promoted as primary.
 
 TP=2 unlocks **262K + 4 concurrent streams** on dual-card (`dual.yml`).
 

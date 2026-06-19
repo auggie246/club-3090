@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# rebench-full.sh — canonical 5-step rebench against the currently-running
-# model. Built to eliminate the recurring mistakes from manual runs:
+# rebench-full.sh — canonical rebench against the currently-running model
+# (a fail-fast verify-full preflight + 5 measured steps). Built to eliminate
+# the recurring mistakes from manual runs:
 #
 #   - Wrong cwd (`scripts/X.sh: No such file or directory`)
 #   - Forgot `--save-json` on benchlocal-cli direct invocations
@@ -11,21 +12,40 @@
 #   - No idempotent resume — every interrupt redoes the whole matrix
 #
 # Order matches docs/QUALITY_TEST.md "test pipeline":
+#   0. verify-full.sh          — functional preflight, FAIL-FAST (~2 min)
 #   1. bench.sh                — TPS narrative + code (~5 min)
 #   2. verify-stress.sh        — long-context + boundary (~10-15 min)
-#   3. quality-test.sh --full  — 8 packs, 150 scenarios (~45-60 min)
+#   3. 8-pack quality          — OPT-IN, skipped by default (#338). Enable with
+#      --with-8pack-thinking[=off|on|both]:
+#        =off  → quality-test.sh --full --no-thinking      (8 packs /150, reasoning OFF, ~45-60 min)
+#        =on   → quality-test.sh --full --enable-thinking   (8 packs /150, reasoning ON,  ~60-90 min)
+#        =both → both passes (the production-promotion gate)
 #   4. soak-test.sh fresh-mode — stability over 50 turns (~15-20 min)
-#   5. quality-test.sh --pack aider-polyglot-30  (~20-45 min)
 #
-# Total per leg: ~1.75-2 hr.
+# DEFAULT (no --with-8pack-thinking) = fast structural gates only (verify +
+# bench + stress + soak, ~35-45 min). The long 8-pack is opt-in: new-model
+# promotion passes --with-8pack-thinking=both; a quick "does it boot / serve /
+# recall / soak" re-check needs no flag.
+#
+# verify-full is a HARD GATE: if the endpoint isn't functional we abort before
+# the run rather than benching a broken server. Bypass with --skip verify-full
+# (e.g. you just ran it while tuning); --resume skips it too.
+# NOTE: =off forces --no-thinking (all 8 packs think-OFF) for a clean
+# with/without-reasoning A/B — not the pack-default mixed mode. The =on / =both
+# leg only scores correctly if the server PARSES reasoning — boot the compose
+# with --reasoning on (REASONING=on) so <think> goes to reasoning_content, not
+# the graded answer.
 #
 # All artifacts land in results/rebench/<tag>/. Run twice on different models
 # (e.g. one Qwen leg, one Gemma leg) to assemble a matched-config head-to-head.
 #
 # Usage:
-#   bash scripts/rebench-full.sh                      # auto-tag from MODEL
+#   bash scripts/rebench-full.sh                      # fast structural gates only (no 8-pack)
+#   bash scripts/rebench-full.sh --with-8pack-thinking=both  # + full 8-pack off+on (promotion gate)
+#   bash scripts/rebench-full.sh --with-8pack-thinking=off   # + 8-pack, reasoning OFF only
+#   bash scripts/rebench-full.sh --with-8pack-thinking=on    # + 8-pack, reasoning ON only
 #   bash scripts/rebench-full.sh --tag qwen-int8      # explicit tag
-#   bash scripts/rebench-full.sh --skip soak,aider    # skip phases (CSV)
+#   bash scripts/rebench-full.sh --skip soak          # skip phases (CSV)
 #   bash scripts/rebench-full.sh --resume             # skip steps that have
 #                                                       artifacts already
 #
@@ -51,11 +71,6 @@
 #                       canonical stability matrix when validating new
 #                       compose paths.)
 #   SOAK_TURNS          passed through to soak-test.sh (default: 5)
-#   AIDER_TIMEOUT_PER_CASE
-#                       Per-case timeout (seconds) for aider-polyglot-30
-#                       (default: 3600 — bumped from benchlocal-cli's
-#                       default to avoid mid-batch kills on slower /
-#                       power-capped / single-card rigs).
 #   SAMPLING_FROM_SERVER
 #                       Set to 1 to inherit sampling from the serving config
 #                       instead of the pack's default temp=0. Passed through
@@ -64,11 +79,18 @@
 #                       (e.g. Qwopus temp=0.8). Tags runs as non-canonical.
 #   ENABLE_THINKING
 #                       Set to 1 to pass request-level enable_thinking=true
-#                       through bench.sh and both quality-test.sh invocations.
-#                       Required to measure reasoning-on models honestly.
+#                       through bench.sh. (The 8-pack quality passes are now
+#                       controlled by --with-8pack-thinking — =off forces
+#                       --no-thinking, =on forces --enable-thinking — not by
+#                       this env var. #338.)
 #   THINKING_MAX_TOKENS
-#                       Optional thinking budget forwarded to quality-test.sh
-#                       when ENABLE_THINKING=1.
+#                       Optional thinking budget forwarded to the 8-pack
+#                       reasoning-ON pass (--with-8pack-thinking=on|both).
+#   MAX_TOKENS          Optional completion budget forwarded to BOTH 8-pack
+#                       passes (off + on) as quality-test.sh --max-tokens —
+#                       overrides the per-pack ~1024 default. Raise for verbose
+#                       models that self-truncate the deterministic packs
+#                       (finish_reason=length before the final answer).
 #
 
 set -euo pipefail
@@ -87,6 +109,7 @@ TAG_OVERRIDE=""
 URL_FLAG=""
 MODEL_FLAG=""
 ENGINE_FLAG=""
+WITH_8PACK=""   # #338: 8-pack quality opt-in — "" (omit)=skip | off | on | both
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip)     SKIP_CSV="$2"; shift 2 ;;
@@ -95,6 +118,8 @@ while [[ $# -gt 0 ]]; do
     --url)      URL_FLAG="$2"; shift 2 ;;
     --model)    MODEL_FLAG="$2"; shift 2 ;;
     --engine)   ENGINE_FLAG="$2"; shift 2 ;;
+    --with-8pack-thinking)    WITH_8PACK="off"; shift ;;
+    --with-8pack-thinking=*)  WITH_8PACK="${1#*=}"; shift ;;
     -h|--help)
       sed -n '2,55p' "$0"
       exit 0
@@ -124,6 +149,18 @@ skip_step() {
   for s in "${SKIPS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
   return 1
 }
+
+# --- #338: 8-pack quality is opt-in via --with-8pack-thinking[=off|on|both] -
+# Default (flag omitted) = skip both quality passes (fast structural gates only).
+RUN_8PACK_OFF=0
+RUN_8PACK_ON=0
+case "${WITH_8PACK}" in
+  "")    ;;                                  # omitted → skip the 8-pack entirely
+  off)   RUN_8PACK_OFF=1 ;;
+  on)    RUN_8PACK_ON=1 ;;
+  both)  RUN_8PACK_OFF=1; RUN_8PACK_ON=1 ;;
+  *) echo "✗ --with-8pack-thinking must be off|on|both (got: '${WITH_8PACK}')" >&2; exit 2 ;;
+esac
 
 # --- endpoint + model auto-detect ------------------------------------------
 # Source preflight if available; it sets URL + CONTAINER from running compose.
@@ -182,6 +219,7 @@ echo "  model:       $MODEL"
 echo "  out dir:     $OUT_DIR"
 echo "  resume:      $RESUME"
 echo "  skips:       ${SKIP_CSV:-(none)}"
+echo "  8-pack:      ${WITH_8PACK:-(skipped — opt-in via --with-8pack-thinking=off|on|both)}"
 echo "  hermes env:  BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=${BENCHLOCAL_HERMES_RESOLVE_LOCALHOST:-0}"
 echo "  thinking:    ${ENABLE_THINKING:-0}${THINKING_MAX_TOKENS:+ (max_tokens=$THINKING_MAX_TOKENS)}"
 echo "==============================================================="
@@ -247,13 +285,14 @@ run_step() {
   fi
   echo "[$name] running…"
   local t0=$(date +%s)
-  if "$@" > "$OUT_DIR/$name.log" 2>&1; then
-    local dt=$(( $(date +%s) - t0 ))
-    record_timing "$name" "$dt"
+  # tee: stream live to console (so benchlocal-cli [N/M] progress is visible)
+  # AND capture to the per-step log. rc from PIPESTATUS[0], not tee's exit.
+  "$@" 2>&1 | tee "$OUT_DIR/$name.log"
+  local rc=${PIPESTATUS[0]} dt=$(( $(date +%s) - t0 ))
+  record_timing "$name" "$dt"
+  if [[ $rc -eq 0 ]]; then
     echo "[$name] ✓ ${dt}s — log: $OUT_DIR/$name.log"
   else
-    local rc=$? dt=$(( $(date +%s) - t0 ))
-    record_timing "$name" "$dt"
     echo "[$name] ✗ ${dt}s — failed (rc=$rc) — log: $OUT_DIR/$name.log" >&2
     return $rc
   fi
@@ -270,6 +309,19 @@ snapshot_quality_json() {
   fi
 }
 
+# --- step 0: verify-full (fail-fast functional preflight) -------------------
+# ~2 min smoke (boots / serves / tool-calls / streams / coherent output). If the
+# endpoint isn't functional there's no point spending hours on bench → soak, so
+# we ABORT here. Skipped cleanly by --skip verify-full or --resume (run_step
+# returns 0 in both cases → no abort); only a real run-and-fail aborts.
+if ! URL="$URL" MODEL="$MODEL" \
+     run_step verify-full "$OUT_DIR/verify-full.log" \
+       bash "$ROOT_DIR/scripts/verify-full.sh"; then
+  echo "[rebench] ✗ verify-full failed — endpoint not functional; aborting before the multi-hour run." >&2
+  echo "          Fix the server, or re-run with --skip verify-full to bypass the preflight." >&2
+  exit 1
+fi
+
 # --- step 1: bench ----------------------------------------------------------
 URL="$URL" MODEL="$MODEL" RUNS="${RUNS:-3}" WARMUPS="${WARMUPS:-1}" \
   ENABLE_THINKING="${ENABLE_THINKING:-0}" \
@@ -281,16 +333,39 @@ URL="$URL" MODEL="$MODEL" \
   run_step verify-stress "$OUT_DIR/verify-stress.log" \
     bash "$ROOT_DIR/scripts/verify-stress.sh" || true
 
-# --- step 3: quality-test --full --------------------------------------------
-URL="$URL" MODEL="$MODEL" \
-  SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
-  ENABLE_THINKING="${ENABLE_THINKING:-0}" \
-  THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}" \
-  run_step quality-full "$OUT_DIR/quality-full.log" \
-    bash "$ROOT_DIR/scripts/quality-test.sh" --full --sandbox-log-dir "$OUT_DIR"
-snapshot_quality_json "$OUT_DIR/quality-full.json"
+# --- step 3: 8-pack quality, reasoning OFF (opt-in: --with-8pack-thinking=off|both) --
+# Forces --no-thinking (all 8 packs think-OFF) for a clean with/without-reasoning
+# A/B against step 4 — NOT the pack-default mixed mode. Skipped unless opted in. #338.
+if [[ "$RUN_8PACK_OFF" == "1" ]]; then
+  URL="$URL" MODEL="$MODEL" \
+    SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
+    MAX_TOKENS="${MAX_TOKENS:-}" \
+    NO_THINKING=1 \
+    run_step quality-full "$OUT_DIR/quality-full.log" \
+      bash "$ROOT_DIR/scripts/quality-test.sh" --full --no-thinking --sandbox-log-dir "$OUT_DIR"
+  snapshot_quality_json "$OUT_DIR/quality-full.json"
+else
+  echo "[quality-full] skipped — 8-pack is opt-in (pass --with-8pack-thinking=off|both)"
+fi
 
-# --- step 4: soak-test ------------------------------------------------------
+# --- step 4: 8-pack quality, reasoning ON (opt-in: --with-8pack-thinking=on|both) --
+# enable_thinking is sent per-request via benchlocal --enable-thinking. Scores
+# correctly only if the server PARSES reasoning (boot --reasoning on), else
+# <think> leaks into the graded answer. Skipped unless opted in. #338.
+if [[ "$RUN_8PACK_ON" == "1" ]]; then
+  URL="$URL" MODEL="$MODEL" \
+    SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
+    THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}" \
+    MAX_TOKENS="${MAX_TOKENS:-}" \
+    ENABLE_THINKING=1 \
+    run_step quality-thinking "$OUT_DIR/quality-full-thinking.log" \
+      bash "$ROOT_DIR/scripts/quality-test.sh" --full --enable-thinking --sandbox-log-dir "$OUT_DIR"
+  snapshot_quality_json "$OUT_DIR/quality-full-thinking.json"
+else
+  echo "[quality-thinking] skipped — 8-pack is opt-in (pass --with-8pack-thinking=on|both)"
+fi
+
+# --- step 5: soak-test ------------------------------------------------------
 URL="$URL" MODEL="$MODEL" \
   SOAK_MODE="${SOAK_MODE:-fresh}" \
   SOAK_OUTPUT="$OUT_DIR/soak-artifacts" \
@@ -298,27 +373,6 @@ URL="$URL" MODEL="$MODEL" \
   TURNS="${SOAK_TURNS:-5}" \
   run_step soak "$OUT_DIR/soak.log" \
     bash "$ROOT_DIR/scripts/soak-test.sh"
-
-# --- step 5: aider-polyglot-30 ----------------------------------------------
-# Default to 3600s per-case for aider on slower/single-card rigs. The 30
-# multi-turn coding exercises can run > 45 min on power-capped or single-card
-# setups; benchlocal-cli will kill mid-batch if its internal default fires.
-# Override via env: AIDER_TIMEOUT_PER_CASE=7200 bash scripts/rebench-full.sh
-AIDER_TIMEOUT_PER_CASE="${AIDER_TIMEOUT_PER_CASE:-3600}"
-# ik_llama reports its model id as the full GGUF path (leading + embedded
-# slashes); litellm inside the aider sandbox can't route a slash-laden model
-# id (#15/#16 family) → every exercise errors before the model → 0/30.
-# Mainline llama.cpp already reports a basename. Strip to basename for the
-# aider/litellm path — the server accepts any id (serves the one loaded model).
-AIDER_MODEL="${MODEL##*/}"
-URL="$URL" MODEL="$AIDER_MODEL" \
-  SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}" \
-  ENABLE_THINKING="${ENABLE_THINKING:-0}" \
-  THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}" \
-  run_step aider-polyglot "$OUT_DIR/aider-polyglot.log" \
-    bash "$ROOT_DIR/scripts/quality-test.sh" --pack aider-polyglot-30 \
-      --timeout-per-case "$AIDER_TIMEOUT_PER_CASE" --sandbox-log-dir "$OUT_DIR"
-snapshot_quality_json "$OUT_DIR/aider-polyglot.json"
 
 # --- final GPU state snapshot ----------------------------------------------
 nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu \
@@ -348,9 +402,13 @@ echo
 echo "Headline pulls (grep through the logs):"
 echo "  TPS:           grep -E 'mean=|decode_TPS' $OUT_DIR/bench.log"
 echo "  verify-stress: tail -5 $OUT_DIR/verify-stress.log"
-echo "  quality:       grep '^Quality:' $OUT_DIR/quality-full.log"
+[[ -f "$OUT_DIR/quality-full.log" ]] && \
+  echo "  quality(off):  grep 'TOTAL' $OUT_DIR/quality-full.log"
+[[ -f "$OUT_DIR/quality-full-thinking.log" ]] && \
+  echo "  quality(on):   grep 'TOTAL' $OUT_DIR/quality-full-thinking.log"
+[[ "$RUN_8PACK_OFF$RUN_8PACK_ON" == "00" ]] && \
+  echo "  8-pack:        skipped (opt-in: re-run with --with-8pack-thinking=off|on|both)"
 echo "  soak:          grep -E 'verdict|silent_empty|p50_decode' $OUT_DIR/soak.log"
-echo "  aider:         grep 'aider-polyglot-30' $OUT_DIR/aider-polyglot.log"
 echo
 echo "To submit your numbers (review then PR):"
 echo "  bash scripts/submit-bench.sh --tag $TAG"

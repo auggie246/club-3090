@@ -70,6 +70,16 @@ preflight_gpu() {
   fi
   echo "[preflight] gpu:     ${gpu_count}× detected"
   echo "$gpu_lines" | sed 's/^/[preflight]            /'
+  # Cross-rig friendliness: surface a hint when 4090 / 5090 cards are
+  # detected. Composes run cross-rig but per-class gotchas (ctx derate,
+  # VRAM envelope, SM-gated kernels) live in the FAQ — easier to catch
+  # the hint here than for a user to discover it after a confusing run.
+  if echo "$gpu_lines" | grep -qE "RTX 4090"; then
+    echo "[preflight] note:    4090 detected → docs/FAQ.md#can-i-use-a-4090-instead-of-a-3090 (ctx ceiling ~15–20% lower than headless 3090)"
+  fi
+  if echo "$gpu_lines" | grep -qE "RTX 5090"; then
+    echo "[preflight] note:    5090 detected → docs/FAQ.md#can-i-use-a-5090 (32 GB envelope unlocks single-card configs)"
+  fi
   # nvidia-container-toolkit check — needed for docker GPU access.
   if ! docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia'; then
     echo "[preflight] WARN:  Docker doesn't list the 'nvidia' runtime. If 'docker compose up' fails" >&2
@@ -180,9 +190,11 @@ _preflight_hardware_suggestions() {
   echo "[preflight] Suggested next steps:" >&2
   echo "[preflight]   - Pick a compose that matches the detected GPU VRAM/topology." >&2
   if [[ "$variant" == vllm/gemma-mtp-tp1 ]]; then
-    echo "[preflight]   - On 2x 24 GB cards, use:  bash scripts/switch.sh vllm/gemma-mtp" >&2
+    echo "[preflight]   - vllm/gemma-mtp-tp1 is DEPRECATED (no fp8 KV path for Gemma 4 on Ampere sm_86)." >&2
+    echo "[preflight]   - Single 24 GB card, use:  bash scripts/switch.sh beellama/gemma-dflash" >&2
+    echo "[preflight]   - On 2x 24 GB cards, use:  bash scripts/switch.sh vllm/gemma-bf16-mtp" >&2
   fi
-  echo "[preflight]   - On a single 24 GB card, start with:  bash scripts/switch.sh vllm/default" >&2
+  echo "[preflight]   - On a single 24 GB card, start with:  bash scripts/switch.sh beellama/dflash  (single-card default)" >&2
   echo "[preflight]   - For maximum compatibility, use:  bash scripts/switch.sh llamacpp/default" >&2
   echo "[preflight]   - Explicit bypass:  bash scripts/switch.sh --force ${variant:-<variant>}" >&2
 }
@@ -371,6 +383,80 @@ preflight_compose_hardware() {
   fi
 
   echo "[preflight] hardware: ${variant:-compose} TP=${tp} requires ${min_gpu_count} GPU(s), >=${min_vram_gb} GB each${sm_label}; ${selected_count} visible GPU(s) detected"
+  return 0
+}
+
+# preflight_lmcache_ram <compose_file>
+# Guards LMCache composes against over-allocating CPU RAM for the L1 KV cache.
+# Runs REGARDLESS of --force — host-choke prevention is NOT optional: an over-sized
+# --l1-size-gb (100 GB on a 94 GB rig) once exhausted RAM and forced a server reboot
+# (club-3090 #133). No-op for composes without an
+# `LMCache-l1-gb` metadata header, so it's safe to call on every launch.
+preflight_lmcache_ram() {
+  local compose_file="$1"
+  [[ -f "$compose_file" ]] || return 0
+  declare -F compose_meta_get >/dev/null 2>&1 || return 0
+
+  local l1_hdr
+  l1_hdr="$(compose_meta_get "$compose_file" lmcache-l1-gb || true)"
+  [[ -z "$l1_hdr" ]] && return 0   # not an LMCache compose
+
+  # Env override (LMCACHE_L1_GB) wins over the header default — the guard must track
+  # what the container will actually request.
+  local l1="${LMCACHE_L1_GB:-$l1_hdr}"
+  if ! [[ "$l1" =~ ^[0-9]+$ ]]; then
+    echo "[preflight] WARN:  LMCACHE_L1_GB='${l1}' is not an integer; skipping LMCache RAM check." >&2
+    return 0
+  fi
+
+  local reserve=28   # GB headroom for the vLLM process (27B @262K TP=2) + OS
+  local need=$(( l1 + reserve ))
+
+  if [[ ! -r /proc/meminfo ]]; then
+    echo "[preflight] WARN:  cannot read /proc/meminfo; skipping LMCache RAM check." >&2
+    return 0
+  fi
+  local kb avail_gb
+  kb="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)"
+  avail_gb=$(( kb / 1024 / 1024 ))
+
+  if (( avail_gb < need )); then
+    local suggest=$(( avail_gb > reserve ? avail_gb - reserve : 8 ))
+    echo "[preflight] ERROR: LMCache --l1-size-gb=${l1} needs ~${need} GB RAM (l1 ${l1} + ~${reserve} GB vLLM+OS), but only ${avail_gb} GB is available." >&2
+    echo "            (Guard against the l1-too-large host-OOM: a 100 GB cache on this 94 GB rig forced a reboot.)" >&2
+    echo "            Fix: lower the cache — LMCACHE_L1_GB=${suggest} bash scripts/switch.sh ... — or free RAM." >&2
+    return 1
+  fi
+
+  # Soft: SHM must be >= l1 or LMCache silently falls back to slow pickle serialization.
+  local shm_gb
+  shm_gb="$(grep -oE 'shm_size:[[:space:]]*"?[0-9]+' "$compose_file" | grep -oE '[0-9]+' | head -1 || true)"
+  if [[ -n "$shm_gb" ]] && (( shm_gb < l1 )); then
+    echo "[preflight] WARN:  shm_size (${shm_gb}g) < LMCACHE_L1_GB (${l1}) — LMCache SHM will fall back to slow pickle." >&2
+    echo "            Fix: raise shm_size in the compose to >= ${l1}g." >&2
+  fi
+
+  echo "[preflight] lmcache: RAM ok — l1=${l1} GB needs ~${need} GB, ${avail_gb} GB available"
+
+  # L2 disk tier (optional) — soft-warn on low free space at the L2 host dir. L2 is OFF unless
+  # LMCACHE_L2=1 or LMCACHE_L2_ADAPTER is set; it grows ~33 GB per full 262K session (~131 KB/token,
+  # measured) and is unbounded, so a small disk can fill. Warn, don't fail — the user opted in.
+  if [[ -n "${LMCACHE_L2_ADAPTER:-}" || "${LMCACHE_L2:-0}" == "1" ]]; then
+    local l2dir="${LMCACHE_KV_DIR:-}"
+    if [[ -z "$l2dir" ]]; then
+      # default host dir = repo-root lmcache-kv/ (this compose sits 6 levels below the repo root)
+      l2dir="$(cd "$(dirname "$compose_file")/../../../../../.." 2>/dev/null && pwd)/lmcache-kv"
+    fi
+    local chkdir="$l2dir"; [[ -d "$chkdir" ]] || chkdir="$(dirname "$l2dir")"
+    local l2_avail_gb
+    l2_avail_gb="$(df -BG "$chkdir" 2>/dev/null | awk 'NR==2{gsub(/G/,"",$4); print $4}')"
+    if [[ -n "$l2_avail_gb" ]] && (( l2_avail_gb < 50 )); then
+      echo "[preflight] WARN:  LMCache L2 enabled, only ${l2_avail_gb} GB free at ${l2dir}." >&2
+      echo "            L2 is unbounded and grows ~33 GB per full 262K session — free space or point LMCACHE_L2_ADAPTER at a larger SSD." >&2
+    elif [[ -n "$l2_avail_gb" ]]; then
+      echo "[preflight] lmcache: L2 disk ok — ${l2_avail_gb} GB free at ${l2dir}"
+    fi
+  fi
   return 0
 }
 
@@ -582,6 +668,226 @@ preflight_hf_token() {
 #
 # Hard error (returns 1) — refuses to proceed if a required model dir is missing.
 # Skip via: PREFLIGHT_NO_COMPOSE_DEPS=1
+_preflight_compose_model_dir() {
+  local compose_file="$1"
+  local model_dir
+
+  if [[ -n "${MODEL_DIR:-}" ]]; then
+    model_dir="${MODEL_DIR}"
+  else
+    local root_dir="${ROOT_DIR:-}"
+    if [[ -z "$root_dir" ]]; then
+      root_dir="$(cd -- "${_PREFLIGHT_DIR}/.." && pwd)"
+    fi
+    model_dir="${root_dir}/models-cache"
+    echo "[preflight] MODEL_DIR not set — defaulting to ${model_dir}" >&2
+  fi
+
+  # Resolve relative paths against the compose location. Do not require the
+  # directory to already exist; this function is often called before download.
+  if [[ "$model_dir" == ../* ]] || [[ "$model_dir" == ./* ]]; then
+    local compose_dir
+    compose_dir="$(cd -- "$(dirname -- "$compose_file")" && pwd)"
+    model_dir="${compose_dir}/${model_dir}"
+  fi
+  printf '%s' "$model_dir"
+}
+
+_preflight_compose_path_default() {
+  local value="$1"
+  value="$(_preflight_trim "$value")"
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  value="${value%,}"
+
+  # Compose files commonly use ${VAR:-default/path}. Presence checks should use
+  # the path the compose will use by default; explicit env overrides are handled
+  # by callers for user-facing knobs such as GGUF_FILE.
+  value="$(printf '%s' "$value" | sed -E 's#\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}#\1#g')"
+  value="$(printf '%s' "$value" | sed -E 's#\$\{MODEL_DIR[^}]*\}/?##g')"
+  value="${value#/models/}"
+  value="${value#/root/.cache/huggingface/}"
+  # Strip a trailing `}` left when a path is the DEFAULT inside an outer
+  # ${VAR:-/root/.cache/huggingface/<path>} — the path grep anchors mid-expansion
+  # so it captures `<path>}`. A real model subdir never ends in `}`.
+  value="${value%\}}"
+  printf '%s' "$value"
+}
+
+_preflight_compose_vllm_subdir() {
+  local value
+  value="$(_preflight_compose_path_default "$1")"
+  value="${value%%/*}"
+  printf '%s' "$value"
+}
+
+_preflight_missing_rel() {
+  local model_dir="$1"
+  local item="$2"
+  local item_path="${item%% (*}"
+  local rel="${item_path#${model_dir}/}"
+  printf '%s' "$rel"
+}
+
+_preflight_list_has() {
+  local needle="$1"
+  shift
+  local value
+  for value in "$@"; do
+    [[ "$value" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+_preflight_hf_cli_available() {
+  command -v hf >/dev/null 2>&1 || command -v huggingface-cli >/dev/null 2>&1
+}
+
+_preflight_setup_root() {
+  if [[ -n "${ROOT_DIR:-}" ]]; then
+    printf '%s' "$ROOT_DIR"
+  else
+    cd -- "${_PREFLIGHT_DIR}/.." && pwd
+  fi
+}
+
+_preflight_weights_reader() {
+  local root_dir
+  root_dir="$(_preflight_setup_root)"
+  printf '%s' "${root_dir}/scripts/lib/profiles/weights.py"
+}
+
+_preflight_weight_recipe_for_path() {
+  local rel="$1"
+  local reader env_lines
+  reader="$(_preflight_weights_reader)"
+  command -v python3 >/dev/null 2>&1 || return 1
+  [[ -f "$reader" ]] || return 1
+  env_lines="$(python3 "$reader" lookup "$rel" 2>/dev/null)" || return 1
+  eval "$env_lines"
+}
+
+_preflight_weight_recipe_for_key() {
+  local key="$1"
+  local reader env_lines
+  reader="$(_preflight_weights_reader)"
+  command -v python3 >/dev/null 2>&1 || return 1
+  [[ -f "$reader" ]] || return 1
+  env_lines="$(python3 "$reader" entry "$key" 2>/dev/null)" || return 1
+  eval "$env_lines"
+}
+
+_preflight_weight_hf_command() {
+  local model_dir_expr="${1:-\$MODEL_DIR}"
+  [[ -n "${WEIGHT_REPO:-}" ]] || return 1
+  # Mirror an optional revision pin (#319) so the manual fallback fetches the
+  # same bytes setup.sh would. Unset -> no flag (track HEAD).
+  local rev=""
+  [[ -n "${WEIGHT_REVISION:-}" ]] && rev=" --revision ${WEIGHT_REVISION}"
+  if [[ -n "${WEIGHT_FILES:-}" ]]; then
+    printf 'hf download %s %s%s --local-dir %s/%s' \
+      "$WEIGHT_REPO" "$WEIGHT_FILES" "$rev" "$model_dir_expr" "$WEIGHT_SUBDIR"
+  else
+    printf 'hf download %s%s --local-dir %s/%s' \
+      "$WEIGHT_REPO" "$rev" "$model_dir_expr" "$WEIGHT_SUBDIR"
+  fi
+}
+
+_preflight_weight_setup_command() {
+  [[ -n "${WEIGHT_SETUP_MODEL:-}" ]] || return 1
+  if [[ -n "${WEIGHT_SETUP_ENV:-}" ]]; then
+    printf '%s bash scripts/setup.sh %s' "$WEIGHT_SETUP_ENV" "$WEIGHT_SETUP_MODEL"
+  else
+    printf 'bash scripts/setup.sh %s' "$WEIGHT_SETUP_MODEL"
+  fi
+}
+
+_preflight_weight_hint_keys() {
+  local model_dir="$1"
+  shift
+  local item rel key
+  local keys=()
+
+  for item in "$@"; do
+    rel="$(_preflight_missing_rel "$model_dir" "$item")"
+    if _preflight_weight_recipe_for_path "$rel"; then
+      key="$WEIGHT_KEY"
+      if ! _preflight_list_has "$key" "${keys[@]}"; then
+        keys+=("$key")
+        printf '%s\n' "$key"
+      fi
+    fi
+  done
+}
+
+_preflight_print_weight_hints() {
+  local model_dir="$1"
+  shift
+  local key any_hint=0 setup_cmd hf_cmd
+
+  echo "[preflight]   If weights are already elsewhere, export MODEL_DIR=/path/to/models and retry." >&2
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    _preflight_weight_recipe_for_key "$key" || continue
+    any_hint=1
+    echo "[preflight]" >&2
+    echo "[preflight]   ${WEIGHT_LABEL:-$key}:" >&2
+    if hf_cmd="$(_preflight_weight_hf_command '$MODEL_DIR' 2>/dev/null)"; then
+      echo "[preflight]     ${hf_cmd}" >&2
+    fi
+    if setup_cmd="$(_preflight_weight_setup_command 2>/dev/null)"; then
+      echo "[preflight]     or: MODEL_DIR=${model_dir} ${setup_cmd}" >&2
+    fi
+    if [[ -n "${WEIGHT_MANUAL_NOTE:-}" ]]; then
+      echo "[preflight]     note: ${WEIGHT_MANUAL_NOTE}" >&2
+    fi
+  done < <(_preflight_weight_hint_keys "$model_dir" "$@")
+
+  if [[ "$any_hint" != "1" ]]; then
+    echo "[preflight]   Check the compose header for its model-specific hf download command." >&2
+  fi
+}
+
+_preflight_offer_fetch_missing() {
+  local compose_file="$1"
+  local model_dir="$2"
+  shift 2
+
+  [[ "${PREFLIGHT_NO_FETCH_PROMPT:-0}" != "1" ]] || return 1
+  [[ -t 0 && -t 1 ]] || return 1
+  _preflight_hf_cli_available || return 1
+
+  local key setup_cmd answer root_dir
+  local keys=()
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    _preflight_weight_recipe_for_key "$key" || continue
+    [[ -n "${WEIGHT_SETUP_MODEL:-}" ]] || continue
+    [[ -n "${WEIGHT_REPO:-}" ]] || continue
+    if ! _preflight_list_has "$key" "${keys[@]}"; then
+      keys+=("$key")
+    fi
+  done < <(_preflight_weight_hint_keys "$model_dir" "$@")
+
+  [[ ${#keys[@]} -gt 0 ]] || return 1
+
+  echo "[preflight]" >&2
+  read -r -p "[preflight] Fetch missing weights now with scripts/setup.sh? [y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || return 1
+
+  root_dir="$(_preflight_setup_root)"
+  for key in "${keys[@]}"; do
+    _preflight_weight_recipe_for_key "$key" || continue
+    local env_args=("MODEL_DIR=${model_dir}" "WEIGHT_KEY=${key}")
+    echo "[preflight] fetching ${WEIGHT_LABEL:-$key} ..." >&2
+    env "${env_args[@]}" bash "${root_dir}/scripts/setup.sh" "${WEIGHT_SETUP_MODEL}"
+  done
+
+  PREFLIGHT_NO_FETCH_PROMPT=1 preflight_compose_deps "$compose_file"
+}
+
 preflight_compose_deps() {
   local compose_file="$1"
   if [[ "${PREFLIGHT_NO_COMPOSE_DEPS:-0}" == "1" ]]; then
@@ -592,76 +898,127 @@ preflight_compose_deps() {
     return 1
   fi
 
-  local model_dir="${MODEL_DIR:-../../../../models-cache}"
-  # Resolve relative to repo root (compose mounts use ${MODEL_DIR:-../../../../models-cache})
-  if [[ "$model_dir" == ../* ]] || [[ "$model_dir" == ./* ]]; then
-    model_dir="$(cd "${ROOT_DIR:-$(dirname "$0")/..}" && cd "$(dirname "$compose_file")" && cd "$model_dir" 2>/dev/null && pwd)"
-  fi
+  local model_dir
+  model_dir="$(_preflight_compose_model_dir "$compose_file")"
+
+  local compose_files=("$compose_file")
+  local compose_dir extends_file
+  compose_dir="$(cd -- "$(dirname -- "$compose_file")" && pwd)"
+  while IFS= read -r extends_file; do
+    extends_file="$(_preflight_trim "$extends_file")"
+    extends_file="${extends_file#\"}"
+    extends_file="${extends_file%\"}"
+    extends_file="${extends_file#'}"
+    extends_file="${extends_file%'}"
+    [[ -n "$extends_file" ]] || continue
+    [[ "$extends_file" == /* ]] || extends_file="${compose_dir}/${extends_file}"
+    [[ -f "$extends_file" ]] && compose_files+=("$extends_file")
+  done < <(grep -hE '^[[:space:]]*file:[[:space:]]*[^#[:space:]]+' "$compose_file" \
+    | sed -E 's/^[[:space:]]*file:[[:space:]]*//' || true)
 
   local missing=()
-  local hint_dflash=0
-  local hint_mtp=0
-  local hint_gguf=0
 
   # Engine detection: llama.cpp composes mount ${MODEL_DIR}:/models and pass
-  # `-m /models/<path>`; vLLM composes mount ${MODEL_DIR}:/root/.cache/huggingface
-  # and pass `--model /root/.cache/huggingface/<subdir>`.
+  # `-m /models/<path>` or `--model /models/<path>`; vLLM composes mount
+  # ${MODEL_DIR}:/root/.cache/huggingface and pass
+  # `/root/.cache/huggingface/<subdir>`.
   local is_llamacpp=0
-  if grep -qE 'image:.*ggml-org/llama\.cpp' "$compose_file"; then
+  # beellama.cpp (ghcr.io/{anbeeld/beellama.cpp,noonghunna/beellama-cpp}) is a
+  # llama.cpp-family server: it mounts ${MODEL_DIR}:/models and passes
+  # `-m /models/<path>` (+ `--spec-draft-model /models/<path>` for DFlash/MTP),
+  # so it belongs on the GGUF presence path, NOT the vLLM HF-cache path.
+  if grep -qhE 'image:.*(ggml-org/llama\.cpp|ikawrakow/ik-llama|beellama)' "${compose_files[@]}"; then
     is_llamacpp=1
   fi
 
   if [[ $is_llamacpp -eq 1 ]]; then
-    # Scan for `-m /models/<path>` and `--mmproj /models/<path>` to learn what
-    # the compose actually expects. Falls back to the canonical defaults from
-    # docker-compose.yml if the variable expansion isn't grep-resolvable.
-    local gguf_in_container mmproj_in_container
-    gguf_in_container=$(grep -oE '\-m[[:space:]]+/models/[^[:space:]]+' "$compose_file" \
-      | head -1 | awk '{print $2}' | sed 's|^/models/||')
-    mmproj_in_container=$(grep -oE -- '--mmproj[[:space:]]+/models/[^[:space:]]+' "$compose_file" \
-      | head -1 | awk '{print $2}' | sed 's|^/models/||')
+    local gguf_paths=()
+    local draft_paths=()
+    local mmproj_paths=()
+    local token path
 
-    # Strip ${VAR:-default} expansion: take the default after `:-` if present.
-    gguf_in_container="${gguf_in_container//\$\{GGUF_FILE:-/}"
-    gguf_in_container="${gguf_in_container%\}}"
-    mmproj_in_container="${mmproj_in_container//\$\{MMPROJ_FILE:-/}"
-    mmproj_in_container="${mmproj_in_container%\}}"
+    # Target weights: -m / --model
+    while IFS= read -r token; do
+      path="$(_preflight_compose_path_default "$token")"
+      [[ -n "$path" ]] && gguf_paths+=("$path")
+    done < <(grep -hoE -- '(^|[[:space:]])(-m|--model)[[:space:]]+/models/[^[:space:]]+' "${compose_files[@]}" \
+      | awk '{print $NF}' || true)
 
-    [[ -z "$gguf_in_container" ]]   && gguf_in_container="qwen3.6-27b-gguf/unsloth-q3kxl/Qwen3.6-27B-UD-Q3_K_XL.gguf"
-    [[ -z "$mmproj_in_container" ]] && mmproj_in_container="qwen3.6-27b-gguf/mmproj-F16.gguf"
+    # Speculative drafter: beellama --spec-draft-model, llama.cpp -md/--model-draft.
+    # A missing drafter GGUF otherwise surfaces only as a cryptic in-container
+    # "failed to open GGUF file" crash (see #288 beellama onboarding reports).
+    while IFS= read -r token; do
+      path="$(_preflight_compose_path_default "$token")"
+      [[ -n "$path" ]] && draft_paths+=("$path")
+    done < <(grep -hoE -- '(^|[[:space:]])(--spec-draft-model|--model-draft|-md)[[:space:]]+/models/[^[:space:]]+' "${compose_files[@]}" \
+      | awk '{print $NF}' || true)
 
-    if [[ -n "${GGUF_FILE:-}" ]];   then gguf_in_container="$GGUF_FILE";     fi
-    if [[ -n "${MMPROJ_FILE:-}" ]]; then mmproj_in_container="$MMPROJ_FILE"; fi
+    while IFS= read -r token; do
+      path="$(_preflight_compose_path_default "$token")"
+      [[ -n "$path" ]] && mmproj_paths+=("$path")
+    done < <(grep -hoE -- '(^|[[:space:]])--mmproj[[:space:]]+/models/[^[:space:]]+' "${compose_files[@]}" \
+      | awk '{print $NF}' || true)
 
-    if [[ ! -f "${model_dir}/${gguf_in_container}" ]]; then
-      missing+=("${gguf_in_container} (llama.cpp GGUF weights)")
-      hint_gguf=1
+    # Env overrides mirror the compose knobs (GGUF_FILE / DRAFT_FILE / MMPROJ_FILE),
+    # each replacing only its own path class.
+    if [[ -n "${GGUF_FILE:-}" ]]; then
+      gguf_paths=("$GGUF_FILE")
     fi
-    if [[ ! -f "${model_dir}/${mmproj_in_container}" ]]; then
-      missing+=("${mmproj_in_container} (vision projector)")
-      hint_gguf=1
+    if [[ -n "${DRAFT_FILE:-}" && ${#draft_paths[@]} -gt 0 ]]; then
+      draft_paths=("$DRAFT_FILE")
     fi
+    if [[ -n "${MMPROJ_FILE:-}" && ${#mmproj_paths[@]} -gt 0 ]]; then
+      mmproj_paths=("$MMPROJ_FILE")
+    fi
+
+    for path in "${gguf_paths[@]}"; do
+      if [[ ! -f "${model_dir}/${path}" ]]; then
+        missing+=("${model_dir}/${path} (llama.cpp GGUF weights)")
+      fi
+    done
+    for path in "${draft_paths[@]}"; do
+      if [[ ! -f "${model_dir}/${path}" ]]; then
+        missing+=("${model_dir}/${path} (speculative drafter GGUF)")
+      fi
+    done
+    for path in "${mmproj_paths[@]}"; do
+      if [[ ! -f "${model_dir}/${path}" ]]; then
+        missing+=("${model_dir}/${path} (vision projector)")
+      fi
+    done
   else
-    # vLLM path — scan for --speculative-config blocks (DFlash draft, MTP head).
-    # The compose paths reference the in-container path /root/.cache/huggingface/<subdir>;
-    # the host path is ${MODEL_DIR}/<subdir> (set via the volumes: block).
-    if grep -qE '"model":[[:space:]]*"/root/.cache/huggingface/qwen3.6-27b-dflash"' "$compose_file"; then
-      if [[ ! -f "${model_dir}/qwen3.6-27b-dflash/config.json" ]]; then
-        missing+=("qwen3.6-27b-dflash (DFlash draft model)")
-        hint_dflash=1
-      fi
-    fi
-    if grep -qE '"model":[[:space:]]*"/root/.cache/huggingface/qwen3.6-27b-mtp-head"' "$compose_file"; then
-      if [[ ! -f "${model_dir}/qwen3.6-27b-mtp-head/config.json" ]]; then
-        missing+=("qwen3.6-27b-mtp-head (MTP draft head)")
-        hint_mtp=1
-      fi
-    fi
+    local seen_subdirs=" "
+    local subdir
 
-    # vLLM main model — every vLLM compose on this stack mounts AutoRound INT4.
-    if [[ ! -f "${model_dir}/qwen3.6-27b-autoround-int4/config.json" ]]; then
-      missing+=("qwen3.6-27b-autoround-int4 (main model)")
-    fi
+    # vLLM path — collect every in-container HF model path the compose names:
+    # main `--model` entries and JSON `--speculative-config` draft models.
+    while IFS= read -r token; do
+      subdir="$(_preflight_compose_vllm_subdir "$token")"
+      [[ -n "$subdir" ]] || continue
+      if [[ "$seen_subdirs" != *" ${subdir} "* ]]; then
+        seen_subdirs+="${subdir} "
+        if [[ ! -f "${model_dir}/${subdir}/config.json" ]]; then
+          missing+=("${model_dir}/${subdir}/config.json (HF model)")
+        fi
+      fi
+    # Char-class must NOT exclude `:` or `}` — model paths can be
+    # `/root/.cache/huggingface/${MODEL_SUBDIR:-default}` (vLLM) and excluding
+    # those truncated the token to `${MODEL_SUBDIR` before _preflight_compose_path_default
+    # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
+    # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
+    # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
+    done < <(grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
+
+    # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
+    # /models/target and /models/drafter instead of using the HF cache mount.
+    while IFS= read -r token; do
+      path="$(_preflight_compose_path_default "$token")"
+      path="${path%%:*}"
+      [[ -n "$path" ]] || continue
+      if [[ ! -e "${model_dir}/${path}" ]]; then
+        missing+=("${model_dir}/${path} (MODEL_DIR volume path)")
+      fi
+    done < <(grep -hoE '\$\{MODEL_DIR[^}]*\}/[^"[:space:]]+' "${compose_files[@]}" || true)
   fi
 
   if [[ ${#missing[@]} -eq 0 ]]; then
@@ -670,29 +1027,13 @@ preflight_compose_deps() {
 
   echo "[preflight] ERROR: compose '$compose_file' expects model files that aren't on host." >&2
   for item in "${missing[@]}"; do
-    echo "[preflight]   missing: ${model_dir}/${item}" >&2
+    echo "[preflight]   missing: ${item}" >&2
   done
   echo "[preflight]" >&2
   echo "[preflight] Fix:" >&2
-  if [[ $hint_gguf -eq 1 ]]; then
-    echo "[preflight]   hf download unsloth/Qwen3.6-27B-GGUF \\" >&2
-    echo "[preflight]     Qwen3.6-27B-UD-Q3_K_XL.gguf mmproj-F16.gguf \\" >&2
-    echo "[preflight]     --local-dir \${MODEL_DIR}/qwen3.6-27b-gguf/unsloth-q3kxl" >&2
-    echo "[preflight]   # (set MODEL_DIR first: export MODEL_DIR=\${MODEL_DIR:-/path/to/your/models})" >&2
-    echo "[preflight]   # mmproj lands at unsloth-q3kxl/ — move it up so the default --mmproj path resolves:" >&2
-    echo "[preflight]   #   mv \${MODEL_DIR}/qwen3.6-27b-gguf/unsloth-q3kxl/mmproj-F16.gguf \${MODEL_DIR}/qwen3.6-27b-gguf/" >&2
-    echo "[preflight]   (~16 GB total. setup.sh today only fetches the vLLM AutoRound weights;" >&2
-    echo "[preflight]    GGUF must be fetched separately for any llamacpp/* variant.)" >&2
-  fi
-  if [[ $hint_dflash -eq 1 ]]; then
-    echo "[preflight]   WITH_DFLASH_DRAFT=1 bash scripts/setup.sh qwen3.6-27b" >&2
-    echo "[preflight]   (downloads z-lab/Qwen3.6-27B-DFlash, ~1.75 GB; required for dual-dflash* composes)" >&2
-  fi
-  if [[ $hint_mtp -eq 1 ]]; then
-    echo "[preflight]   bash scripts/setup.sh qwen3.6-27b  (re-run with the right flags for MTP head)" >&2
-  fi
-  if [[ $hint_dflash -eq 0 ]] && [[ $hint_mtp -eq 0 ]] && [[ $hint_gguf -eq 0 ]]; then
-    echo "[preflight]   bash scripts/setup.sh qwen3.6-27b" >&2
+  _preflight_print_weight_hints "$model_dir" "${missing[@]}"
+  if _preflight_offer_fetch_missing "$compose_file" "$model_dir" "${missing[@]}"; then
+    return 0
   fi
   echo "[preflight] Skip this check:  PREFLIGHT_NO_COMPOSE_DEPS=1 bash scripts/switch.sh ..." >&2
   return 1
@@ -785,22 +1126,31 @@ preflight_autodetect_endpoint() {
     return 0   # both already set — caller knows what they're doing
   fi
 
-  # Scan for one of our containers + its `0.0.0.0:<host>->8000/tcp` mapping.
-  # Recognises the canonical club-3090 prefixes (vllm-qwen36-27b,
-  # llama-cpp-qwen36-27b, ik-llama-qwen36-27b, vllm-gemma-4-31b) plus the sglang experimental tree.
-  # Users running endpoint-first via `--url` to rebench-full.sh bypass this
-  # entirely (PREFLIGHT_NO_AUTODETECT=1 set there).
+  # Detect a running inference container by its ENGINE-INTERNAL port mapping
+  # (vLLM 8000 / llama.cpp 8080 / sglang 30000), NOT a hardcoded model-name
+  # allowlist — so any compose is found regardless of model: gemma-4-12b,
+  # qwen-35b-a3b, beellama, a BYO container, etc. (#310: the old allowlist only
+  # knew qwen36-27b / gemma-4-31b, so everything else silently fell back to 8020).
+  # Among matches, prefer a recognised club-3090 engine-family prefix; otherwise
+  # take the first. Users running endpoint-first via `--url` bypass this entirely
+  # (PREFLIGHT_NO_AUTODETECT=1 set there).
   #
-  # The `|| true` is load-bearing: grep -E returns 1 when no container
-  # matches, which under `set -euo pipefail` in the caller silently aborts
-  # rebench-full.sh before it reaches its own "endpoint not responding"
-  # error path. Empty `found_line` is what we want for the no-container case.
-  local found_line
-  found_line=$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
-    | grep -E '^(vllm-qwen36-27b|llama-cpp-qwen36-27b|ik-llama-qwen36-27b|vllm-gemma-4-31b|sglang-qwen36-27b)' \
-    | head -1 || true)
-  if [[ -z "$found_line" ]]; then
-    return 0   # nothing running; defaults stand
+  # The `|| true` is load-bearing: grep -E returns 1 when nothing matches, which
+  # under `set -euo pipefail` in the caller would silently abort rebench-full.sh
+  # before its own "endpoint not responding" path. Empty = the no-container case.
+  local engine_lines found_line
+  engine_lines=$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
+    | grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(8000|8080|30000)/tcp' || true)
+  if [[ -z "$engine_lines" ]]; then
+    return 0   # nothing serving on an engine port; defaults stand
+  fi
+  # Prefer a recognised club-3090 engine-family prefix when several match.
+  found_line=$(printf '%s\n' "$engine_lines" \
+    | grep -E '^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)' | head -1 || true)
+  [[ -z "$found_line" ]] && found_line=$(printf '%s\n' "$engine_lines" | head -1)
+  # Several inference containers up → we picked one; tell the user how to override.
+  if [[ "$(printf '%s\n' "$engine_lines" | grep -c .)" -gt 1 ]]; then
+    echo "[autodetect] multiple inference containers running; picked '${found_line%%|*}' — set CONTAINER=/URL= to override" >&2
   fi
 
   local detected_name detected_port
@@ -827,6 +1177,46 @@ preflight_autodetect_endpoint() {
     [[ -z "$explicit_container" ]] && note="container=${CONTAINER}"
     [[ -z "$explicit_url" ]] && note="${note:+$note }url=${URL}"
     echo "[autodetect] using running ${note}  (skip: PREFLIGHT_NO_AUTODETECT=1)" >&2
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Resolve the SERVED model name from the running endpoint's /v1/models when the
+# caller hasn't set MODEL explicitly. Mirrors what soak-test.sh / bench-agentic.sh
+# / quality-test.sh already do — so verify-full / verify-stress / bench / verify
+# send the model the server actually serves instead of a hardcoded qwen default.
+#
+# Why this exists (#372): report.sh autodetects container + URL + engine but NOT
+# the served model, so the verify/bench scripts fell back to MODEL=qwen3.6-27b-
+# autoround. Against a non-qwen vLLM endpoint (e.g. gemma-4-26b-a4b-awq) every
+# request 404'd ("The model `qwen3.6-27b-autoround` does not exist"). llama.cpp
+# ignores the request's model field, so the same wrong default silently "worked"
+# there (#371) — which is exactly what masked the bug.
+#
+# Sets MODEL in the caller's scope. No-op when MODEL is already set (an explicit
+# env/flag value always wins — critical for llama-swap / multi-model endpoints
+# where /v1/models returns the first, often wrong, registered model), when there
+# is no URL to query, or when the endpoint isn't reachable (the caller's own
+# reachability check then surfaces the real outage). Callers keep their own
+# last-resort literal after this, so behaviour is unchanged when detection no-ops.
+preflight_autodetect_model() {
+  [[ -n "${MODEL:-}" ]] && return 0
+  local url="${1:-${URL:-}}"
+  [[ -n "$url" ]] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  local detected
+  detected="$(curl -sf -m 5 "${url%/}/v1/models" 2>/dev/null \
+    | python3 -c "import json,sys
+try:
+    d = json.load(sys.stdin).get('data', [])
+    print(d[0]['id'] if d else '')
+except Exception:
+    print('')" 2>/dev/null || true)"
+  if [[ -n "$detected" ]]; then
+    MODEL="$detected"
+    echo "[autodetect] served model='${MODEL}' (from ${url%/}/v1/models; set MODEL= to override)" >&2
   fi
   return 0
 }

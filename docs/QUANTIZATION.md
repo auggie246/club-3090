@@ -53,10 +53,33 @@ vLLM and SGLang don't use GGUF — they load **safetensors** with these quant sc
 | **AutoRound** ⭐ | INT4 | ✅ (sign-gradient) | Intel's method; **what our shipped `vllm/dual` runs** (`qwen3.6-27b-autoround-int4`). Strong 4-bit quality. |
 | **AWQ** | INT4 | ✅ (activation-aware) | Protects salient channels by inspecting activations. Widely available. |
 | **GPTQ** | INT3/4/8 | ✅ (second-order) | Older, well-supported; AWQ/AutoRound usually edge it at 4-bit. |
-| **FP8 (e4m3/e5m2)** | 8 | ❌ | Native on Hopper+; on Ampere it's emulated. We use **fp8 mostly for the KV cache**, not weights. |
+| **FP8 (e4m3/e5m2)** | 8 | ❌ | **FP8 *weights* DO run on Ampere — via Marlin W8A16** (weights dequant for the matmul: real VRAM saving, no compute speedup; only Hopper+ multiply FP8 directly). Among the **highest-fidelity** practical quants (see §4a). An FP8 weight checkpoint is compressed-tensors → it **can't also use fp8 *KV*** — pair it with int8-PTH ([DTYPE_MATRIX](DTYPE_MATRIX.md)). Don't confuse FP8 *weights* with the fp8 *KV cache* (§5). |
 | **bitsandbytes** | 4/8 | ❌ | Easy/on-the-fly; lower quality-per-bit than AWQ/AutoRound. |
 
 These are conceptually the same idea as imatrix i-quants (calibrate, protect what matters) in a different ecosystem. There is **no GGUF↔safetensors interchange** — a quant is tied to its engine family.
+
+---
+
+## 4a. Picking a quant by fidelity (KLD) — and where QAT fits
+
+Method labels don't rank fidelity — **measure it.** The cleanest signal is **KL-divergence vs the BF16 model** (lower = closer to full precision). [Phaelon74's logit-capture sweep](https://github.com/vllm-project/vllm/pull/35961) on Qwen3.6-27B (one consistent instrument across quants):
+
+| Quant | Mean KLD | ~Size | Ampere path |
+|---|---|---|---|
+| INT8 (W8A16) | **0.009** | 34 GiB | Marlin W8A16 |
+| **FP8** | **0.023** | 29 GiB | Marlin W8A16 |
+| AWQ-BF16-INT4 | 0.042 | 27 GiB | Marlin int4 |
+| AWQ-INT4 | 0.051 | 20 GiB | Marlin int4 |
+| **AutoRound INT4** (our `vllm/dual`) | 0.063 | 18 GiB | Marlin int4 |
+| NVFP4 variants | 0.06–0.19 | — | **Blackwell-only — Ampere-dead** |
+
+- **Fidelity rises with bits; 8-bit PTQ (FP8/INT8) is already near-lossless** — hence "accuracy → FP8" as a default. INT4 trades fidelity for size/speed.
+- **Our shipped AutoRound INT4 is near the *bottom* of the practical pack** — not because AutoRound is bad, but because it's the *smallest* (18 GiB). A method label ("calibrated"/"QAT-adjacent") does **not** guarantee best KLD; the bigger/higher-bit quants win. Always measure for the specific model.
+- **KLD here is *weights-only*** (measured with full/BF16 KV). **KV-quant (fp8 / int8-PTH) adds a *separate* error** this number doesn't include → deployed fidelity = weight-KLD + KV-quant drift. The purest accuracy config is best-weights **+ BF16 KV**; a 1-byte KV (to reach max context) spends a little of that back.
+
+**Where QAT fits:** quantization-*aware* training fine-tunes *with* quantization simulated, so weights adapt → near-BF16 at low bits. Its advantage is **concentrated at ≤4-bit** — at 8-bit, PTQ is already near-lossless, so QAT adds little. So: want **4-bit + max fidelity** → a **QAT-int4** (e.g. Google's Gemma QAT) beats AutoRound/AWQ int4; want **max fidelity, size-flexible** → just use **8-bit PTQ (FP8/INT8)**, no QAT needed. PTQ methods that *approach* QAT without retraining: AutoRound (learns rounding), AWQ (activation-aware), GPTQ (2nd-order), QuIP#/AQLM (codebook, 2-bit), SpinQuant/QuaRot (rotation); the GGUF analogue is **imatrix** (§3).
+
+**Tiering principle:** **dual-card = fidelity tier, single-card = fit/speed tier.** A dual's distinct value is *capacity* — spend it on a higher-fidelity quant (FP8/INT8/AWQ) than the single's small INT4, not the same one.
 
 ---
 
@@ -69,9 +92,12 @@ Independent of the weight quant, you can quantize the **KV cache** — this is w
 | `f16` | 16 | all | Lossless, biggest. Rarely needed. |
 | `q8_0` | 8 | llama.cpp / ik | Near-lossless; good default when context is moderate. |
 | `q4_0` | 4 | llama.cpp / ik | Halves KV vs q8_0 → enables **262K on one 3090** (ik IQ4_KS). Tiny quality cost. |
-| `fp8_e5m2` | 8 | vLLM | Our `vllm/dual` default. |
+| `fp8_e5m2` | 8 | vLLM | Our `vllm/dual` default (AutoRound weights). |
+| **`int8_per_token_head`** | 8 | vLLM | ~1 byte/tok like fp8; **native in stock v0.22.0** for standard models (Gemma-4 needs the #40391 overlay). The KV path for **compressed-tensors weights (AWQ/FP8/INT8) at long context** — those can't use fp8 KV. |
 | **TQ3 (TurboQuant)** | 3 | vLLM (Genesis) | 3-bit KV — beats fp8 on long-context memory; powers our `dual-turbo`. See [TQ3_MTP_GENESIS.md](TQ3_MTP_GENESIS.md) + [CLIFFS.md](CLIFFS.md). |
 | `-khad` (modifier) | — | **ik only** | Hadamard transform on the K-cache → recovers accuracy lost to KV quantization, so you keep quality at q4_0/q8_0. |
+
+> ⚠️ **fp8 KV is rejected for compressed-tensors checkpoints** (AWQ / FP8 / INT8 weights): `--kv-cache-dtype fp8_e5m2` → `ValueError: … not supported with fp8 checkpoints`, regardless of the `--quantization` flag. Use **`int8_per_token_head`** there — `auto_round`/GPTQ weights are unaffected (they take fp8 KV fine). Full picker + the Gemma-4 #40391 caveat: [DTYPE_MATRIX](DTYPE_MATRIX.md).
 
 ---
 

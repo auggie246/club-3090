@@ -10,7 +10,7 @@ For *what the quants actually are* and how IQK compares to k-quants / i-quants /
 
 ## TL;DR
 
-- **Image:** `ghcr.io/ikawrakow/ik-llama-cpp:cu13-server` (cu13 = CUDA 13.x; matches our 13.2 host driver). Official, digest-pinnable. A `cu12` tag exists for older drivers.
+- **Image:** digest-pinned — `ghcr.io/ikawrakow/ik-llama-cpp@sha256:5f914f1c…` (a 2026-06-10 `cu13-server` build; cu13 = CUDA 13.x, matches our 13.2 host driver). **Composes pin the digest, not the rolling `:cu13-server` tag** — upstream retired the legacy speculative-decode flags (`-mtp` / `--draft-*` / `--spec-stage`) under the moving tag, which crash-looped MTP composes on a fresh pull (2026-06-13 flag churn); pinning a validated digest stops the recurrence. `docker pull …:cu13-server` fetches the current build; a `cu12` tag exists for older drivers.
 - **Composes:** `models/qwen3.6-27b/ik-llama/compose/single/`:
   - `iq4ks-mtp.yml` — MTP-only text (default)
   - `iq4ks-mtp-vision.yml` — MTP + vision
@@ -20,7 +20,7 @@ For *what the quants actually are* and how IQK compares to k-quants / i-quants /
 
 ```bash
 MODEL_DIR=/your/models docker compose \
-  -f models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp.yml up -d
+  -f models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp.yml up -d
 curl http://localhost:8020/v1/models
 ```
 
@@ -86,11 +86,11 @@ Or directly via compose:
 ```bash
 # MTP-only (default):
 MODEL_DIR=$MODEL_DIR docker compose \
-  -f models/qwen3.6-27b/ik-llama/compose/single/iq4ks-mtp.yml up -d
+  -f models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp.yml up -d
 
 # Two-stage ngram+MTP (code-optimized, experimental):
 MODEL_DIR=$MODEL_DIR docker compose \
-  -f models/qwen3.6-27b/ik-llama/compose/single/iq4ks-two-stage.yml up -d
+  -f models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/two-stage.yml up -d
 ```
 Defaults: q4_0 KV, 200K ctx (MTP) / 131K ctx (two-stage), MTP n=2, native template, thinking-off. Overrides:
 - **Max context:** **200K** is the max-safe default (fills cleanly with ~1.1 GB margin). 262144 is the model's native max but *boots ≠ fills* — `UBATCH_SIZE=512 CTX_SIZE=262144` boots but crosses the agent-safety margin at high fill, so 200K is the recommended ceiling (see [`docs/CLIFFS.md`](../CLIFFS.md)).

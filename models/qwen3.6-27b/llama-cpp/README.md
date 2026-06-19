@@ -24,15 +24,15 @@ For full pros/cons + general llama.cpp tuning, see [`/docs/engines/LLAMA_CPP.md`
 
 Three compose variants in [`compose/single/`](compose/single/) — all use the official `ghcr.io/ggml-org/llama.cpp` image (CUDA), **no custom build needed**, **no club-3090 patches** (unlike our vLLM track). MTP PR #22673 has merged upstream so this image has it natively. The composes are **pinned to build `server-cuda-b9246`** (validated 2026-05-20) — *not* the rolling `:server-cuda` tag, because that tag regressed at `b9282` (broken lib packaging → crash loop, [#187](https://github.com/noonghunna/club-3090/issues/187)). To follow a newer build, override `LLAMACPP_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda-bXXXX` (validate it first). Bench numbers were measured on `b9246`; expect ±5% drift on newer builds.
 
-### `single/mtp.yml` — MTP n=2, 200K ctx, no vision
+### `single/unsloth-q4km/mtp.yml` — MTP n=2, 200K ctx, no vision
 
 The single-card speed + context workhorse: ~51/60 TPS (narr/code), **200K ctx** (max-safe default @ `-ub 512` — fills cleanly with ~1.1 GB margin; 131K @ `-ub 1024` for faster prefill; 262K is the native max but *boots-not-fills*, see [`docs/CLIFFS.md`](../../../docs/CLIFFS.md)), 7/7 verify-stress boundary checks (incl. 60K + 91K needle recall), 102/150 (68%) on the 8-pack quality matrix. Best for IDE agents, opencode, Hermes, long-multi-turn agentic. Q4_K_M MTP GGUF (`unsloth/Qwen3.6-27B-MTP-GGUF` Q4_K_M).
 
-### `single/bounded-thinking.yml` — MTP n=2, 200K ctx, reasoning on, grammar per request
+### `single/unsloth-q4km/bounded-thinking.yml` — MTP n=2, 200K ctx, reasoning on, grammar per request
 
-Structured-CoT variant for llama.cpp. It is intentionally the same runtime envelope as `single/mtp.yml` — Q4_K_M MTP GGUF, q4_0 KV, `-ub 512`, 200K context, no vision — with `REASONING=on` as the default. The grammar is not baked into the server; clients pass GBNF in the OpenAI-compatible request body `grammar` field. Use [`tools/grammar-eval/deepseek-scratchpad.llamacpp.gbnf`](../../../tools/grammar-eval/deepseek-scratchpad.llamacpp.gbnf) as the recommended default, or pass the original andthattoo / Holiday alternates client-side. See [`docs/STRUCTURED_COT.md`](../../../docs/STRUCTURED_COT.md) for request examples and validation status.
+Structured-CoT variant for llama.cpp. It is intentionally the same runtime envelope as `single/unsloth-q4km/mtp.yml` — Q4_K_M MTP GGUF, q4_0 KV, `-ub 512`, 200K context, no vision — with `REASONING=on` as the default. The grammar is not baked into the server; clients pass GBNF in the OpenAI-compatible request body `grammar` field. Use [`tools/grammar-eval/deepseek-scratchpad.llamacpp.gbnf`](../../../tools/grammar-eval/deepseek-scratchpad.llamacpp.gbnf) as the recommended default, or pass the original andthattoo / Holiday alternates client-side. See [`docs/STRUCTURED_COT.md`](../../../docs/STRUCTURED_COT.md) for request examples and validation status.
 
-### `single/mtp-vision.yml` — MTP n=2, 160K ctx, vision on
+### `single/unsloth-q4km/mtp-vision.yml` — MTP n=2, 160K ctx, vision on
 
 Multimodal profile — combines MTP + vision (validated on build 9235, 2026-05-19). 160K default context on 24 GB with mmproj F16 mounted. Supports up to 192K with `UBATCH_SIZE=512`.
 
@@ -80,7 +80,7 @@ So ~10% TPS hit (56.5 → 50.9 narr) buys ~4× more context (49K → 192K). For 
 
 | Config | Quant | KV | Ctx | Vision | Narr TPS | Code TPS | Notes |
 |---|---|---|---|---|---|---|---|
-| docker-compose.yml | UD-Q3_K_XL | q4_0 | 262K | ✅ | 21 | 21 | Flat across context depth — same TPS at 65K and 262K |
+| unsloth-q4km/mtp.yml | UD-Q3_K_XL | q4_0 | 262K | ✅ | 21 | 21 | Flat across context depth — same TPS at 65K and 262K |
 | `+ --spec-type ngram-mod` | Q4_K_M | q8_0 | 32K | ❌ | 22 | **26** | +25% on code via draftless n-gram spec-decode |
 
 The Q3_K_XL number at 262K is **lower than community-reported 35-45 tok/s** ([Reddit](https://www.reddit.com/r/LocalLLaMA/comments/1sx8uok/) + earlier 2026-04-23 measurements showing 28.5 TPS on Q4_K_M). We're investigating whether mainline llama.cpp regressed between commits `9ab47e7d8` (2026-04-23) and `0d0764dfd` (current). For absolute speed today, **vLLM patched is ~2.5× faster** on the same hardware (51-55 narr / 67-70 code) — see [BENCHMARKS](../../../BENCHMARKS.md). llama.cpp's value proposition here is **simplicity + max context + multi-platform**, not throughput.
@@ -98,12 +98,12 @@ hf download unsloth/Qwen3.6-27B-MTP-GGUF Qwen3.6-27B-Q4_K_M.gguf \
 
 # 2. Launch via Docker compose (recommended)
 cd <repo>/models/qwen3.6-27b/llama-cpp/compose
-MODEL_DIR=$MODEL_DIR docker compose -f single/mtp.yml up -d
+MODEL_DIR=$MODEL_DIR docker compose -f single/unsloth-q4km/mtp.yml up -d
 curl http://localhost:8020/v1/models
 ```
 
 For host-built llama.cpp (AMD/Intel/Apple Silicon without Docker), use the
-same flags from `compose/single/mtp.yml` adapted to your binary. Key flags:
+same flags from `compose/single/unsloth-q4km/mtp.yml` adapted to your binary. Key flags:
 `-ngl 99 -fa on -c 262144 -ub 512 --cache-type-k q4_0 --cache-type-v q4_0
 --spec-type draft-mtp --spec-draft-n-max 2 --jinja --reasoning off`.
 

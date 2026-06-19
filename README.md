@@ -4,6 +4,10 @@
 
 If you have one or two RTX 3090s and want to run modern LLMs at home, in a homelab, or as a dev backend — this repo collects the working configs, patches, and benchmarks.
 
+> 🎯 **4090 or 5090 owner?** The composes run cross-rig — contributors have benched both with measured numbers: **[Can I use a 4090? →](docs/FAQ.md#can-i-use-a-4090-instead-of-a-3090)** · **[Can I use a 5090? →](docs/FAQ.md#can-i-use-a-5090)**. The tooling is calibrated for 3090s but the configs are class-aware; per-class gotchas (4090's tighter idle VRAM, 5090's 32 GB envelope) + cross-rig benchmark rows live in the FAQ.
+
+> 🎨 **Want image generation too?** The **[Image Studio bundle](docs/ai-studio/image.md)** runs Ideogram-4 image gen + a chat model + Open WebUI together on two GPUs — one command: `bash scripts/setup-image-studio.sh`.
+
 ---
 
 ## Quick start
@@ -28,16 +32,23 @@ bash scripts/setup.sh
 
 # 3. Pick a config + boot it (interactive wizard: asks model → GPUs → projects VRAM budget)
 bash scripts/launch.sh
-#    Or skip the wizard:
-#      bash scripts/launch.sh --variant llamacpp/default    # single-card chat (recommended) — cliff-immune, 200K @ -ub 512, ~51/60 TPS
-#      bash scripts/launch.sh --variant ik-llama/iq4ks-mtp  # single-card FASTEST — ~60/69 TPS, leanest VRAM (ik_llama IQK quant)
+#    Or let the resolver pick for your model + hardware (.env pin ‖ curated default):
+#      bash scripts/launch.sh --variant qwen3.6-27b/default # YOUR default for this model
+#    Or skip the wizard with an explicit config:
+#      bash scripts/launch.sh --variant beellama/dflash     # single-card BLESSED default — code-fast (~100 code / 50 narr TPS), DFlash spec-dec (⚠️ unofficial multi-arch image; sm_89/120 unvalidated — see docs/INFERENCE_ENGINES.md)
+#      bash scripts/launch.sh --variant ik-llama/iq4ks-mtp  # single-card BALANCED alt — ~63/69 TPS, 200K ctx + vision, leanest VRAM (ik_llama IQK quant)
+#      bash scripts/launch.sh --variant llamacpp/default    # single-card cliff-immune ALT — 200K @ -ub 512, ~51/60 TPS
 #      bash scripts/launch.sh --variant llamacpp/mtp-vision # single-card 49K + MTP + vision
 #      bash scripts/launch.sh --variant vllm/dual           # dual-card 262K + vision (vLLM single-card paths blocked on #167)
 #    Or partial flags (wizard fills the rest):
 #      bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
 #      bash scripts/launch.sh --tp 2 --pp 1               # override vLLM parallelism
-#    See all variants:
-#      bash scripts/switch.sh --list
+#    See the variants this machine can run + the per-model defaults view
+#    (hardware-filtered by GPU count; add --all to see every variant):
+#      bash scripts/switch.sh --list          # runnable here
+#      bash scripts/switch.sh --list --all    # everything
+#    Pin your own default so bare `launch.sh` goes straight there:
+#      bash scripts/switch.sh --set-default ik-llama/iq4ks-mtp   # e.g. prefer the balanced ik-llama path over the beellama default; clear: --clear-default qwen3.6-27b
 
 # 4. Sanity test (launcher already printed this curl)
 curl -sf http://localhost:8020/v1/chat/completions \
@@ -100,11 +111,13 @@ Each hardware page lists every supported model with the working composes for tha
 | Model | Status | Card counts | Engines | Highlights |
 |---|---|---|---|---|
 | **[Qwen3.6-27B](models/qwen3.6-27b/)** | Production-ready ⭐ | 1× / 2× 3090 | vLLM ✅ · llama.cpp ✅ · ik_llama ✅ | Vision · tools · MTP n=3 · up to 262K ctx · vLLM dual = 89/127 TPS · llama.cpp single = 200K max-safe, no prefill cliffs · ik_llama IQ4_KS = ~60/69 TPS (fastest single-card) |
-| **[Gemma 4 31B](models/gemma-4-31b/)** | Production-ready (dual-card only on Ampere 24 GB) | 2× 3090 only ¹ | vLLM ✅ · llama.cpp ❌ | Vision · tools · MTP n=3 (Google official drafter) **OR** DFlash n=7 (z-lab drafter) · up to 262K ctx via INT8 PTH KV (PR [#40391](https://github.com/vllm-project/vllm/pull/40391) vendored) · MTP dual = 106/141 TPS at 32K, 95/126 at 262K · DFlash dual = 105/177 TPS at 32K (code-optimal) |
-| **[Qwen3.6 35B-A3B](models/qwen3.6-35b-a3b/)** ⭐ NEW v0.7.3 | Preview (production-track blocked on Genesis v7.73.x) | 2× 3090 | vLLM ✅ (preview) · llama.cpp ❌ | **MoE (256 experts × 8 active, ~3 B active params)** · vision · tools · upstream native loader via [vLLM PR #42521](https://github.com/vllm-project/vllm/pull/42521) · preview dual = **182/177 TPS at 16K** (no MTP, no TQ3, no Genesis) |
-| **[Gemma 4 26B-A4B](models/gemma-4-26b-a4b/)** ⭐ NEW v0.7.3 | Production via AWQ (Intel AutoRound INT4 blocked on Ampere) | 2× 3090 | vLLM ✅ (AWQ overlay) · llama.cpp ❌ | **MoE (128 experts × 8 active, ~4 B active params)** · vision · tools · AWQ dual = **139/139 TPS at 32K**, CV 0.2% / 0.0% |
+| **[Gemma 4 31B](models/gemma-4-31b/)** | Production-ready | 1× ¹ / 2× 3090 | vLLM ✅ (dual) · llama.cpp ⚠️ (community fork; mainline blocked on FA hdim=512) | Vision · tools · MTP n=3 (Google official drafter) **OR** DFlash n=7 (z-lab drafter) · up to 262K ctx via INT8 PTH KV (PR [#40391](https://github.com/vllm-project/vllm/pull/40391) vendored) · MTP dual = 106/141 TPS at 32K, 95/126 at 262K · DFlash dual = 105/177 TPS at 32K (code-optimal) · **beellama.cpp = single-card default** ⭐ 47/88 TPS, 131–200K ctx, 109–114/150 8-pack ([discussion #239](https://github.com/noonghunna/club-3090/discussions/239)) |
+| **[Qwen3.6 35B-A3B](models/qwen3.6-35b-a3b/)** | Production-ready (ik-llama single-card · vLLM dual) | 1× / 2× 3090 | vLLM ✅ · ik_llama ✅ · llama.cpp ✅ (mainline runs it — see `docs/HARDWARE.md`; ik_llama is the shipped single-card path) | **MoE (256 experts × 8 active, ~3 B active params)** · vision · tools · **ik_llama `fit-mtp.yml` single-card (Mudler APEX I-Compact)** = 103/149 TPS at 196K, hermes 11/20 + aider 12/30 + cli 12/40 ([PR #243](https://github.com/noonghunna/club-3090/pull/243)) · ik_llama `byteshape-iq4xs` single-card = 113/129 TPS at full 262K, 110/150 8-pack ([PR #293](https://github.com/noonghunna/club-3090/pull/293)) · vLLM dual = 178/174 TPS at 262K + vision (v0.22.0 stable; MTP net-negative on this MoE at TP=2) |
+| **[Gemma 4 26B-A4B](models/gemma-4-26b-a4b/)** | Production via AWQ (Intel AutoRound INT4 blocked on Ampere) | 2× 3090 ² | vLLM ✅ (AWQ overlay) · llama.cpp ❌ | **MoE (128 experts × 8 active, ~4 B active params)** · vision · tools · AWQ dual = **139/139 TPS at 32K**, CV 0.2% / 0.0% |
 
-¹ Single-card boot OOMs on Ampere 24 GB regardless of KV format. Single-card Gemma 4 is feasible on 32 GB+ GPUs (validated on RTX 5090 32 GB by [@apnar](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042)).
+¹ Single-card Gemma 4 on Ampere 24 GB: vLLM + mainline llama.cpp are blocked (head_dim=512 FA wall, no Ampere FA kernel yet). The community **beellama.cpp** fork builds with `FA_ALL_QUANTS=ON` and runs cleanly on a single 3090 — 47/88 TPS, 100–150K ctx, 109/114 8-pack (validated 2026-05-27). 32 GB+ GPUs run the standard vLLM path (validated on RTX 5090 32 GB by [@apnar](https://github.com/noonghunna/club-3090/discussions/67#discussioncomment-16832042)).
+
+² Gemma 4 26B-A4B single-card not yet tested on Ampere; should fit on a 24 GB 3090 at modest context but the configs are dual-card-only today.
 
 More models coming — they go under `models/<name>/` with the same internal pattern.
 
@@ -163,8 +176,9 @@ When filing a bug, sharing cross-rig data, or replying to a triage thread, gener
 # Quick report (~2 sec) — hardware + stack + boot-log highlights
 bash scripts/report.sh
 
-# Capture to a file ready to paste into a GitHub issue/discussion
-bash scripts/report.sh > my-rig.md
+# Capture the full cross-rig pass to a file, ready to paste into an issue/discussion
+# (~35 min — drop --full for a ~2 sec hardware-only capture)
+bash scripts/report.sh --full > my-rig.md
 
 # Add live test output (pick what the thread needs):
 bash scripts/report.sh --verify    # + verify-full.sh         (~1-2 min)
@@ -178,6 +192,39 @@ bash scripts/report.sh --no-redact
 ```
 
 `--soak` is its own flag because a config can pass verify + stress + bench and still fail the multi-turn continuous soak (Cliff 2b at ~25K accumulated tokens) — soak is currently the only test that catches that agentic-workload failure mode. See [`docs/CLIFFS.md`](docs/CLIFFS.md).
+
+### If `launch.sh` / `switch.sh` won't boot — load a compose directly
+
+The launcher scripts wrap the boot in a preflight (hardware / free-VRAM checks), `.env` parsing, and a Python-driven variant→compose registry. If any of those misfire — a false preflight failure, a CRLF/`.env` quirk on Windows, or missing PyYAML — bypass them and bring the compose up with plain Docker. Two escalations (assumes you've already downloaded the weights — Quick start step 2):
+
+```bash
+# 1. Skip ONLY the hardware / free-VRAM preflight (keeps .env + registry):
+bash scripts/switch.sh --force llamacpp/default
+
+# 2. Bypass the scripts entirely — boot the compose file with Docker directly.
+#    Set MODEL_DIR to wherever your weights live; -f points at the compose.
+#    Layout: models/<model>/<engine>/compose/<topology>/<quant>/<serving>.yml
+
+# single-card llama.cpp (cliff-immune fallback; no nightly/Genesis dependency) — serves on :8020
+MODEL_DIR=/path/to/models docker compose \
+  -f models/qwen3.6-27b/llama-cpp/compose/single/unsloth-q4km/mtp.yml up -d
+
+# single-card ik_llama (fastest single-card path) — :8020
+MODEL_DIR=/path/to/models docker compose \
+  -f models/qwen3.6-27b/ik-llama/compose/single/ubergarm-iq4ks/mtp.yml up -d
+
+# dual-card vLLM — :8010
+MODEL_DIR=/path/to/models docker compose \
+  -f models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml up -d
+
+# verify it's serving (use the port from the comment above), then stop it the same way:
+curl -s http://localhost:8020/v1/models | jq .
+docker compose -f <the-same-compose-file> down
+```
+
+`MODEL_DIR` is the only env var you must set — it's mounted as `/models`, and defaults to the in-repo `models-cache/` if your weights live there. Everything else has a sane default baked in; each compose **header** documents its own overrides (`GGUF_FILE`, `CTX_SIZE`, `UBATCH_SIZE`, …) and the exact `docker compose` line. `bash scripts/switch.sh --list` lists the variants runnable on this machine (hardware-filtered by GPU count; `--all` shows every variant), and a successful `switch.sh` run prints the compose path it used — so you can always recover the `-f` target.
+
+> ⚠ Launching directly skips the preflight that catches under-VRAM / wrong-GPU-count mistakes. If the container exits, check `docker logs <container> 2>&1 | tail -50`.
 
 ---
 
@@ -210,13 +257,13 @@ club-3090/
 │       ├── CHANGELOG.md                   model-specific dated history
 │       ├── vllm/
 │       │   ├── README.md                  "vLLM recipes for Qwen3.6-27B"
-│       │   ├── compose/                   docker-compose files (single-card + dual-card variants)
+│       │   ├── compose/<topology>/<quant>/  compose files (e.g. dual/autoround-int4/fp8-mtp.yml)
 │       │   └── patches/                   tolist_cudagraph + Marlin pad README + Genesis pointer
 │       ├── llama-cpp/
 │       │   ├── README.md                  "llama.cpp composes for Qwen3.6-27B"
-│       │   └── compose/single/            mtp.yml + mtp-vision.yml (single-card MTP)
+│       │   └── compose/single/unsloth-q4km/ mtp.yml + mtp-vision.yml + bounded-thinking.yml
 │       ├── ik-llama/
-│       │   └── compose/single/            iq4ks-mtp.yml + iq4ks-mtp-vision.yml + iq4ks-two-stage.yml (IQK quant)
+│       │   └── compose/single/ubergarm-iq4ks/ mtp.yml + mtp-vision.yml + two-stage.yml (IQK quant)
 │       └── sglang/
 │           └── README.md                  blocked status — what would unblock it on this model
 ├── scripts/                               shared, model-aware

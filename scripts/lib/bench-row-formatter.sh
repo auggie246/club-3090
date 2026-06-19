@@ -112,46 +112,59 @@ def infer_compose_path(container_name: str, served: str, tp: str) -> str:
     model_root = "models/gemma-4-31b/vllm/compose" if is_gemma else "models/qwen3.6-27b/vllm/compose"
 
     mapping = {
-        "dual-int8-tq3": "dual/int8-tq3.yml",
-        "dual-tq3-mtp-genesis": "dual/tq3-mtp-genesis.yml",
-        "dual-tq3-nomtp": "dual/tq3-nomtp.yml",
-        "dual-tq3-mtp": "dual/tq3-mtp.yml",
-        "dual-int8": "dual/int8.yml",
-        "dual-bf16": "dual/bf16.yml",
-        "dual-dflash-noviz": "dual/dflash-noviz.yml",
-        "dual-dflash": "dual/dflash.yml",
-        "dual-turbo": "dual/turbo.yml",
-        "dual": "dual/docker-compose.yml",
-        "minimal": "single/minimal.yml",
-        "tools-text": "single/tools-text.yml",
-        "long-text-no-mtp": "single/long-text-no-mtp.yml",
-        "long-text": "single/long-text.yml",
-        "long-vision": "single/long-vision.yml",
+        "dual-int8-tq3": "dual/autoround-int4/int8-tq3.yml",
+        "dual-tq3-mtp-genesis": "dual/autoround-int4/tq3-mtp-genesis.yml",
+        "dual-tq3-nomtp": "dual/autoround-int4/tq3-nomtp.yml",
+        "dual-tq3-mtp": "dual/autoround-int4/tq3-mtp.yml",
+        "dual-int8": "dual/autoround-int4/int8.yml",
+        "dual-bf16": "dual/autoround-int4/bf16.yml",
+        "dual-dflash-noviz": "dual/autoround-int4/dflash-noviz.yml",
+        "dual-dflash": "dual/autoround-int4/dflash.yml",
+        "dual-turbo": "dual/autoround-int4/turbo.yml",
+        "dual": "dual/autoround-int4/fp8-mtp.yml",
+        "minimal": "single/autoround-int4/minimal.yml",
+        "tools-text": "single/autoround-int4/tools-text.yml",
+        "long-text-no-mtp": "single/autoround-int4/long-text-no-mtp.yml",
+        "long-text": "single/autoround-int4/long-text.yml",
+        "long-vision": "single/autoround-int4/long-vision.yml",
     }
     for needle, suffix in mapping.items():
         if needle in name:
             return f"{model_root}/{suffix}"
     if tp == "4":
-        return "models/qwen3.6-27b/vllm/compose/multi4/docker-compose.yml"
+        return "models/qwen3.6-27b/vllm/compose/multi4/autoround-int4/fp8-mtp.yml"
     if tp == "2":
-        return f"{model_root}/dual/docker-compose.yml"
-    return f"{model_root}/single/docker-compose.yml"
+        return f"{model_root}/dual/autoround-int4/fp8-mtp.yml"
+    return f"{model_root}/single/autoround-int4/tq3-mtp.yml"
 
 
 def compose_display(compose_path: str, served: str) -> str:
-    path = compose_path.replace("\\", "/")
+    path = rel(compose_path).replace("\\", "/")
+    try:
+        sys.path.insert(0, str(ROOT))
+        from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY, DEFAULTS
+
+        by_path = {entry["compose_path"]: (key, entry) for key, entry in COMPOSE_REGISTRY.items()}
+        hit = by_path.get(path)
+        if hit is not None:
+            _key, entry = hit
+            parts = Path(path).parts
+            topology = parts[parts.index("compose") + 1]
+            engine_dir = parts[parts.index(entry["model"]) + 1]
+            default_key = DEFAULTS.get((entry["model"], engine_dir, topology))
+            if default_key and COMPOSE_REGISTRY[default_key]["compose_path"] == path:
+                return f"{engine_dir}/default" if topology == "single" else f"{engine_dir}/{topology}/default"
+            quant = parts[parts.index("compose") + 2]
+            base = Path(path).stem
+            if quant == entry.get("weights_variant") == "autoround-int4":
+                return f"{topology}-{base}"
+            return f"{topology}-{quant}-{base}"
+    except Exception:
+        pass
+
     parts = path.split("/")
     base = parts[-1] if parts else path
     parent = parts[-2] if len(parts) >= 2 else ""
-    is_gemma = "gemma" in served or "gemma-4-31b" in path
-
-    if base == "docker-compose.yml":
-        if parent == "dual":
-            return "dual.yml"
-        if parent == "multi4":
-            return "dual4.yml"
-        if parent == "single":
-            return "vllm/gemma-mtp-tp1" if is_gemma else "vllm/default"
     if parent in {"dual", "multi4"} and not base.startswith(f"{parent}-"):
         return f"{parent}-{base}"
     return base
